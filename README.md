@@ -41,7 +41,7 @@
 
 | Устройство                  | Архитектура                            | Скачать                                                                                                                               | Размер | Примечание                                                 |
 | :-------------------------- | :------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------ | -----: | :--------------------------------------------------------- |
-| **Windows**                 | `x64` (Intel / AMD)                    | **[V3-Code-0.1.11-x64.exe](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-x64.exe)**                 | 375 MB | NSIS-установщик + встроенный Linux x64 WSL-рантайм `v3`    |
+| **Windows**                 | `x64` (Intel / AMD)                    | **[V3-Code-0.1.11-x64.exe](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-x64.exe)**                 | 200 MB | NSIS-установщик для Windows 10/11 (x64)                    |
 | **Windows**                 | `arm64` (Snapdragon / ARM)             | **[V3-Code-0.1.11-arm64.exe](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-arm64.exe)**             | 183 MB | NSIS-установщик для Windows on ARM                         |
 | **macOS**                   | Apple Silicon (`M1–M4`)                | **[V3-Code-0.1.11-arm64.zip](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-arm64.zip)**             | 212 MB | Готовый `V3 Code.app` с нативными аддонами Darwin arm64    |
 | **macOS**                   | Intel (`x64`)                          | **[V3-Code-0.1.11-x64.zip](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-x64.zip)**                 | 217 MB | Готовый `V3 Code.app` с нативными аддонами Darwin x64      |
@@ -161,7 +161,7 @@ sha256sum -c SHA256SUMS.txt
 
 - **Локальные AI-агенты:** Claude Code, Codex, OpenCode, Cursor, Grok, Kiro, Pi, Muse Code, локальные ACP-агенты.
 - **Git и трекеры:** локальный Git (worktrees, diff-просмотр, ветки, коммиты) + интеграции с GitHub, GitLab, Bitbucket, Forgejo, Azure DevOps и Linear (работают только при явной настройке пользователем).
-- **Windows + WSL:** установщик `V3-Code-0.1.11-x64.exe` включает изолированный Linux-рантайм `v3` (`~/.v3/wsl-runtime`) для нативной работы внутри WSL.
+- **Windows + WSL:** десктопная сборка поддерживает работу с WSL-дистрибутивами (или можно запускать автономный `v3-0.1.11-linux-x64.tar.gz` напрямую внутри WSL).
 
 ---
 
