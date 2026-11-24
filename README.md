@@ -8,7 +8,7 @@
 
 <br />
 
-[![Release](https://img.shields.io/badge/release-v0.1.11-10B981?style=flat-square)](../../releases/latest)
+[![Release](https://img.shields.io/badge/release-v0.1.11-10B981?style=flat-square)](https://github.com/fillvad-cyp/v3-code/releases/tag/v0.1.11)
 [![Telemetry](https://img.shields.io/badge/telemetry-0%20bytes-059669?style=flat-square)](#что-вырезано-и-усилено)
 [![Auto--Updates](https://img.shields.io/badge/auto--updates-disabled-059669?style=flat-square)](#что-вырезано-и-усилено)
 [![Platforms](https://img.shields.io/badge/platforms-Linux%20%7C%20Windows%20%7C%20macOS%20%7C%20Android%20%7C%20CLI-0F172A?style=flat-square)](#скачать-для-вашего-устройства)
@@ -35,31 +35,31 @@
 
 ## Скачать для вашего устройства
 
-Все готовые сборки опубликованы в разделе **[Releases → `v0.1.11`](../../releases/latest)** с контрольными суммами `SHA256SUMS.txt`.
+Все готовые сборки опубликованы в **[Releases → `v0.1.11`](https://github.com/fillvad-cyp/v3-code/releases/tag/v0.1.11)** с контрольными суммами **[SHA256SUMS.txt](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/SHA256SUMS.txt)**. Нажмите на нужный файл — скачивание начнётся сразу.
 
 ### Desktop и Mobile
 
-| Устройство                  | Архитектура                            | Файл в Releases                  | Примечание                                                 |
-| :-------------------------- | :------------------------------------- | :------------------------------- | :--------------------------------------------------------- |
-| **Windows**                 | `x64` (Intel / AMD)                    | `V3-Code-0.1.11-x64.exe`         | NSIS-установщик + встроенный Linux x64 WSL-рантайм `v3`    |
-| **Windows**                 | `arm64` (Snapdragon / ARM)             | `V3-Code-0.1.11-arm64.exe`       | NSIS-установщик для Windows on ARM                         |
-| **macOS**                   | Apple Silicon (`M1–M4`)                | `V3-Code-0.1.11-arm64.zip`       | Готовый `V3 Code.app` с нативными аддонами Darwin arm64    |
-| **macOS**                   | Intel (`x64`)                          | `V3-Code-0.1.11-x64.zip`         | Готовый `V3 Code.app` с нативными аддонами Darwin x64      |
-| **Linux** (универсальный)   | `x86_64`                               | `V3-Code-0.1.11-x86_64.AppImage` | Запуск без установки (`chmod +x`), нативные утилиты внутри |
-| **Linux** (Debian / Ubuntu) | `amd64`                                | `V3-Code-0.1.11-amd64.deb`       | Системный пакет `v3code`, схема `v3code://`                |
-| **Android**                 | `arm64-v8a` / `armeabi-v7a` / `x86_64` | `V3-Code-0.1.11-android.apk`     | Release APK (`org.v3code.app`), готов к установке          |
+| Устройство                  | Архитектура                            | Скачать                                                                                                                               | Размер | Примечание                                                 |
+| :-------------------------- | :------------------------------------- | :------------------------------------------------------------------------------------------------------------------------------------ | -----: | :--------------------------------------------------------- |
+| **Windows**                 | `x64` (Intel / AMD)                    | **[V3-Code-0.1.11-x64.exe](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-x64.exe)**                 | 375 MB | NSIS-установщик + встроенный Linux x64 WSL-рантайм `v3`    |
+| **Windows**                 | `arm64` (Snapdragon / ARM)             | **[V3-Code-0.1.11-arm64.exe](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-arm64.exe)**             | 183 MB | NSIS-установщик для Windows on ARM                         |
+| **macOS**                   | Apple Silicon (`M1–M4`)                | **[V3-Code-0.1.11-arm64.zip](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-arm64.zip)**             | 212 MB | Готовый `V3 Code.app` с нативными аддонами Darwin arm64    |
+| **macOS**                   | Intel (`x64`)                          | **[V3-Code-0.1.11-x64.zip](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-x64.zip)**                 | 217 MB | Готовый `V3 Code.app` с нативными аддонами Darwin x64      |
+| **Linux** (универсальный)   | `x86_64`                               | **[V3-Code-0.1.11-x86_64.AppImage](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-x86_64.AppImage)** | 238 MB | Запуск без установки (`chmod +x`), нативные утилиты внутри |
+| **Linux** (Debian / Ubuntu) | `amd64`                                | **[V3-Code-0.1.11-amd64.deb](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-amd64.deb)**             | 195 MB | Системный пакет `v3code`, схема `v3code://`                |
+| **Android**                 | `arm64-v8a` / `armeabi-v7a` / `x86_64` | **[V3-Code-0.1.11-android.apk](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-android.apk)**         | 195 MB | Release APK (`org.v3code.app`), готов к установке          |
 
 ### Автономный CLI + Server + Web UI (Node.js не требуется)
 
 Единый standalone-архив (Node 26 SEA): запускает локальный сервер + встроенный Web UI на порту `3873` (`~/.v3/`).
 
-| Платформа                           | Архитектура             | Архив в Releases                |
-| :---------------------------------- | :---------------------- | :------------------------------ |
-| **Linux** (VPS / сервер / локально) | `x64`                   | `v3-0.1.11-linux-x64.tar.gz`    |
-| **macOS**                           | Apple Silicon (`arm64`) | `v3-0.1.11-darwin-arm64.tar.gz` |
-| **macOS**                           | Intel (`x64`)           | `v3-0.1.11-darwin-x64.tar.gz`   |
-| **Windows**                         | `x64`                   | `v3-0.1.11-win32-x64.zip`       |
-| **Windows**                         | `arm64`                 | `v3-0.1.11-win32-arm64.zip`     |
+| Платформа                           | Архитектура             | Скачать                                                                                                                             | Размер |
+| :---------------------------------- | :---------------------- | :---------------------------------------------------------------------------------------------------------------------------------- | -----: |
+| **Linux** (VPS / сервер / локально) | `x64`                   | **[v3-0.1.11-linux-x64.tar.gz](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/v3-0.1.11-linux-x64.tar.gz)**       | 177 MB |
+| **macOS**                           | Apple Silicon (`arm64`) | **[v3-0.1.11-darwin-arm64.tar.gz](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/v3-0.1.11-darwin-arm64.tar.gz)** | 143 MB |
+| **macOS**                           | Intel (`x64`)           | **[v3-0.1.11-darwin-x64.tar.gz](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/v3-0.1.11-darwin-x64.tar.gz)**     | 146 MB |
+| **Windows**                         | `x64`                   | **[v3-0.1.11-win32-x64.zip](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/v3-0.1.11-win32-x64.zip)**             | 161 MB |
+| **Windows**                         | `arm64`                 | **[v3-0.1.11-win32-arm64.zip](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/v3-0.1.11-win32-arm64.zip)**         | 134 MB |
 
 <details>
 <summary><strong>Инструкции по установке для каждой платформы (macOS, Windows, Linux, Android, iOS)</strong></summary>
