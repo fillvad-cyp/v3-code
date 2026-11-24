@@ -96,7 +96,7 @@ export function cliArchivePlatformKey(platform: BuildPlatform, arch: BuildArch):
 }
 
 export function cliArchiveStem(version: string, platform: BuildPlatform, arch: BuildArch): string {
-  return `t3-${version}-${cliArchivePlatformKey(platform, arch)}`;
+  return `v3-${version}-${cliArchivePlatformKey(platform, arch)}`;
 }
 
 export function cliArchiveFileName(version: string, platform: BuildPlatform, arch: BuildArch) {
@@ -169,7 +169,7 @@ const stageRuntimeExternals = Effect.fn("stageRuntimeExternals")(function* (inpu
   yield* fs.writeFileString(
     path.join(input.stageDir, "package.json"),
     `${yield* encodeJsonString({
-      name: "t3-runtime",
+      name: "v3-runtime",
       version: input.version,
       private: true,
       packageManager: rootPackageJson.packageManager,
@@ -625,20 +625,29 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     path.join(webClient, "index.html"),
     "Run `vp run --filter v3code build` first.",
   );
-  yield* requireInput(
-    resourceMonitorDir,
-    "Build the resource monitor or pass --resource-monitor-dir.",
-  );
+  const hasResourceMonitor = yield* fs.exists(resourceMonitorDir);
+  if (!hasResourceMonitor && Option.isSome(input.resourceMonitorDir)) {
+    return yield* new CliArchiveInputMissingError({
+      inputPath: resourceMonitorDir,
+      hint: "Build the resource monitor or omit --resource-monitor-dir.",
+    });
+  }
 
   const stem = cliArchiveStem(input.version, input.platform, input.arch);
-  const stageRoot = yield* fs.makeTempDirectoryScoped({ prefix: "t3-cli-archive-" });
+  const stageRoot = yield* fs.makeTempDirectoryScoped({ prefix: "v3-cli-archive-" });
   const contentDir = path.join(stageRoot, stem);
   yield* fs.makeDirectory(contentDir, { recursive: true });
 
   yield* Effect.log(`[cli-archive] Staging ${stem}...`);
   yield* fs.copyFile(builtExecutable, path.join(contentDir, executableName));
   yield* stageWebClient(webClient, path.join(contentDir, "client"));
-  yield* fs.copy(resourceMonitorDir, path.join(contentDir, "resource-monitor"));
+  if (hasResourceMonitor) {
+    yield* fs.copy(resourceMonitorDir, path.join(contentDir, "resource-monitor"));
+  } else {
+    yield* Effect.logWarning(
+      `[cli-archive] No resource-monitor directory at ${resourceMonitorDir}; packaging without optional resource monitor.`,
+    );
+  }
   yield* stageRuntimeExternals({
     repoRoot,
     stageDir: contentDir,
@@ -660,12 +669,18 @@ const buildCliArchive = Effect.fn("buildCliArchive")(function* (input: {
     });
   }
   if (input.platform === "mac") {
-    yield* signMacArchiveContents({
-      repoRoot,
-      contentDir,
-      executablePath,
-      notarySubmissionFile: input.notarySubmissionFile,
-    });
+    if (hostPlatform === "darwin") {
+      yield* signMacArchiveContents({
+        repoRoot,
+        contentDir,
+        executablePath,
+        notarySubmissionFile: input.notarySubmissionFile,
+      });
+    } else {
+      yield* Effect.logWarning(
+        `[cli-archive] Skipping macOS codesign on ${hostPlatform} host; sign ad hoc on macOS with \`codesign --force --sign - ${executableName}\`.`,
+      );
+    }
   } else if (input.platform === "win") {
     yield* signWindowsExecutable(executablePath);
   }

@@ -11,8 +11,11 @@ module.exports = async ({ appOutDir, electronPlatformName, arch, packager }) => 
     return;
   }
   // Generating the cache runs the bundle, and a PR preview's bundle must never run next to signing secrets.
-  if (process.env.T3CODE_DESKTOP_UNTRUSTED_BUNDLE === "true") {
-    console.log("[server-compile-cache] Skipping untrusted bundle");
+  if (
+    process.env.T3CODE_DESKTOP_UNTRUSTED_BUNDLE === "true" ||
+    process.env.V3CODE_SKIP_COMPILE_CACHE === "1"
+  ) {
+    console.log("[server-compile-cache] Skipping optional server bytecode pre-warming");
     return;
   }
   const targetArch = ["ia32", "x64", "armv7l", "arm64", "universal"][arch];

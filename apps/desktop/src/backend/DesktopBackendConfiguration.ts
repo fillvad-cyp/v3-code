@@ -451,7 +451,7 @@ const runWslPreflight = Effect.fn("desktop.backendConfiguration.wslPreflight")(f
           _tag: "Ready",
           runningDistro,
           windowsEntryPath: environment.backendEntryPath,
-          runtime: { kind: "executable", entryPath: `${runtime.linuxAppRoot}/t3` },
+          runtime: { kind: "executable", entryPath: `${runtime.linuxAppRoot}/v3` },
           resolvedPath: stagedProbe.resolvedPath,
           t3Home: stagedProbe.t3Home,
           runtimeId: input.runtimeArchive.runtimeId,

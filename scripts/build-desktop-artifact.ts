@@ -1544,6 +1544,8 @@ const stageClerkPasskeyNativeBinaries = Effect.fn("stageClerkPasskeyNativeBinari
   platform: typeof BuildPlatform.Type,
   arch: typeof BuildArch.Type,
 ) {
+  const artifacts = resolveClerkPasskeyNativeArtifacts(platform, arch);
+  if (artifacts.length === 0) return;
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const packageEntryPath = yield* fs.realPath(
@@ -1552,7 +1554,7 @@ const stageClerkPasskeyNativeBinaries = Effect.fn("stageClerkPasskeyNativeBinari
   const packageDir = path.dirname(packageEntryPath);
   const packageRequire = NodeModule.createRequire(packageEntryPath);
 
-  for (const artifact of resolveClerkPasskeyNativeArtifacts(platform, arch)) {
+  for (const artifact of artifacts) {
     const sourcePath = yield* Effect.try({
       try: () => packageRequire.resolve(artifact.packageName),
       catch: (cause) =>
@@ -1922,6 +1924,9 @@ export const preflightLinuxDesktopBuild = Effect.fn("preflightLinuxDesktopBuild"
   const reuseCaptureHelpers = yield* Config.Boolean(
     "T3CODE_DESKTOP_REUSE_LINUX_CAPTURE_HELPERS",
   ).pipe(Config.withDefault(false));
+  const allowOptionalBrowserSecret = yield* Config.Boolean(
+    "V3CODE_ALLOW_OPTIONAL_BROWSER_SECRET",
+  ).pipe(Config.withDefault(false));
   const needsRust = !reuseResourceMonitor || !reuseCaptureHelpers;
   const rustTarget = resolveResourceMonitorRustTargets("linux", arch)[0]!;
 
@@ -1933,10 +1938,12 @@ export const preflightLinuxDesktopBuild = Effect.fn("preflightLinuxDesktopBuild"
       "rust-target": needsRust ? rustTargetIsInstalled(rustTarget) : Effect.succeed(true),
       cc: desktopBuildProbeSucceeds(ChildProcess.make("cc", ["--version"]), "cc"),
       make: desktopBuildProbeSucceeds(ChildProcess.make("make", ["--version"]), "make"),
-      libsecret: desktopBuildProbeSucceeds(
-        ChildProcess.make("pkg-config", ["--exists", "libsecret-1"]),
-        "libsecret",
-      ),
+      libsecret: allowOptionalBrowserSecret
+        ? Effect.succeed(true)
+        : desktopBuildProbeSucceeds(
+            ChildProcess.make("pkg-config", ["--exists", "libsecret-1"]),
+            "libsecret",
+          ),
       imagemagick: Effect.all([
         desktopBuildProbeSucceeds(ChildProcess.make("magick", ["-version"]), "magick"),
         desktopBuildProbeSucceeds(ChildProcess.make("convert", ["-version"]), "convert"),
@@ -2362,6 +2369,21 @@ export const stageResourceMonitor = Effect.fn("stageResourceMonitor")(function* 
   const reuseResourceMonitor = yield* Config.Boolean("T3CODE_DESKTOP_REUSE_RESOURCE_MONITOR").pipe(
     Config.withDefault(false),
   );
+  const allowOptionalResourceMonitor = yield* Config.Boolean(
+    "V3CODE_ALLOW_OPTIONAL_RESOURCE_MONITOR",
+  ).pipe(Config.withDefault(false));
+  const hostPlatform = yield* HostProcess.Platform;
+  const expectedHostPlatform =
+    input.platform === "mac" ? "darwin" : input.platform === "win" ? "win32" : "linux";
+  if (allowOptionalResourceMonitor && hostPlatform !== expectedHostPlatform) {
+    const destinationDirectory = path.join(input.stageResourcesDir, "resource-monitor");
+    yield* fs.remove(destinationDirectory, { recursive: true, force: true }).pipe(Effect.ignore);
+    yield* fs.makeDirectory(destinationDirectory, { recursive: true });
+    yield* Effect.logWarning(
+      `[desktop-artifact] Skipping optional resource monitor for cross-built ${input.platform}/${input.arch} on ${hostPlatform}.`,
+    );
+    return;
+  }
   const builtBinaries: string[] = [];
 
   for (const rustTarget of rustTargets) {
@@ -2443,7 +2465,26 @@ export const stageBrowserSecret = Effect.fn("stageBrowserSecret")(function* (inp
   if (hostPlatform !== "linux") {
     return yield* new LinuxBrowserSecretHostError({ hostPlatform });
   }
+  const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const allowOptionalBrowserSecret = yield* Config.Boolean(
+    "V3CODE_ALLOW_OPTIONAL_BROWSER_SECRET",
+  ).pipe(Config.withDefault(false));
+  if (
+    allowOptionalBrowserSecret &&
+    !(yield* desktopBuildProbeSucceeds(
+      ChildProcess.make("pkg-config", ["--exists", "libsecret-1"]),
+      "libsecret",
+    ))
+  ) {
+    yield* fs.makeDirectory(path.join(input.stageResourcesDir, "browser-secret"), {
+      recursive: true,
+    });
+    yield* Effect.logWarning(
+      "[desktop-artifact] Skipping optional Linux browser secret helper (libsecret-1-dev unavailable).",
+    );
+    return;
+  }
   yield* runCommand(
     ChildProcess.make(
       "node",
@@ -2468,7 +2509,18 @@ export const stageAppleSpeech = Effect.fn("stageAppleSpeech")(function* (input: 
   readonly verbose: boolean;
 }) {
   if (input.platform !== "mac") return;
+  const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const hostPlatform = yield* HostProcess.Platform;
+  if (hostPlatform !== "darwin") {
+    yield* fs.makeDirectory(path.join(input.stageResourcesDir, "apple-speech"), {
+      recursive: true,
+    });
+    yield* Effect.logWarning(
+      `[desktop-artifact] Skipping macOS Apple Speech helper on ${hostPlatform} host.`,
+    );
+    return;
+  }
   yield* runCommand(
     ChildProcess.make(
       "node",
@@ -2540,6 +2592,46 @@ const stageMacIcons = Effect.fn("build-desktop-artifact.stageMacIcons")(function
 
   const iconPngPath = path.join(stageResourcesDir, "icon.png");
   const iconIcnsPath = path.join(stageResourcesDir, "icon.icns");
+  const hostPlatform = yield* HostProcess.Platform;
+
+  if (hostPlatform !== "darwin") {
+    const repoRoot = yield* RepoRoot;
+    const sharpPath = path.join(repoRoot, "scripts/node_modules/sharp");
+    const generateIcnsScript = [
+      `const fs = require("node:fs");`,
+      `const sharp = require(process.argv[4]);`,
+      `(async () => {`,
+      `  const src = process.argv[1], pngOut = process.argv[2], icnsOut = process.argv[3];`,
+      `  await sharp(src).resize(512, 512).png().toFile(pngOut);`,
+      `  const entries = [["ic07", 128], ["ic08", 256], ["ic09", 512], ["ic10", 1024]];`,
+      `  const chunks = [];`,
+      `  for (const [type, size] of entries) {`,
+      `    const data = await sharp(src).resize(size, size).png().toBuffer();`,
+      `    const header = Buffer.alloc(8);`,
+      `    header.write(type, 0, 4, "ascii");`,
+      `    header.writeUInt32BE(data.length + 8, 4);`,
+      `    chunks.push(header, data);`,
+      `  }`,
+      `  const total = 8 + chunks.reduce((n, b) => n + b.length, 0);`,
+      `  const head = Buffer.alloc(8);`,
+      `  head.write("icns", 0, 4, "ascii");`,
+      `  head.writeUInt32BE(total, 4);`,
+      `  fs.writeFileSync(icnsOut, Buffer.concat([head, ...chunks]));`,
+      `})().catch((e) => { console.error(e); process.exit(1); });`,
+    ].join("\n");
+    yield* runCommand(
+      ChildProcess.make("node", [
+        "-e",
+        generateIcnsScript,
+        sourcePng,
+        iconPngPath,
+        iconIcnsPath,
+        sharpPath,
+      ]),
+      { label: "generate macOS icon.icns via sharp", verbose },
+    );
+    return;
+  }
 
   yield* runCommand(ChildProcess.make({})`sips -z 512 512 ${sourcePng} --out ${iconPngPath}`, {
     label: "sips mac icon",
@@ -2714,11 +2806,8 @@ export function resolveDesktopRuntimeDependencies(
 }
 
 /** V3 Code: never emit GitHub auto-update publish feeds (`app-update.yml`). */
-export const resolveGitHubPublishConfig = Effect.fn("resolveGitHubPublishConfig")(function* (
-  _updateChannel: "latest" | "nightly",
-) {
-  return undefined;
-});
+export const resolveGitHubPublishConfig = (_updateChannel: "latest" | "nightly") =>
+  Effect.undefined;
 
 export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
   return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
@@ -2822,6 +2911,9 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "mac") {
     const path = yield* Path.Path;
     const repoRoot = yield* RepoRoot;
+    if ((yield* HostProcess.Platform) !== "darwin") {
+      buildConfig.npmRebuild = false;
+    }
     buildConfig.mac = {
       target: target === "dmg" ? [target, "zip"] : [target],
       icon: "icon.icns",
@@ -2958,8 +3050,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       icon: "icon.ico",
       // Smart App Control validates unpacked native libraries independently; sign them too.
       signExts: [".node", ".dll"],
-      // Resource editing sets product icons even when code signing is disabled.
-      signAndEditExecutable: true,
+      // Resource editing sets product icons when Wine/Windows rcedit is available.
+      signAndEditExecutable: (yield* HostProcess.Platform) === "win32" || signed,
     };
     if (signed && (yield* HostProcess.Platform) === "win32") {
       winConfig.azureSignOptions = yield* AzureTrustedSigningOptionsConfig;
@@ -3028,7 +3120,7 @@ export const stageWslRuntimeArchive = Effect.fn("stageWslRuntimeArchive")(functi
 
 // Match cliArchiveStem without its circular import. WSL uses the Windows host's architecture.
 export const wslRuntimeArchiveStem = (version: string, arch: typeof BuildArch.Type): string =>
-  `t3-${version}-linux-${arch}`;
+  `v3-${version}-linux-${arch}`;
 
 export const parseWslRuntimeArchiveMembers = (listing: string): ReadonlyArray<string> =>
   listing
@@ -3043,11 +3135,16 @@ export const packWindowsServerAsar = Effect.fn("packWindowsServerAsar")(function
 }) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const resolvedSourceDir = path.resolve(input.sourceDir);
+  const resolvedSourcePosix = resolvedSourceDir.split(path.sep).join("/");
+  const sourceHasGlobSyntax = /[\\*?[\]{}(),]/.test(resolvedSourcePosix);
   // Unpack/sign only Windows PE addons; packages also carry foreign prebuilds that Authenticode cannot sign.
-  const unpackGlobs: string[] = [...WINDOWS_SERVER_ASAR_UNPACK_GLOBS];
-  for (const entry of yield* fs.readDirectory(input.sourceDir, { recursive: true })) {
+  const unpackGlobs: string[] = WINDOWS_SERVER_ASAR_UNPACK_GLOBS.map((glob) =>
+    !sourceHasGlobSyntax && glob.startsWith("**/") ? `${resolvedSourcePosix}/${glob}` : glob,
+  );
+  for (const entry of yield* fs.readDirectory(resolvedSourceDir, { recursive: true })) {
     if (!entry.endsWith(".node")) continue;
-    const addonPath = path.join(input.sourceDir, entry);
+    const addonPath = path.join(resolvedSourceDir, entry);
     if ((yield* fs.stat(addonPath)).type !== "File") continue;
     const bytes = yield* fs.readFile(addonPath);
     if (bytes[0] !== 0x4d || bytes[1] !== 0x5a) continue;
@@ -3059,16 +3156,19 @@ export const packWindowsServerAsar = Effect.fn("packWindowsServerAsar")(function
         cause: new Error(`native addon path contains glob syntax: ${posixPath}`),
       });
     }
-    unpackGlobs.push(`**/${posixPath}`);
+    // Literal absolute prefix lets minimatch match even when sourceDir sits under a dot-directory (e.g. ~/.t3team).
+    unpackGlobs.push(
+      sourceHasGlobSyntax ? `**/${posixPath}` : `${resolvedSourcePosix}/${posixPath}`,
+    );
   }
   yield* Effect.tryPromise({
     try: () =>
-      createPackageWithOptions(input.sourceDir, input.asarPath, {
+      createPackageWithOptions(resolvedSourceDir, input.asarPath, {
         dot: true,
         unpack: `{${unpackGlobs.join(",")}}`,
         // glob 13 (@electron/asar 4) resolves ignores against cwd; anchor them at the source.
         globOptions: {
-          cwd: input.sourceDir,
+          cwd: resolvedSourceDir,
           ignore: resolveWindowsServerAsarIgnoreGlobs(input.arch),
         },
       }),
@@ -3403,12 +3503,15 @@ export const validateWindowsPackagedPayload = Effect.fn(
     });
   }
 
+  const allowOptionalResourceMonitor = yield* Config.Boolean(
+    "V3CODE_ALLOW_OPTIONAL_RESOURCE_MONITOR",
+  ).pipe(Config.withDefault(false));
   const resourceMonitorPath = path.join(
     resourcesDir,
     "resource-monitor",
     resourceMonitorExecutableName("win"),
   );
-  if (!(yield* isFile(resourceMonitorPath))) {
+  if (!allowOptionalResourceMonitor && !(yield* isFile(resourceMonitorPath))) {
     return yield* new WindowsPackagedPayloadValidationError({
       reason: "resource-monitor-missing",
       packagedAppDir,
@@ -3489,7 +3592,7 @@ export const validateWindowsPackagedPayload = Effect.fn(
         ),
       );
     }
-    const requiredMembers = [`${stem}/t3`, `${stem}/client`, `${stem}/node_modules`];
+    const requiredMembers = [`${stem}/v3`, `${stem}/client`, `${stem}/node_modules`];
     const missingMembers = requiredMembers.filter((member) => !members.includes(member));
     const ptyCandidates = [
       `${stem}/node_modules/node-pty/build/Release/pty.node`,
