@@ -28,7 +28,7 @@ export class ManagedPolicyFileError extends Schema.TaggedError<ManagedPolicyFile
   override readonly [Runtime.errorExitCode] = SERVER_EXIT_CODE_MANAGED_POLICY;
 
   override get message(): string {
-    return `T3 Code cannot use the managed policy at ${this.path}: ${this.reason}. It will not start until an administrator fixes this.`;
+    return `V3 Code cannot use the managed policy at ${this.path}: ${this.reason}. It will not start until an administrator fixes this.`;
   }
 }
 
@@ -36,13 +36,13 @@ export class ManagedPolicyFileError extends Schema.TaggedError<ManagedPolicyFile
 export function managedPolicyPath(platform: NodeJS.Platform): string {
   switch (platform) {
     case "darwin":
-      return "/Library/Application Support/T3Code/policy.json";
+      return "/Library/Application Support/V3Code/policy.json";
     case "win32":
       // Not ProgramData, where a user can create the folder first and own it; and not
       // %ProgramFiles%, which a user can point somewhere they write.
-      return "C:\\Program Files\\T3Code\\policy.json";
+      return "C:\\Program Files\\V3Code\\policy.json";
     default:
-      return "/etc/t3code/policy.json";
+      return "/etc/v3code/policy.json";
   }
 }
 
@@ -95,9 +95,8 @@ export const readManagedPolicyFile = Effect.fn("readManagedPolicyFile")(function
 });
 
 /** Where a configuration profile's managed preferences land on macOS. */
-export const MACOS_MANAGED_PREFERENCES_PATH =
-  "/Library/Managed Preferences/com.t3tools.t3code.plist";
-const WINDOWS_POLICY_SUBKEY = "SOFTWARE\\Policies\\T3Tools\\T3Code";
+export const MACOS_MANAGED_PREFERENCES_PATH = "/Library/Managed Preferences/org.v3code.app.plist";
+const WINDOWS_POLICY_SUBKEY = "SOFTWARE\\Policies\\V3Code";
 /**
  * The registry key Group Policy and Intune write to on Windows. It holds either the Group Policy
  * template's values, one per control, or a `Policy` string with the whole policy as JSON.

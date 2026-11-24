@@ -71,12 +71,6 @@ function hasExactDesktopOriginHeader(
 
 function shouldPreserveOriginHeader(policy: MainWindowRequestHeaderPolicy, url: URL): boolean {
   const hostname = normalizeHostname(url.hostname);
-  if (
-    policy.clerkFrontendApiHostname !== undefined &&
-    hostname === normalizeHostname(policy.clerkFrontendApiHostname)
-  ) {
-    return true;
-  }
   if (!policy.isDevelopment) return false;
   if (policy.devServerOrigin !== undefined && toHttpOrigin(url) === policy.devServerOrigin) {
     return true;

@@ -2006,7 +2006,7 @@ function PullRequestCodeTab({
         {fileTreeOpen ? (
           <FileExplorerPane
             resizable
-            storageKey="t3code:diff-file-tree-width"
+            storageKey="v3code:diff-file-tree-width"
             defaultWidth={320}
             defaultWidthFraction={0.4}
             minWidth={192}

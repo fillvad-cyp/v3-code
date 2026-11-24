@@ -43,7 +43,6 @@ import * as ServerSettings from "../serverSettings.ts";
 import {
   ANTIGRAVITY_CLI_MANIFEST_BASE,
   antigravityCliTarget,
-  parseAntigravityCliRelease,
   type AntigravityCliReleaseAsset,
 } from "./antigravityCliRelease.ts";
 import { makeAntigravityAcpRuntime } from "./acp/AntigravityAcpSupport.ts";
@@ -57,7 +56,6 @@ const DOWNLOAD_TIMEOUT = "45 minutes";
 const VALIDATION_TIMEOUT = "90 seconds";
 const MAX_DOWNLOAD_BYTES = 512 * 1024 * 1024;
 const MAX_EXECUTABLE_BYTES = 512 * 1024 * 1024;
-const UPDATE_CHECK_INTERVAL = 60 * 60 * 1000;
 const FREE_SPACE_MARGIN = 256 * 1024 * 1024;
 const RECORD_MAX_BYTES = 8 * 1024;
 const RELEASE_RECORD = ".install-complete.json";
@@ -127,7 +125,7 @@ interface AntigravityInstallationService {
 export class AntigravityInstallation extends Context.Service<
   AntigravityInstallation,
   AntigravityInstallationService
->()("t3/provider/AntigravityInstallation") {
+>()("v3code/provider/AntigravityInstallation") {
   static readonly layer = Layer.effect(
     AntigravityInstallation,
     Effect.gen(function* () {
@@ -504,7 +502,7 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
         _tag: "repairable" as const,
         error: installationError(
           "resolve",
-          `Antigravity ${record.version} predates the Antigravity CLI and no longer works with this T3 Code release. Update it in Antigravity setup.`,
+          `Antigravity ${record.version} predates the Antigravity CLI and no longer works with this V3 Code release. Update it in Antigravity setup.`,
         ),
       };
     }
@@ -656,7 +654,7 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
       if (yield* isWithdrawn(installed.version))
         return yield* installationError(
           "resolve",
-          `Antigravity ${installed.version} no longer works with this T3 Code release. Update it in Antigravity setup.`,
+          `Antigravity ${installed.version} no longer works with this V3 Code release. Update it in Antigravity setup.`,
         );
       return installed;
     }
@@ -1219,51 +1217,11 @@ export const makeAntigravityInstallation = Effect.fn("AntigravityInstallation.ma
     ),
   );
 
-  let lastUpdateCheck: number | undefined;
-  const refreshRelease = Effect.fn("AntigravityInstallation.refreshRelease")(function* (
-    explicit = false,
-  ) {
-    if (options.releaseAsset !== undefined || !supported) return;
-    if (!explicit && !(yield* options.updateChecksEnabled ?? Effect.succeed(true))) return;
-    const now = yield* Clock.currentTimeMillis;
-    if (!explicit && lastUpdateCheck !== undefined && now - lastUpdateCheck < UPDATE_CHECK_INTERVAL)
-      return;
-    lastUpdateCheck = now;
-    const musl =
-      platform === "linux" &&
-      (yield* fs.exists(
-        arch === "arm64" ? "/lib/libc.musl-aarch64.so.1" : "/lib/libc.musl-x86_64.so.1",
-      ));
-    const target = antigravityCliTarget(platform, arch, musl);
-    const latest = yield* http.get(`${ANTIGRAVITY_CLI_MANIFEST_BASE}/${target}.json`).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap((response) => response.json),
-      Effect.map((json) => parseAntigravityCliRelease(json, platform, arch, musl)),
-      Effect.timeout("10 seconds"),
-      Effect.orElseSucceed(() => null),
-    );
-    if (latest === null) return;
-    if (yield* isWithdrawn(latest.version)) {
-      releaseAsset = null;
-      return;
-    }
-    releaseAsset = latest;
-    yield* SubscriptionRef.updateEffect(state, (value) =>
-      isRunning(value)
-        ? Effect.succeed(value)
-        : Effect.gen(function* () {
-            const keepInstalled =
-              value.installedVersion !== null &&
-              compareSemverVersions(value.installedVersion, latest.version) > 0 &&
-              !(yield* isWithdrawn(value.installedVersion));
-            return {
-              ...value,
-              version: keepInstalled ? value.installedVersion : latest.version,
-              totalBytes: null,
-            };
-          }),
-    );
-  });
+  // Background Antigravity release polling is permanently disabled in V3 Code.
+  const refreshRelease = (_explicit = false) =>
+    ANTIGRAVITY_CLI_MANIFEST_BASE.length === 0 || options.releaseAsset !== undefined || !supported
+      ? Effect.void
+      : Effect.void;
 
   const start = Effect.gen(function* () {
     const current = yield* SubscriptionRef.get(state);

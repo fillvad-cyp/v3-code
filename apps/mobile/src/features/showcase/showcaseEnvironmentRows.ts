@@ -5,8 +5,8 @@ import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-typ
 
 const SHOWCASE_LOCAL_ENVIRONMENT_DISPLAY_URLS: Readonly<Record<string, string>> = {
   "Moonbase Terminal": "https://moonbase.tail9f3a.ts.net/",
-  "Suspense Station": "https://suspense-vps.hel1.t3.sh/",
-  "Kernel Cabin": "http://100.82.16.5:3773/",
+  "Suspense Station": "https://suspense-vps.local/",
+  "Kernel Cabin": "http://100.82.16.5:3873/",
 };
 
 export function applyShowcaseLocalEnvironmentDisplayUrls(
@@ -32,8 +32,8 @@ export function resolveShowcaseEnvironmentUpdateDisplayUrl(input: {
 
 const pocketPiId = EnvironmentId.make("showcase-pocket-pi");
 const pocketPiEndpoint = {
-  httpBaseUrl: "https://pocket-pi.t3.sh",
-  wsBaseUrl: "wss://pocket-pi.t3.sh",
+  httpBaseUrl: "http://100.82.16.6:3873",
+  wsBaseUrl: "ws://100.82.16.6:3873",
   providerKind: "t3_relay" as const,
 };
 
@@ -42,7 +42,7 @@ export const SHOWCASE_CONNECTED_CLOUD_ENVIRONMENTS: ReadonlyArray<ConnectedEnvir
     environmentId: EnvironmentId.make("showcase-aurora-gpu"),
     // oxlint-disable-next-line t3code/no-untranslated-copy -- showcase fixture data
     environmentLabel: "Aurora GPU Pod",
-    displayUrl: "https://aurora-gpu.t3.sh",
+    displayUrl: "http://100.82.16.7:3873",
     isRelayManaged: true,
     isEnabled: true,
     connectionState: "connected",

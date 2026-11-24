@@ -87,7 +87,7 @@ export class MilestoneHub extends Context.Service<
       Scope.Scope
     >;
   }
->()("t3/milestones/MilestoneHub") {}
+>()("v3code/milestones/MilestoneHub") {}
 
 interface Kept {
   readonly event: MilestoneEvent;

@@ -55,11 +55,41 @@ export class DesktopPreReadyElectronOptions extends Context.Service<
   }
 >()("@t3tools/desktop/app/DesktopPreReadyPlatform/DesktopPreReadyElectronOptions") {}
 
+const CHROMIUM_PRIVACY_DISABLE_FEATURES = [
+  "MediaRouter",
+  "AutofillServerCommunication",
+  "OptimizationHints",
+  "Translate",
+] as const;
+
+function appendPrivacyChromiumSwitches(commandLine: Electron.CommandLine): void {
+  commandLine.appendSwitch("disable-background-networking");
+  commandLine.appendSwitch("disable-component-update");
+  commandLine.appendSwitch("disable-domain-reliability");
+  commandLine.appendSwitch("disable-sync");
+  commandLine.appendSwitch("disable-default-apps");
+  commandLine.appendSwitch("no-pings");
+  commandLine.appendSwitch("metrics-recording-only");
+  commandLine.appendSwitch("force-webrtc-ip-handling-policy", "disable_non_proxied_udp");
+}
+
+function mergeDisableFeatures(existing: string | null, additions: ReadonlyArray<string>): string {
+  const seen = new Set(
+    (existing ?? "")
+      .split(",")
+      .map((entry) => entry.trim())
+      .filter((entry) => entry.length > 0),
+  );
+  for (const feature of additions) {
+    seen.add(feature);
+  }
+  return [...seen].join(",");
+}
+
 const LinuxDesktopEntryConfig = Config.all({
   xdgDataHome: trimmedString("XDG_DATA_HOME"),
-  launcherPath: trimmedString("T3CODE_DESKTOP_LAUNCHER_PATH"),
+  launcherPath: trimmedString("V3CODE_DESKTOP_LAUNCHER_PATH"),
   appImagePath: trimmedString("APPIMAGE"),
-  // electron-updater sets this on the AppImage it relaunches after installing an update.
   relaunchedByUpdater: trimmedString("APPIMAGE_SILENT_INSTALL"),
 });
 
@@ -69,6 +99,7 @@ export const make = Effect.gen(function* () {
   const homeDirectory = yield* HostProcess.HomeDirectory;
   const linuxDesktopEntryConfig = yield* LinuxDesktopEntryConfig;
   return yield* Effect.sync((): DesktopPreReadyElectronOptions["Service"] => {
+    appendPrivacyChromiumSwitches(Electron.app.commandLine);
     const linuxPasswordStoreCommandLine =
       platform === "linux"
         ? readCommandLineSwitchValue(Electron.app.commandLine, "password-store")
@@ -165,22 +196,36 @@ export const make = Effect.gen(function* () {
         Electron.app.commandLine.appendSwitch("password-store", linux.passwordStore);
       }
       // Chromium keeps only the last --disable-features value, so pass the merged list.
-      const disableFeatures = DesktopEarlyElectronStartup.resolveLinuxDisableFeaturesSwitch({
-        env: process.env,
-        ozonePlatform: readCommandLineSwitchValue(Electron.app.commandLine, "ozone-platform"),
-        enableFeatures: readCommandLineSwitchValue(Electron.app.commandLine, "enable-features"),
-        disableFeatures: readCommandLineSwitchValue(Electron.app.commandLine, "disable-features"),
-        readHyprctlVersionJson: () =>
-          NodeChildProcess.execFileSync("hyprctl", ["version", "-j"], {
-            encoding: "utf8",
-            stdio: ["ignore", "pipe", "ignore"],
-            timeout: 1000,
-            maxBuffer: 64 * 1024,
-          }),
-      });
-      if (disableFeatures !== null) {
-        Electron.app.commandLine.appendSwitch("disable-features", disableFeatures);
-      }
+      const hyprlandDisableFeatures = DesktopEarlyElectronStartup.resolveLinuxDisableFeaturesSwitch(
+        {
+          env: process.env,
+          ozonePlatform: readCommandLineSwitchValue(Electron.app.commandLine, "ozone-platform"),
+          enableFeatures: readCommandLineSwitchValue(Electron.app.commandLine, "enable-features"),
+          disableFeatures: readCommandLineSwitchValue(Electron.app.commandLine, "disable-features"),
+          readHyprctlVersionJson: () =>
+            NodeChildProcess.execFileSync("hyprctl", ["version", "-j"], {
+              encoding: "utf8",
+              stdio: ["ignore", "pipe", "ignore"],
+              timeout: 1000,
+              maxBuffer: 64 * 1024,
+            }),
+        },
+      );
+      const existingDisableFeatures =
+        hyprlandDisableFeatures ??
+        readCommandLineSwitchValue(Electron.app.commandLine, "disable-features");
+      Electron.app.commandLine.appendSwitch(
+        "disable-features",
+        mergeDisableFeatures(existingDisableFeatures, CHROMIUM_PRIVACY_DISABLE_FEATURES),
+      );
+    } else {
+      Electron.app.commandLine.appendSwitch(
+        "disable-features",
+        mergeDisableFeatures(
+          readCommandLineSwitchValue(Electron.app.commandLine, "disable-features"),
+          CHROMIUM_PRIVACY_DISABLE_FEATURES,
+        ),
+      );
     }
 
     return { linux, linuxPasswordStoreCommandLine };

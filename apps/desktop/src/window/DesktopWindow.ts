@@ -496,6 +496,7 @@ export const make = Effect.gen(function* () {
         contextIsolation: true,
         nodeIntegration: false,
         sandbox: true,
+        spellcheck: false,
         webviewTag: true,
         // Guest fullscreen propagates to the embedder; both must opt out to keep it inside the webview.
         // The app's own fullscreen elements reach OS fullscreen through syncHtmlFullscreen.
@@ -781,10 +782,27 @@ export const make = Effect.gen(function* () {
       }
       return { action: "deny" };
     });
-    // Chromium asks this before handing a navigation to an OS protocol handler, and grants it
-    // when nothing answers. External links are opened through ElectronShell only.
+    window.webContents.session.setSpellCheckerEnabled(false);
+    const sanitizedUserAgent = window.webContents
+      .getUserAgent()
+      .replace(/\s*(?:T3Code|V3Code|Electron)\/[^\s]+/gi, "")
+      .trim();
+    if (sanitizedUserAgent.length > 0) {
+      window.webContents.setUserAgent(sanitizedUserAgent);
+    }
+    const allowedPermissions = new Set<string>([
+      "media",
+      "mediaKeySystem",
+      "clipboard-read",
+      "clipboard-sanitized-write",
+      "notifications",
+      "fullscreen",
+      "pointerLock",
+      "screen-wake-lock",
+    ]);
+    // Strict permission allowlist: deny openExternal, geolocation, midi, hid, serial, usb, etc.
     window.webContents.session.setPermissionRequestHandler((_contents, permission, callback) =>
-      callback(permission !== "openExternal"),
+      callback(allowedPermissions.has(permission)),
     );
     window.webContents.on("will-navigate", (event, url) => {
       if (

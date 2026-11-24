@@ -25,7 +25,6 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import { HttpClient, HttpClientResponse } from "effect/http";
 
 import { writeFileStringAtomically } from "@t3tools/shared/atomicWrite";
 import { formatMalformedUsageWarning } from "@t3tools/shared/usageFormat";
@@ -45,12 +44,7 @@ import {
   usageTimestampFilter,
   UsageAggregator,
 } from "./usageAggregation.ts";
-import {
-  createOverrideRateTable,
-  isUnlistedModel,
-  parseRateTable,
-  type RateTable,
-} from "./usagePricing.ts";
+import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
 import {
   DESKTOP_HOST_SCOPE_ENV,
   listTranscriptFiles,
@@ -69,14 +63,7 @@ import {
   type ScanCache,
 } from "./usageScanCache.ts";
 
-const LITELLM_RATES_URL =
-  "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
-const LITELLM_RATES_API_URL =
-  "https://api.github.com/repos/BerriAI/litellm/contents/model_prices_and_context_window.json?ref=main";
-
-const RATES_TTL_MS = 24 * 60 * 60 * 1000;
-
-const RATES_REFRESH_FLOOR_MS = 60 * 1000;
+const LOCAL_RATES_SOURCE = "local";
 
 // mtime slack includes writes just before local midnight on the window's first day.
 const MTIME_SLACK_MS = 36 * 60 * 60 * 1000;
@@ -118,7 +105,6 @@ const RatesCacheFile = Schema.Struct({
   document: Schema.Unknown,
 });
 const decodeRatesCache = Schema.decodeUnknownEffect(Schema.fromJsonString(RatesCacheFile));
-const encodeRatesCache = Schema.encodeEffect(Schema.fromJsonString(RatesCacheFile));
 
 const ScanCacheJson = Schema.fromJsonString(Schema.Unknown);
 const decodeScanCacheFile = Schema.decodeUnknownEffect(ScanCacheJson);
@@ -167,14 +153,13 @@ export class UsageService extends Context.Service<
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
     readonly refreshRates: Effect.Effect<UsagePricing>;
   }
->()("t3/usage/UsageService") {}
+>()("v3code/usage/UsageService") {}
 
 export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig.ServerConfig;
   const settingsService = yield* ServerSettings.ServerSettingsService;
-  const httpClient = yield* HttpClient.HttpClient;
   const hostEnvironment = yield* HostProcess.Environment;
   const hostPlatform = yield* HostProcess.Platform;
   const hostScope = hostEnvironment[DESKTOP_HOST_SCOPE_ENV]?.trim();
@@ -194,7 +179,6 @@ export const make = Effect.gen(function* () {
       });
       return id;
     });
-  const hostname = yield* HostProcess.Hostname;
   const readerContext = yield* Effect.context<BuiltInUsageReadersEnv>();
 
   const fileCache: ScanCache = new Map();
@@ -225,64 +209,22 @@ export const make = Effect.gen(function* () {
       Effect.provideService(FileSystem.FileSystem, fileSystem),
       Effect.provideService(Path.Path, path),
     );
-  const hostIdPath = path.join(config.baseDir, "usage-host-id");
-  const explicitHostId = hostEnvironment["T3CODE_HOST_ID"]?.trim();
-  const hostId =
-    explicitHostId ||
-    (yield* fileSystem.readFileString(hostIdPath).pipe(
-      Effect.catchIf(
-        (error) => error.reason._tag === "NotFound",
-        () =>
-          Effect.scoped(
-            Effect.gen(function* () {
-              yield* fileSystem.makeDirectory(config.baseDir, { recursive: true });
-              const tempDirectory = yield* fileSystem.makeTempDirectoryScoped({
-                directory: config.baseDir,
-                prefix: "usage-host-id.",
-              });
-              const tempFile = path.join(tempDirectory, "identity");
-              yield* fileSystem.writeFileString(tempFile, `${hostname}\n`);
-              // Publish complete contents without replacing another initializer's identity.
-              yield* fileSystem.link(tempFile, hostIdPath).pipe(
-                Effect.catchIf(
-                  (error) => error.reason._tag === "AlreadyExists",
-                  () => Effect.void,
-                ),
-              );
-              return yield* fileSystem.readFileString(hostIdPath);
-            }),
-          ),
-      ),
-      Effect.map((value) => value.trim() || hostname),
-      Effect.orElseSucceed(() => hostname),
-    ));
+  const explicitHostId = hostEnvironment["V3CODE_HOST_ID"]?.trim();
+  const hostId = explicitHostId || "v3code";
   let rates: RateTable = new Map();
   let ratesFetchedAtMs: number | null = null;
-  let ratesLastFailedAtMs: number | null = null;
   let ratesStatus: UsagePricing["status"] = "unavailable";
   const ratesLock = yield* Semaphore.make(1);
 
   const pricing = (): UsagePricing => ({
     status: ratesStatus,
-    source: LITELLM_RATES_URL,
+    source: LOCAL_RATES_SOURCE,
     fetchedAt:
       ratesFetchedAtMs === null ? null : DateTime.formatIso(DateTime.makeUnsafe(ratesFetchedAtMs)),
     knownModels: rates.size,
   });
 
-  const fetchRates = (url: string, accept = "application/json") =>
-    httpClient.get(url, { headers: { accept } }).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap((response) => response.json),
-      Effect.map((document) => {
-        const parsed = parseRateTable(document);
-        return parsed.size > 0 ? { document, parsed } : null;
-      }),
-      Effect.timeout(10_000),
-      Effect.catchCause(() => Effect.succeed(null)),
-    );
-
-  // Outside ratesLock, which a slow fetch holds: a provisional answer prices with these.
+  // V3 Code reads only local saved rates (never fetches LiteLLM pricing from GitHub).
   const loadSavedRates = yield* Effect.cached(
     fileSystem.readFileString(ratesCachePath).pipe(
       Effect.flatMap((raw) => decodeRatesCache(raw)),
@@ -297,53 +239,9 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  const loadRates = Effect.fn("UsageService.loadRates")(function* (force: boolean) {
-    const now = yield* Clock.currentTimeMillis;
-    const maxAgeMs = force ? RATES_REFRESH_FLOOR_MS : RATES_TTL_MS;
-    yield* loadSavedRates;
-    if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < maxAgeMs) return;
-    if (ratesLastFailedAtMs !== null && now - ratesLastFailedAtMs < RATES_REFRESH_FLOOR_MS) return;
+  const ensureRates = (_force: boolean) => ratesLock.withPermit(loadSavedRates);
 
-    let fetched = yield* fetchRates(LITELLM_RATES_URL);
-    if (fetched === null) {
-      fetched = yield* fetchRates(LITELLM_RATES_API_URL, "application/vnd.github.raw+json");
-    }
-    if (fetched === null) {
-      ratesLastFailedAtMs = yield* Clock.currentTimeMillis;
-      if (rates.size > 0) ratesStatus = "cached";
-      return;
-    }
-
-    rates = fetched.parsed;
-    ratesFetchedAtMs = now;
-    ratesLastFailedAtMs = null;
-    ratesStatus = "fresh";
-
-    yield* encodeRatesCache({ fetchedAtMs: now, document: fetched.document }).pipe(
-      Effect.flatMap((contents) => writeCacheFile(ratesCachePath, contents)),
-      Effect.ignoreCause,
-    );
-  });
-
-  const ensureRates = (force: boolean) => ratesLock.withPermit(loadRates(force));
-
-  // Rates are kept for RATES_TTL_MS, so a model released after the table was fetched would stay unpriced
-  // that long. A scan that meets a model the table does not list refetches early: once per model against
-  // a fresh table, with loadRates keeping RATES_REFRESH_FLOOR_MS between attempts.
-  const checkedUnlistedModels = new Set<string>();
-  const refreshForUnlistedModels = Effect.fn("UsageService.refreshForUnlistedModels")(function* (
-    models: ReadonlySet<string>,
-  ) {
-    const unlisted = [...models].filter(
-      (model) => !checkedUnlistedModels.has(model) && isUnlistedModel(rates, model),
-    );
-    if (unlisted.length === 0) return;
-    yield* ensureRates(true);
-    const now = yield* Clock.currentTimeMillis;
-    // A failed fetch leaves the models unchecked, so a later scan tries again.
-    if (ratesFetchedAtMs === null || now - ratesFetchedAtMs >= RATES_REFRESH_FLOOR_MS) return;
-    for (const model of unlisted) checkedUnlistedModels.add(model);
-  });
+  const refreshForUnlistedModels = (_models: ReadonlySet<string>) => Effect.void;
 
   const refreshRates = ensureRates(true).pipe(
     Effect.map(pricing),

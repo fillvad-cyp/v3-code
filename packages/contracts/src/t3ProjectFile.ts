@@ -7,7 +7,7 @@ import type { ProjectScopedServerSettingKey, ServerSettings } from "./settings.t
 
 export const T3_PROJECT_FILE_NAME = "t3.json";
 
-export const T3_PROJECT_FILE_SCHEMA_URL = "https://t3.codes/schema/t3.json";
+export const T3_PROJECT_FILE_SCHEMA_URL = "";
 
 const T3_PROJECT_FILE_PATH_MAX_LENGTH = 512;
 const T3_PROJECT_FILE_COMMAND_MAX_LENGTH = 4096;
@@ -144,14 +144,13 @@ export const T3ProjectFile = Schema.Struct({
   scripts: Schema.optionalKey(
     Schema.Array(T3ProjectFileScript)
       .annotate({
-        description: "Project scripts shared with everyone who opens this repository in T3 Code.",
+        description: "Project scripts shared with everyone who opens this repository in V3 Code.",
       })
       .check(Schema.isMaxLength(T3_PROJECT_FILE_MAX_SCRIPTS)),
   ),
 }).annotate({
-  title: "T3 project file",
-  description:
-    "Checked-in project configuration for T3 Code (t3.json at the repository root). See https://t3.codes for documentation.",
+  title: "V3 project file",
+  description: "Checked-in project configuration for V3 Code (t3.json at the repository root).",
 });
 export type T3ProjectFile = typeof T3ProjectFile.Type;
 

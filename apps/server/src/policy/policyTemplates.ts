@@ -96,7 +96,7 @@ const policies = (): ReadonlyArray<Policy> => [
         kind: "checkbox",
         list: "Clients",
         name: "remote",
-        label: "Remote: phones, other computers, app.t3.codes",
+        label: "Remote: phones, other computers",
         defaultChecked: false,
       },
     ],
@@ -343,7 +343,7 @@ const nullPath = (
   return undefined;
 };
 
-/** A device configuration profile that installs `document` for `com.t3tools.t3code`. */
+/** A device configuration profile that installs `document` for `org.v3code.app`. */
 export function macosProfile(
   document: ManagedPolicyDocument,
   uuids: { readonly profile: string; readonly payload: string },
@@ -363,17 +363,17 @@ export function macosProfile(
   const profile = {
     PayloadContent: [
       {
-        PayloadDisplayName: "T3 Code policy",
-        PayloadIdentifier: `com.t3tools.t3code.policy.${uuids.payload}`,
-        PayloadType: "com.t3tools.t3code",
+        PayloadDisplayName: "V3 Code policy",
+        PayloadIdentifier: `org.v3code.app.policy.${uuids.payload}`,
+        PayloadType: "org.v3code.app",
         PayloadUUID: uuids.payload,
         PayloadVersion: 1,
         ...document,
       },
     ],
-    PayloadDescription: "Configures T3 Code for every user on this Mac.",
-    PayloadDisplayName: `T3 Code policy for ${document.organization}`,
-    PayloadIdentifier: `com.t3tools.t3code.policy`,
+    PayloadDescription: "Configures V3 Code for every user on this Mac.",
+    PayloadDisplayName: `V3 Code policy for ${document.organization}`,
+    PayloadIdentifier: `org.v3code.app.policy`,
     PayloadOrganization: document.organization,
     PayloadScope: "System",
     PayloadType: "Configuration",

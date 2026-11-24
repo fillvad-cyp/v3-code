@@ -1788,7 +1788,7 @@ export default function DiffPanel({
                 {fileTreeOpen ? (
                   <FileExplorerPane
                     resizable
-                    storageKey="t3code:diff-file-tree-width"
+                    storageKey="v3code:diff-file-tree-width"
                     defaultWidthFraction={0.4}
                     resizeLabel={gt("Resize Changes files")}
                   >

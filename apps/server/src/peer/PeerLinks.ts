@@ -135,7 +135,7 @@ export class PeerLinks extends Context.Service<
       expiresAt: DateTime.Utc,
     ) => Effect.Effect<void>;
   }
->()("t3/peer/PeerLinks") {}
+>()("v3code/peer/PeerLinks") {}
 
 interface PeerLinkRow {
   readonly environment_id: string;

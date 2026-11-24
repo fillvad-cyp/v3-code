@@ -1539,7 +1539,7 @@ export const enrichProviderSnapshotWithVersionAdvisory = Effect.fn(
 )(function* (
   snapshot: ServerProvider,
   maintenanceCapabilities?: ProviderMaintenanceCapabilities,
-  options?: {
+  _options?: {
     readonly enableProviderUpdateChecks: boolean | undefined;
   },
 ) {
@@ -1547,11 +1547,8 @@ export const enrichProviderSnapshotWithVersionAdvisory = Effect.fn(
     maintenanceCapabilities ?? makeManualProviderMaintenanceCapabilities(snapshot.driver);
   const currentVersion =
     snapshot.installedVersion !== undefined ? snapshot.installedVersion : snapshot.version;
-  const shouldResolveLatestVersion =
-    options?.enableProviderUpdateChecks !== false &&
-    snapshot.enabled &&
-    snapshot.installed &&
-    Boolean(currentVersion);
+  // V3 Code: never perform automatic external version checks against npm/GitHub/vendor feeds.
+  const shouldResolveLatestVersion = false;
   if (!shouldResolveLatestVersion) {
     return {
       ...snapshot,

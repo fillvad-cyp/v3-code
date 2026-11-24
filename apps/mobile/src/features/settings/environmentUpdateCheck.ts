@@ -1,13 +1,7 @@
-import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import type { EnvironmentId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { AsyncResult, Atom } from "effect/reactivity";
-import { msg } from "gt-react-native";
-
-import { m } from "../../i18n/messages";
-import { findEnvironmentUpdate } from "./environment-maintenance";
 
 export interface EnvironmentReleaseCheck {
   readonly fromVersion: string;
@@ -22,40 +16,19 @@ export class EnvironmentUpdateCheckError extends Schema.TaggedError<EnvironmentU
   },
 ) {}
 
-const asError = (cause: unknown) =>
-  new EnvironmentUpdateCheckError({
-    message:
-      cause instanceof Error
-        ? (errorDisplayMessage(cause, m) ?? cause.message)
-        : m(msg("Could not check for updates.")),
-    cause,
-  });
-
-/**
- * Looks up the newest T3 Code release for one environment. The atom is not
- * kept alive, so leaving the screen interrupts the lookup and aborts its fetch.
- * The argument reads the server version, which an outdated server only
- * reports through a separate description request.
- */
+/** V3 Code: upstream release lookups are disabled; zero outbound HTTP calls. */
 export const environmentReleaseCheckAtom = Atom.family((environmentId: EnvironmentId) =>
   Atom.fn((readServerVersion: () => Promise<string>) =>
     Effect.gen(function* () {
-      const fromVersion = yield* Effect.tryPromise({ try: readServerVersion, catch: asError });
-      const targetVersion = yield* Effect.tryPromise({
-        try: (signal) => findEnvironmentUpdate(fromVersion, signal),
-        catch: asError,
-      }).pipe(
-        Effect.timeoutOrElse({
-          duration: "20 seconds",
-          orElse: () =>
-            Effect.fail(
-              new EnvironmentUpdateCheckError({
-                message: m(msg("Checking for updates timed out. Try again.")),
-              }),
-            ),
-        }),
-      );
-      return { fromVersion, targetVersion } satisfies EnvironmentReleaseCheck;
+      const fromVersion = yield* Effect.tryPromise({
+        try: readServerVersion,
+        catch: (cause) =>
+          new EnvironmentUpdateCheckError({
+            message: cause instanceof Error ? cause.message : "Could not read server version.",
+            cause,
+          }),
+      });
+      return { fromVersion, targetVersion: null } satisfies EnvironmentReleaseCheck;
     }),
   ).pipe(Atom.withLabel(`mobile:environment-release-check:${environmentId}`)),
 );
@@ -67,8 +40,7 @@ export function releaseCheckValue(
 }
 
 export function releaseCheckError(
-  result: AsyncResult.AsyncResult<EnvironmentReleaseCheck, Error>,
+  _result: AsyncResult.AsyncResult<EnvironmentReleaseCheck, Error>,
 ): string | null {
-  if (!AsyncResult.isFailure(result) || result.waiting) return null;
-  return Option.getOrNull(AsyncResult.error(result))?.message ?? null;
+  return null;
 }

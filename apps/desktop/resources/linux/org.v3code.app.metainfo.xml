@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>org.v3code.app</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT</project_license>
+  <name>V3 Code</name>
+  <summary>Privacy-first desktop GUI for coding agents</summary>
+  <developer id="org.v3code">
+    <name>V3 Code Contributors</name>
+  </developer>
+  <description>
+    <p>
+      V3 Code is an independent, zero-telemetry open-source desktop app for coding agents.
+      Work with your local coding agents, review code changes, and run commands in your projects
+      without outbound analytics or automatic updates.
+    </p>
+  </description>
+  <launchable type="desktop-id">v3code.desktop</launchable>
+  <icon type="stock">v3code</icon>
+  <provides>
+    <binary>v3code</binary>
+  </provides>
+  <categories>
+    <category>Development</category>
+  </categories>
+</component>

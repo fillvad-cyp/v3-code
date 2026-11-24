@@ -12,43 +12,20 @@ import { channelSwitchLabel } from "./sidebar/updateEverything.logic";
 
 export type DesktopUpdateButtonAction = "download" | "install" | "none";
 
-const DEFAULT_DESKTOP_RELEASE_REPOSITORY = "pingdotgg/t3code";
-const GITHUB_REPOSITORY_SEGMENT = /^[A-Za-z0-9._-]+$/u;
-
-function isValidRepositorySegment(value: string | undefined): value is string {
-  return (
-    value !== undefined && value !== "." && value !== ".." && GITHUB_REPOSITORY_SEGMENT.test(value)
-  );
-}
-
-function desktopReleaseRepositoryUrl(repository: string | undefined): string {
-  const configuredRepository = repository?.trim() ?? "";
-  const [owner, name, ...extra] = configuredRepository.split("/");
-  const releaseRepository =
-    isValidRepositorySegment(owner) && isValidRepositorySegment(name) && extra.length === 0
-      ? configuredRepository
-      : DEFAULT_DESKTOP_RELEASE_REPOSITORY;
-  return `https://github.com/${releaseRepository}/releases`;
-}
-
 /** The download RPC can beat the updater's downloadedVersion event; fall back to the requested version. */
 export function getDesktopUpdateDownloadedVersion(state: DesktopUpdateState): string | null {
   return state.downloadedVersion ?? state.availableVersion;
 }
 
 export function getDesktopUpdateReleaseUrl(
-  version: string | null,
-  repository: string | undefined = import.meta.env.T3CODE_DESKTOP_UPDATE_REPOSITORY,
+  _version: string | null,
+  _repository?: string,
 ): string | null {
-  const normalizedVersion = version?.trim();
-  if (!normalizedVersion) return null;
-  return `${desktopReleaseRepositoryUrl(repository)}/tag/v${encodeURIComponent(normalizedVersion)}`;
+  return null;
 }
 
-export function getDesktopUpdateReleaseHistoryUrl(
-  repository: string | undefined = import.meta.env.T3CODE_DESKTOP_UPDATE_REPOSITORY,
-): string {
-  return desktopReleaseRepositoryUrl(repository);
+export function getDesktopUpdateReleaseHistoryUrl(_repository?: string): string {
+  return "";
 }
 
 export function resolveDesktopUpdateButtonAction(
@@ -253,11 +230,8 @@ export function shouldToastDesktopUpdateActionResult(result: DesktopUpdateAction
   return getDesktopUpdateActionError(result) !== null;
 }
 
-export function canCheckForUpdate(state: DesktopUpdateState | null): boolean {
-  if (!state || !state.enabled) return false;
-  return (
-    state.status !== "checking" && state.status !== "downloading" && state.status !== "disabled"
-  );
+export function canCheckForUpdate(_state: DesktopUpdateState | null): boolean {
+  return false;
 }
 
 /** `managedDenial` is this machine's policy refusing updates (`managedUpdatesDenial`); it wins. */

@@ -873,10 +873,10 @@ const buildOnBlacksmith = Effect.fn("nativeClient.buildOnBlacksmith")(
   ) {
     const environment = yield* HostProcess.Environment;
     // The workflow itself runs this script: it must build, never dispatch.
-    if (environment.GITHUB_ACTIONS === "true" || environment.T3_NATIVE_CLIENT_BUILD === "local")
+    if (environment.GITHUB_ACTIONS === "true" || environment.V3_NATIVE_CLIENT_BUILD === "local")
       return false;
-    if (!(yield* isCommandAvailable("gh"))) return false;
-    const repository = environment.T3_NATIVE_CLIENT_REPOSITORY ?? "pingdotgg/t3code";
+    const repository = environment.V3_NATIVE_CLIENT_REPOSITORY?.trim();
+    if (!repository || !(yield* isCommandAvailable("gh"))) return false;
     const { repo } = yield* roots;
     const sha = yield* command("git", ["rev-parse", "HEAD"], false, repo);
     const pushed = yield* command(

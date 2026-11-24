@@ -1,7 +1,7 @@
 import * as Schema from "effect/Schema";
 
-export const ANTIGRAVITY_CLI_MANIFEST_BASE =
-  "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests";
+// Background Antigravity auto-updater manifest checks are disabled in V3 Code.
+export const ANTIGRAVITY_CLI_MANIFEST_BASE = "";
 
 const Manifest = Schema.Struct({
   version: Schema.String.check(Schema.isPattern(/^\d+\.\d+\.\d+$/u)),

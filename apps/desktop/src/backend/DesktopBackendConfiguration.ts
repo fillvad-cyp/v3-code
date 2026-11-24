@@ -78,6 +78,15 @@ const emptyBackendObservabilitySettings: BackendObservabilitySettings = {
 };
 
 const DESKTOP_BACKEND_ENV_NAMES = [
+  "V3CODE_PORT",
+  "V3CODE_MODE",
+  "V3CODE_NO_BROWSER",
+  "V3CODE_HOST",
+  "V3CODE_DESKTOP_WS_URL",
+  "V3CODE_DESKTOP_LAN_HOST",
+  "V3CODE_DESKTOP_HTTPS_ENDPOINTS",
+  "V3CODE_TAILSCALE_SERVE",
+  "V3CODE_TAILSCALE_SERVE_PORT",
   "T3CODE_PORT",
   "T3CODE_MODE",
   "T3CODE_NO_BROWSER",
@@ -553,7 +562,7 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       tailscaleServePort: backendExposure.tailscaleServePort,
       desktopTelemetryFd: 4,
       desktopTelemetryControlFd: 5,
-      desktopAppUpdate: input.desktopAppUpdate,
+      desktopAppUpdate: false,
       desktopBrowserFd: 6,
       desktopBrowserControlFd: 7,
       ...Option.match(input.resourceMonitorPath, {
@@ -577,7 +586,13 @@ const resolvePrimaryStartConfig = Effect.fn("desktop.backendConfiguration.resolv
       env: {
         ...backendChildEnvPatch(),
         ELECTRON_RUN_AS_NODE: "1",
+        T3CODE_TELEMETRY_ENABLED: "false",
+        T3CODE_OTEL_SDK_DISABLED: "true",
+        OTEL_SDK_DISABLED: "true",
+        T3CODE_DISABLE_AUTO_UPDATE: "1",
+        V3CODE_DISABLE_AUTO_UPDATE: "1",
         T3CODE_DESKTOP_SHELL_DISCOVERY_PENDING: "1",
+        V3CODE_CLI_PATH: Option.getOrUndefined(input.cliPath),
         T3CODE_CLI_PATH: Option.getOrUndefined(input.cliPath),
         [DESKTOP_HOST_SCOPE_ENV]: input.hostScope,
       },
@@ -695,10 +710,17 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
 
   const parentEnvWithoutT3Home: Record<string, string | undefined> = {};
   for (const [key, value] of Object.entries(env)) {
-    if (key === "T3CODE_HOME") continue;
+    if (key === "T3CODE_HOME" || key === "V3CODE_HOME") continue;
     parentEnvWithoutT3Home[key] = value;
   }
-  const wslEnv = mergeWslEnv(parentEnvWithoutT3Home.WSLENV, forwardedEnvNames);
+  const wslEnv = mergeWslEnv(parentEnvWithoutT3Home.WSLENV, [
+    ...forwardedEnvNames,
+    "T3CODE_TELEMETRY_ENABLED",
+    "T3CODE_OTEL_SDK_DISABLED",
+    "OTEL_SDK_DISABLED",
+    "T3CODE_DISABLE_AUTO_UPDATE",
+    "V3CODE_DISABLE_AUTO_UPDATE",
+  ]);
 
   const baseConfig = {
     executablePath: "wsl.exe",
@@ -709,6 +731,11 @@ const resolveWslStartConfig = Effect.fn("desktop.backendConfiguration.resolveWsl
       ...parentEnvWithoutT3Home,
       ...backendChildEnvPatch(),
       ...forwardedEnv,
+      T3CODE_TELEMETRY_ENABLED: "false",
+      T3CODE_OTEL_SDK_DISABLED: "true",
+      OTEL_SDK_DISABLED: "true",
+      T3CODE_DISABLE_AUTO_UPDATE: "1",
+      V3CODE_DISABLE_AUTO_UPDATE: "1",
       ...(wslEnv !== undefined ? { WSLENV: wslEnv } : {}),
     },
     // env already excludes T3CODE_HOME; merging the host env would restore it.

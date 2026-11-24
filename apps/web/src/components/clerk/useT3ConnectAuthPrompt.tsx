@@ -1,17 +1,10 @@
-import { useClerk } from "@clerk/react";
+import { useState } from "react";
 
-import { isElectron } from "../../env";
-import { resolveClerkSignInProps } from "./authRedirect";
-import { retryClerkLoad } from "./clerkLoadFailure";
+const DISABLED_AUTH_PROMPT = {
+  openAuthPrompt: () => {},
+};
 
 export function useT3ConnectAuthPrompt() {
-  const clerk = useClerk();
-  const openAuthPrompt = () => {
-    if (clerk.status === "error") {
-      retryClerkLoad();
-      return;
-    }
-    clerk.openSignIn(resolveClerkSignInProps(window.location.href, isElectron));
-  };
-  return { openAuthPrompt };
+  const [prompt] = useState(DISABLED_AUTH_PROMPT);
+  return prompt;
 }

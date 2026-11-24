@@ -2,9 +2,6 @@ import { ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Schema from "effect/Schema";
-import * as HttpClient from "effect/http/HttpClient";
-import * as HttpClientRequest from "effect/http/HttpClientRequest";
 
 import {
   enrichProviderSnapshotWithVersionAdvisory,
@@ -14,14 +11,9 @@ import {
   type ProviderMaintenanceCapabilitiesResolver,
   resolveMiseProviderMaintenance,
 } from "@t3tools/provider-core/server/maintenanceResolver";
-import * as ProviderLatestVersions from "@t3tools/provider-core/server/ProviderLatestVersions";
 import { parseGenericCliVersion } from "@t3tools/provider-core/server/snapshotProbe";
 
 const DRIVER = ProviderDriverKind.make("muse");
-const MUSE_CHANNELS = new Set(["muse-stable", "muse-canary"]);
-const ChannelManifest = Schema.Struct({
-  version: Schema.String.check(Schema.isPattern(/^\d+\.\d+\.\d+-R\d+(?:\.\d+)?$/)),
-});
 
 export function parseMuseVersion(output: string): string | null {
   return output.match(/\b\d+\.\d+\.\d+-R\d+(?:\.\d+)?\b/)?.[0] ?? parseGenericCliVersion(output);
@@ -95,31 +87,12 @@ function shellQuote(word: string) {
   return /^[\w./:@=-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`;
 }
 
+/** V3 Code: automatic remote Muse CLI version checks are disabled. */
 export const latestMuseVersion = Effect.fn("latestMuseVersion")(function* (
-  environment: NodeJS.ProcessEnv,
-  options?: { readonly fresh?: boolean },
+  _environment: NodeJS.ProcessEnv,
+  _options?: { readonly fresh?: boolean },
 ) {
-  const channel = environment.MUSE_CHANNEL || "muse-stable";
-  if (!MUSE_CHANNELS.has(channel)) return null;
-  const channelUrl = `https://api.meta.ai/muse-code/channels/${channel}`;
-  const client = yield* HttpClient.HttpClient;
-  const latestVersions = yield* ProviderLatestVersions.ProviderLatestVersions;
-  return yield* latestVersions.cached(
-    `muse:${channelUrl}`,
-    client.execute(HttpClientRequest.get(channelUrl)).pipe(
-      Effect.flatMap((response) =>
-        response.status >= 200 && response.status < 300
-          ? response.json.pipe(
-              Effect.flatMap(Schema.decodeUnknownEffect(ChannelManifest)),
-              Effect.map((manifest) => parseMuseVersion(manifest.version)),
-            )
-          : Effect.succeed(null),
-      ),
-      Effect.timeout(4_000),
-      Effect.orElseSucceed(() => null),
-    ),
-    options,
-  );
+  return null as string | null;
 });
 
 export const enrichMuseSnapshot = Effect.fn("enrichMuseSnapshot")(function* (input: {

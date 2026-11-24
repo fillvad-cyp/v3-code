@@ -68,7 +68,18 @@
         "graphql.config.ts",
       ],
       // The generated operations export every selection's class.
-      "ignoreIssues": { "**/*.graphql.ts": ["exports", "types", "namespaceMembers"] },
+      // Disabled cloud/updater/feedback/telemetry compatibility stubs retain their exports.
+      "ignoreIssues": {
+        "**/*.graphql.ts": ["exports", "types", "namespaceMembers"],
+        "src/cloud/**": ["exports", "nsExports"],
+        "src/desktopUpdate/**": ["exports", "nsExports"],
+        "src/feedback/**": ["exports", "nsExports"],
+        "src/provider/ModelManifest.ts": ["exports", "nsExports"],
+        "src/serverSettings.ts": ["exports", "nsExports"],
+        "src/telemetry/**": ["exports", "nsExports"],
+        "src/triage/triageSession.ts": ["exports", "nsExports"],
+        "src/usage/usagePricing.ts": ["exports"],
+      },
       // Keep the transitive Effect runtime pinned for standalone npm installs.
       // The Vite+ web build prerequisite.
       // Native and disk-loaded provider packages stay external to the bundle; the
@@ -103,6 +114,10 @@
       // The injected runtime resolves Playwright by string; release tooling runs
       // electron-builder from this workspace, outside its package scripts.
       "ignoreDependencies": ["playwright-core", "electron-builder"],
+      "ignoreIssues": {
+        "src/electron/ElectronProtocol.ts": ["exports", "nsExports"],
+        "src/updates/**": ["exports", "nsExports"],
+      },
     },
     "apps/web": {
       // Worktree setup (scripts/setup-worktree.ts) runs this directly, and evidence
@@ -111,11 +126,21 @@
       // UI component modules are copied and adapted as cohesive sets. Keep their
       // named subcomponents even before they have callers; the file audit still
       // reports an entire component module when nothing imports it.
-      "ignoreIssues": { "src/components/ui/*.tsx": ["exports", "nsExports", "duplicates"] },
-    },
-    "apps/marketing": {
-      // `astro check` runs from the typecheck task in vite.config.ts, which knip does not read.
-      "ignoreDependencies": ["@astrojs/check"],
+      "ignoreIssues": {
+        "src/components/ui/*.tsx": ["exports", "nsExports", "duplicates"],
+        "src/branding.ts": ["exports"],
+        "src/cloud/**": ["exports", "nsExports"],
+        "src/components/auth/ConnectAgentSurface.tsx": ["exports"],
+        "src/components/clerk/**": ["exports"],
+        "src/components/cloud/**": ["exports"],
+        "src/components/desktopUpdate.logic.ts": ["exports"],
+        "src/components/mcp/mcpApps.ts": ["exports"],
+        "src/components/sidebar/SidebarUpdatePill.tsx": ["exports"],
+        "src/components/sidebar/updateEverything.logic.ts": ["exports"],
+        "src/components/sidebar/useUpdateEverything.ts": ["exports"],
+        "src/hostedPairing.ts": ["exports"],
+        "src/state/peerPairingCode.ts": ["exports"],
+      },
     },
     "apps/mobile": {
       // Expo loads plugins and the fingerprint config by string; Metro embeds the browser entry in the native WebView.
@@ -142,26 +167,20 @@
       // React Native codegen discovers component specifications by filename.
       "entry": ["src/*NativeComponent.ts!"],
     },
-    "infra/task-cache": {
-      "ignore": ["vendor/**"],
-      // The bootstrap and Vite+ hook are loaded by shell/package configuration.
-      "entry": [
-        "alchemy.run.ts!",
-        "scripts/install.ts",
-        "scripts/install-ci.ts",
-        "src/runHook.ts",
-        "src/flush.ts",
-        "src/nativeRunHook.js",
-        "src/preload.mjs",
-      ],
-    },
-    "infra/relay": {
-      // Alchemy loads src/worker.ts as the Worker entry and reads its default export.
-      "entry": ["alchemy.run.ts!", "src/persistence/schema.ts!", "src/worker.ts!"],
-    },
     "packages/*": {
       // These workspace packages are private to this monorepo.
       "includeEntryExports": true,
+      "ignoreIssues": {
+        "src/state/connectMcpApproval.ts": ["exports"],
+        "src/managedPolicy.ts": ["exports", "nsExports"],
+        "src/agentAwareness.ts": ["exports"],
+        "src/cliRelease.ts": ["exports"],
+        "src/dpop.ts": ["exports"],
+        "src/relayAuth.ts": ["exports"],
+        "src/relayJwt.ts": ["exports"],
+        "src/t3ProjectFile.ts": ["exports"],
+        "src/tailscale.ts": ["exports"],
+      },
     },
     "packages/effect-acp": {
       "includeEntryExports": true,

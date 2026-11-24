@@ -1,11 +1,8 @@
-import { useClerk } from "@clerk/react";
+import { useState } from "react";
 
 export function useClerkLoadFailed() {
-  return useClerk().status === "error";
+  const [failed] = useState(false);
+  return failed;
 }
 
-export function retryClerkLoad() {
-  // Clerk caches its failed script load for the life of the page and never
-  // retries, so a reload is the only recovery.
-  window.location.reload();
-}
+export function retryClerkLoad() {}

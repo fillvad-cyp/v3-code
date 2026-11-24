@@ -6,11 +6,10 @@ import type * as Signature from "effect/crypto/Signature";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
-import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import { HttpClient, HttpClientResponse } from "effect/http";
+import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import type * as CodexUsageHistory from "../../usage/CodexUsageHistory.ts";
@@ -102,29 +101,12 @@ function makeCodexMaintenanceResolver(sharedHomePath: string) {
   });
 }
 
-// `codex update` installs this channel's release, which can lag npm's latest tag.
-const CODEX_NATIVE_CHANNEL = "https://releases.openai.com/codex/channels/latest";
-const CodexNativeRelease = Schema.Struct({ tag_name: Schema.String });
-
+// Background Codex CLI release polling is permanently disabled in V3 Code.
 function withCodexNativeLatestVersion(
   capabilities: ProviderMaintenanceCapabilities,
-  http: HttpClient.HttpClient,
+  _http: HttpClient.HttpClient,
 ): ProviderMaintenanceCapabilities {
-  if (capabilities.update?.lockKey !== `${DRIVER_KIND}-native`) return capabilities;
-  return {
-    ...capabilities,
-    latestVersion: null,
-    latestVersionCacheKey: CODEX_NATIVE_CHANNEL,
-    lookupLatestVersion: http.get(CODEX_NATIVE_CHANNEL).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap((response) => response.json),
-      Effect.flatMap(Schema.decodeUnknownEffect(CodexNativeRelease)),
-      Effect.map((release) => /^rust-v(\d+\.\d+\.\d+)$/.exec(release.tag_name)?.[1] ?? null),
-      Effect.timeoutOption("4 seconds"),
-      Effect.map(Option.getOrNull),
-      Effect.orElseSucceed(() => null),
-    ),
-  };
+  return capabilities;
 }
 
 export type CodexDriverEnv =

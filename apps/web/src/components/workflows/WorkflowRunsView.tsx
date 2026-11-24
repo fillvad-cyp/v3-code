@@ -33,7 +33,6 @@ import {
   workflowRunInvolves,
 } from "@t3tools/client-runtime/workflows";
 
-const WORKFLOWS_GUIDE_URL = "https://github.com/pingdotgg/t3code/blob/main/docs/user/workflows.md";
 const EVERY_WORKFLOW = "";
 const TABS: ReadonlyArray<{ readonly value: WorkflowListTab; readonly label: string }> = [
   {
@@ -175,15 +174,7 @@ export function WorkflowRunsView({
             >
               Definitions
             </button>
-            , or ask an agent to.{" "}
-            <a
-              href={WORKFLOWS_GUIDE_URL}
-              target="_blank"
-              rel="noreferrer"
-              className="underline underline-offset-2 hover:text-foreground"
-            >
-              Read the guide
-            </a>
+            , or ask an agent to.
           </T>
         }
       />,

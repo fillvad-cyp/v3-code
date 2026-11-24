@@ -57,7 +57,7 @@ export class PeerClientPairingIssuer extends Context.Service<
       PeerClientPairingRefused | EnvironmentAuth.ServerAuthInternalError
     >;
   }
->()("t3/peer/PeerClientPairing/PeerClientPairingIssuer") {}
+>()("v3code/peer/PeerClientPairing/PeerClientPairingIssuer") {}
 
 /**
  * The linking side: gets a client of this environment a pairing credential for an environment
@@ -82,7 +82,7 @@ export class PeerClientPairing extends Context.Service<
       client: { readonly sessionId: AuthSessionId },
     ) => Effect.Effect<PeerLinkClientPairingResult, PeerLinkError>;
   }
->()("t3/peer/PeerClientPairing") {}
+>()("v3code/peer/PeerClientPairing") {}
 
 const makeIssuer = Effect.gen(function* () {
   const auth = yield* EnvironmentAuth.EnvironmentAuth;

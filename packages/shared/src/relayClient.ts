@@ -14,7 +14,6 @@ import * as Data from "effect/Data";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
-import * as Hex from "effect/encoding/Hex";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -23,7 +22,7 @@ import type * as PlatformError from "effect/PlatformError";
 import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { HttpClient } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import { isWindowsRenameLock } from "./atomicWrite.ts";
 import * as HostProcess from "./HostProcess.ts";
@@ -31,9 +30,7 @@ import * as HostProcess from "./HostProcess.ts";
 export const CLOUDFLARED_VERSION = "2026.10.4";
 // Minimum for --output support and the eMudhra fix, which 2026.10.2 macOS builds lack.
 export const CLOUDFLARED_MIN_VERSION = "2026.10.3";
-const CLOUDFLARED_PATH_ENV_NAME = "T3CODE_CLOUDFLARED_PATH";
-
-const CLOUDFLARED_DOWNLOAD_TIMEOUT = "10 minutes";
+const CLOUDFLARED_PATH_ENV_NAME = "V3CODE_CLOUDFLARED_PATH";
 
 export type RelayClientExecutableSource = "override" | "managed" | "path";
 
@@ -100,41 +97,10 @@ export interface CloudflaredReleaseAsset {
   readonly archive: "binary" | "tgz";
 }
 
+// V3 Code: managed Cloudflare tunnel binary downloads are disabled.
 const CLOUDFLARED_RELEASE_ASSETS: Readonly<
   Partial<Record<`${NodeJS.Platform}-${string}`, CloudflaredReleaseAsset>>
-> = {
-  "darwin-arm64": {
-    url: "https://github.com/cloudflare/cloudflared/releases/download/2026.10.4/cloudflared-darwin-arm64.tgz",
-    sha256: "68b6bc4080ac1330234db2a9002d07f98b000537a1bd531a687b660d4160fa7f",
-    archive: "tgz",
-  },
-  "darwin-x64": {
-    url: "https://github.com/cloudflare/cloudflared/releases/download/2026.10.4/cloudflared-darwin-amd64.tgz",
-    sha256: "f11fbef4207d715892331917dafd437f032cf4b7137ed64dea3008338c1c613d",
-    archive: "tgz",
-  },
-  "linux-arm64": {
-    url: "https://github.com/cloudflare/cloudflared/releases/download/2026.10.4/cloudflared-linux-arm64",
-    sha256: "2b7203b4fb0ba28a0c1e12f8855ce2c25f76d266a8d5edafac5540b6812acff6",
-    archive: "binary",
-  },
-  "linux-x64": {
-    url: "https://github.com/cloudflare/cloudflared/releases/download/2026.10.4/cloudflared-linux-amd64",
-    sha256: "ae5e8add7884b0531d66bbca4570d1de491ff6da51e4ebe7eb160cdf241d9e42",
-    archive: "binary",
-  },
-  "win32-x64": {
-    url: "https://github.com/cloudflare/cloudflared/releases/download/2026.10.4/cloudflared-windows-amd64.exe",
-    sha256: "411b16d40c8d872243efeb52c550053d00af0a8a97fbb32e730fb8aba429eaa8",
-    archive: "binary",
-  },
-  // Cloudflare publishes no Windows ARM64 build; Windows 11 on ARM runs x64 under emulation.
-  "win32-arm64": {
-    url: "https://github.com/cloudflare/cloudflared/releases/download/2026.10.4/cloudflared-windows-amd64.exe",
-    sha256: "411b16d40c8d872243efeb52c550053d00af0a8a97fbb32e730fb8aba429eaa8",
-    archive: "binary",
-  },
-};
+> = {};
 
 const INSTALL_LOCK_RETRY_COUNT = 100;
 const INSTALL_LOCK_RETRY_DELAY = "100 millis";
@@ -278,9 +244,9 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
   | Path.Path
 > {
   const random = yield* SecureRandom.SecureRandom;
-  const digest = yield* Digest.Digest;
+  const _digest = yield* Digest.Digest;
   const fileSystem = yield* FileSystem.FileSystem;
-  const httpClient = yield* HttpClient.HttpClient;
+  const _httpClient = yield* HttpClient.HttpClient;
   const path = yield* Path.Path;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const installSemaphore = yield* Semaphore.make(1);
@@ -469,53 +435,13 @@ export const makeCloudflaredRelayClient = Effect.fn("cloudflared.make")(function
   });
 
   const downloadAsset = Effect.fn("cloudflared.downloadAsset")(function* (
-    asset: CloudflaredReleaseAsset,
-    report: (stage: RelayClientInstallProgressStage) => Effect.Effect<void>,
+    _asset: CloudflaredReleaseAsset,
+    _report: (stage: RelayClientInstallProgressStage) => Effect.Effect<void>,
   ) {
-    yield* report("downloading");
-    const response = yield* httpClient.execute(HttpClientRequest.get(asset.url)).pipe(
-      Effect.timeout(CLOUDFLARED_DOWNLOAD_TIMEOUT),
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.mapError(
-        (cause) =>
-          new RelayClientInstallError({
-            reason: "download_failed",
-            message: "Could not download the relay client.",
-            cause,
-          }),
-      ),
-    );
-    const bytes = new Uint8Array(
-      yield* response.arrayBuffer.pipe(
-        Effect.timeout(CLOUDFLARED_DOWNLOAD_TIMEOUT),
-        Effect.mapError(
-          (cause) =>
-            new RelayClientInstallError({
-              reason: "download_failed",
-              message: "Could not read the downloaded relay client binary.",
-              cause,
-            }),
-        ),
-      ),
-    );
-    yield* report("verifying");
-    const checksum = yield* digest.digest(Digest.sha256, bytes).pipe(
-      Effect.mapError(
-        (cause) =>
-          new RelayClientInstallError({
-            reason: "validation_failed",
-            message: "Could not verify the downloaded relay client checksum.",
-            cause,
-          }),
-      ),
-    );
-    if (Hex.encode(checksum) !== asset.sha256) {
-      return yield* new RelayClientInstallError({
-        reason: "invalid_checksum",
-        message: "Downloaded relay client checksum did not match the pinned release.",
-      });
-    }
-    return bytes;
+    return yield* new RelayClientInstallError({
+      reason: "managed_by_policy",
+      message: "Managed relay / cloudflared downloads are disabled in V3 Code.",
+    });
   });
 
   const removeEmptyLock = (lockPath: string) =>

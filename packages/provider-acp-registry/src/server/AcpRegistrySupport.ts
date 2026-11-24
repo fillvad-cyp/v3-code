@@ -50,9 +50,8 @@ import { collectUint8StreamText } from "@t3tools/provider-core/server/collectStr
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 
-const ACP_REGISTRY_URL = "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json";
+const ACP_REGISTRY_URL = "";
 
-const MAX_REGISTRY_BYTES = 1024 * 1024;
 const MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024;
 const MAX_COMMAND_OUTPUT_BYTES = 1024 * 1024;
 // Install errors become the provider status message; npm and uv print the actionable error last.
@@ -62,7 +61,6 @@ const MAX_ARCHIVE_LISTING_BYTES = 64 * 1024 * 1024;
 const MAX_PACKAGE_MANIFEST_BYTES = 1024 * 1024;
 // Older clients omit the limit and validate responses against a 20-agent cap.
 const DEFAULT_SEARCH_LIMIT = 20;
-const REGISTRY_REQUEST_TIMEOUT = "30 seconds";
 // Searches reuse an index fetched this recently; prepare always fetches the latest.
 const REGISTRY_SEARCH_MAX_AGE_MS = 5 * 60 * 1_000;
 const ARCHIVE_REQUEST_TIMEOUT = "20 minutes";
@@ -681,7 +679,7 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
     return yield* Effect.promise(async () => executableResolver(command, platform, environment));
   });
   const platformTarget = resolveAcpRegistryPlatformTarget(platform, architecture);
-  const registryUrl = input.registryUrl ?? ACP_REGISTRY_URL;
+  const _registryUrl = input.registryUrl ?? ACP_REGISTRY_URL;
   const registryDirectory = path.join(input.cacheDir, "acp-registry");
   const registryCachePath = path.join(registryDirectory, "registry.json");
   const installsDirectory = input.toolsDir;
@@ -824,7 +822,7 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
     },
   );
 
-  const assertHttpsUrl = Effect.fn("AcpRegistryCatalog.assertHttpsUrl")(function* (
+  const _assertHttpsUrl = Effect.fn("AcpRegistryCatalog.assertHttpsUrl")(function* (
     value: string,
     detail: string,
   ) {
@@ -873,7 +871,7 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
     .readFileString(registryCachePath)
     .pipe(Effect.flatMap(decodeRegistryText), Effect.option);
 
-  const writeRegistryCache = (text: string) =>
+  const _writeRegistryCache = (text: string) =>
     random.uuidV4().pipe(
       Effect.flatMap((id) => {
         const temporaryPath = `${registryCachePath}.${process.pid}-${id}.tmp`;
@@ -889,66 +887,11 @@ export const makeAcpRegistryCatalog = Effect.fn("AcpRegistryCatalog.make")(funct
     );
 
   const fetchRegistry = Effect.fn("AcpRegistryCatalog.fetchRegistry")(function* () {
-    yield* assertHttpsUrl(registryUrl, "ACP Registry index URL must use HTTPS.");
-    const response = yield* httpClient.execute(HttpClientRequest.get(registryUrl)).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.mapError(
-        (cause) =>
-          new AcpRegistryError({
-            reason: "registry_unavailable",
-            detail: `Could not fetch ACP Registry index from ${registryUrl}.`,
-            cause,
-          }),
-      ),
-      Effect.timeoutOrElse({
-        duration: REGISTRY_REQUEST_TIMEOUT,
-        orElse: () =>
-          Effect.fail(
-            new AcpRegistryError({
-              reason: "registry_unavailable",
-              detail: "Timed out fetching ACP Registry index.",
-            }),
-          ),
-      }),
-    );
-    const collected = yield* collectUint8StreamText({
-      stream: response.stream,
-      maxBytes: MAX_REGISTRY_BYTES + 1,
-    }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new AcpRegistryError({
-            reason: "registry_unavailable",
-            detail: "Could not read ACP Registry response body.",
-            cause,
-          }),
-      ),
-      Effect.timeoutOrElse({
-        duration: REGISTRY_REQUEST_TIMEOUT,
-        orElse: () =>
-          Effect.fail(
-            new AcpRegistryError({
-              reason: "registry_unavailable",
-              detail: "Timed out reading ACP Registry response body.",
-            }),
-          ),
-      }),
-    );
-    if (collected.truncated || collected.bytes > MAX_REGISTRY_BYTES) {
-      return yield* new AcpRegistryError({
-        reason: "registry_unavailable",
-        detail: `ACP Registry index exceeds ${MAX_REGISTRY_BYTES} bytes.`,
-      });
-    }
-    if (collected.invalidUtf8) {
-      return yield* new AcpRegistryError({
-        reason: "registry_unavailable",
-        detail: "ACP Registry index is not valid UTF-8.",
-      });
-    }
-    const registry = yield* decodeRegistryText(collected.text);
-    yield* writeRegistryCache(collected.text);
-    return registry;
+    // V3 Code: remote ACP CDN registry fetching is disabled for privacy/offline operation.
+    return yield* new AcpRegistryError({
+      reason: "registry_unavailable",
+      detail: "Remote ACP Registry lookups are disabled in V3 Code.",
+    });
   });
 
   const refreshRegistry = Effect.fn("AcpRegistryCatalog.refreshRegistry")(function* () {

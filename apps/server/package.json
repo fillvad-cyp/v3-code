@@ -1,14 +1,9 @@
 {
-  "name": "t3",
+  "name": "v3code",
   "version": "0.1.11",
   "license": "MIT",
-  "repository": {
-    "type": "git",
-    "url": "https://github.com/pingdotgg/t3code",
-    "directory": "apps/server"
-  },
   "bin": {
-    "t3": "./dist/bin.mjs"
+    "v3": "./dist/bin.mjs"
   },
   "files": [
     "dist"

@@ -1,7 +1,6 @@
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import { serverUpdateFailureText } from "@t3tools/client-runtime/state/server";
 import { T, useGT, useMessages, Var } from "gt-react-native";
-import * as Dialog from "../../components/ui/Dialog";
 import { useAtom, useAtomValue } from "@effect/atom-react";
 import { useNavigation, type StaticScreenProps } from "@react-navigation/native";
 import {
@@ -13,8 +12,6 @@ import {
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { managedUpdatesDenial } from "@t3tools/client-runtime/contract-labels";
 import { sessionPermissionsUnavailableMessage } from "@t3tools/shared/authScopeOptions";
-import * as Cause from "effect/Cause";
-import * as Exit from "effect/Exit";
 import { AsyncResult } from "effect/reactivity";
 import { useRef, useState } from "react";
 import { View } from "react-native";
@@ -25,7 +22,6 @@ import { m } from "../../i18n/messages";
 import { AppText as Text } from "../../components/ui/AppText";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
-import { appAtomRegistry } from "../../state/atom-registry";
 import { environmentPresentations } from "../../state/presentation";
 import { serverEnvironment } from "../../state/server";
 import { environmentSession, useEnvironmentScope, readEnvironmentScope } from "../../state/session";
@@ -73,7 +69,6 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
   const outdated =
     useAtomValue(environmentPresentations.presentationAtom(environmentId))?.entry
       .serverUpdateRequired === true;
-  const updateServer = useAtomCommand(serverEnvironment.updateServer);
   const updateProvider = useAtomCommand(serverEnvironment.updateProvider);
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders);
   const [connectionExpanded, setConnectionExpanded] = useState(false);
@@ -81,7 +76,7 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
   const pendingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [releaseCheck, checkRelease] = useAtom(environmentReleaseCheckAtom(environmentId), {
+  const [releaseCheck] = useAtom(environmentReleaseCheckAtom(environmentId), {
     mode: "promiseExit",
   });
   const release = releaseCheckValue(releaseCheck);
@@ -99,6 +94,7 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
   const canRead = useEnvironmentScope(environmentId, AuthOrchestrationReadScope);
   const busy = !connected || pending !== null || running || providerBusy;
   const disabled = !allowed || busy;
+  const _disabled = disabled;
   const version = config?.environment.serverVersion;
   const checkedRelease = release?.fromVersion === version ? release : null;
   const capabilities = config?.environment.capabilities;
@@ -124,51 +120,6 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
           : gt("The action could not be completed. Try again."),
       );
     }
-  }
-
-  function requestServerUpdate() {
-    const targetVersion = checkedRelease?.targetVersion;
-    if (disabled || !targetVersion || !capabilities || !supportsEnvironmentUpdate(capabilities))
-      return;
-    Dialog.alert(
-      environment
-        ? gt("Update {environment}?", { environment: environment.environmentLabel })
-        : gt("Update environment?"),
-      capabilities.serverSelfUpdate === "desktop-managed"
-        ? gt(
-            "Install {product} {version}. The desktop app will close and relaunch. Running threads may be interrupted.",
-            { product: "T3 Code", version: targetVersion },
-          )
-        : gt(
-            "Install {product} {version}. The server will restart and reconnect. Running threads may be interrupted.",
-            { product: "T3 Code", version: targetVersion },
-          ),
-      [
-        { text: gt("Cancel"), style: "cancel" },
-        {
-          text: gt("Update", { $context: "verb, install an update" }),
-          onPress: () =>
-            void run("server", async () => {
-              if (
-                AsyncResult.isFailure(
-                  appAtomRegistry.get(environmentSession.sessionStateAtom(environmentId)),
-                ) ||
-                !canMaintainEnvironment(
-                  appAtomRegistry.get(environmentSession.sessionStateValueAtom(environmentId)),
-                  connected,
-                )
-              )
-                return;
-              const result = await updateServer({
-                environmentId,
-                input: { targetVersion },
-              });
-              if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
-              setNotice(gt("Updated to {version}.", { version: result.value.targetVersion }));
-            }),
-        },
-      ],
-    );
   }
 
   function requestProviderUpdate(provider: ServerProvider) {
@@ -254,7 +205,7 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
             {notice ? <Text className="px-2 text-sm text-foreground-muted">{notice}</Text> : null}
             {config && !outdated ? (
               <>
-                <SettingsSection title="T3 Code">
+                <SettingsSection title={gt("V3 Code")}>
                   <View className="gap-1 p-4">
                     <Text className="text-base text-foreground">
                       <T>
@@ -298,7 +249,7 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                         {capabilities?.serverSelfUpdate === "desktop-managed"
                           ? gt("Update the desktop app on this machine.")
                           : gt("Update and restart {product} on this machine.", {
-                              product: "T3 Code",
+                              product: "V3 Code",
                             })}
                       </Text>
                     ) : null}
@@ -310,34 +261,6 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                         organization: managedPolicy.organization,
                       })}
                       onPress={() => void tryOpenExternalUrl(supportUrl)}
-                    />
-                  ) : null}
-                  {updatesDenial ? null : (
-                    <SettingsActionRow
-                      icon="arrow.clockwise"
-                      label={gt("Check for updates")}
-                      disabled={disabled}
-                      loading={pending === "check"}
-                      onPress={() => {
-                        if (disabled) return;
-                        const fromVersion = config.environment.serverVersion;
-                        void run("check", async () => {
-                          const exit = await checkRelease(async () => fromVersion);
-                          // `run` owns the error message, so a failed lookup rethrows to it.
-                          if (Exit.isFailure(exit)) throw Cause.squash(exit.cause);
-                        });
-                      }}
-                    />
-                  )}
-                  {checkedRelease?.targetVersion &&
-                  !updatesDenial &&
-                  supportsEnvironmentUpdate(config.environment.capabilities) ? (
-                    <SettingsActionRow
-                      icon="arrow.up.circle"
-                      label={gt("Update to {version}", { version: checkedRelease.targetVersion })}
-                      disabled={disabled}
-                      loading={pending === "server" || running}
-                      onPress={requestServerUpdate}
                     />
                   ) : null}
                 </SettingsSection>

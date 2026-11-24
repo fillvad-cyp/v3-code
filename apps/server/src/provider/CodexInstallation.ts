@@ -4,7 +4,7 @@ import {
   type ProviderInstallState,
   type ServerProviderCompatibilityAdvisory,
 } from "@t3tools/contracts";
-import { cliArchiveTarCommand, parseChecksums } from "@t3tools/shared/cliRelease";
+import { cliArchiveTarCommand } from "@t3tools/shared/cliRelease";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { resolveCommandPath, resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -34,10 +34,6 @@ import * as ModelManifest from "./ModelManifest.ts";
 
 const DRIVER = ProviderDriverKind.make("codex");
 const STAGING_STALE_AFTER_MS = 24 * 60 * 60_000;
-const UPDATE_CHECK_INTERVAL_MS = 60 * 60_000;
-const UPDATE_CHECK_TIMEOUT = "20 seconds";
-const UPSTREAM_LATEST_URL = "https://registry.npmjs.org/@openai/codex/latest";
-const UPSTREAM_RELEASES_URL = "https://github.com/openai/codex/releases/download";
 // An upstream release has no recorded size; current packages are about 160 MB.
 const UPSTREAM_MAX_ARCHIVE_BYTES = 1024 * 1024 * 1024;
 const Version = Schema.String.check(Schema.isPattern(/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/u));
@@ -64,7 +60,6 @@ const decodeNpmCodexPackage = Schema.decodeEffect(
   ),
 );
 const decodeVersion = Schema.decodeUnknownEffect(Version);
-const decodeNpmLatest = Schema.decodeUnknownEffect(Schema.Struct({ version: Version }));
 const encodeRecord = Schema.encodeEffect(Schema.fromJsonString(InstalledRelease));
 const encodeActive = Schema.encodeEffect(Schema.fromJsonString(ActiveRelease));
 export interface CodexReleaseAsset {
@@ -169,7 +164,7 @@ interface CodexInstallationService {
 export class CodexInstallation extends Context.Service<
   CodexInstallation,
   CodexInstallationService
->()("t3/provider/CodexInstallation") {
+>()("v3code/provider/CodexInstallation") {
   static readonly layer = Layer.effect(
     CodexInstallation,
     Effect.gen(function* () {
@@ -210,11 +205,9 @@ export const makeCodexInstallation = Effect.fn("makeCodexInstallation")(function
   const localProbePath = path.join(options.baseDir, "caches", "codex-local-probe.json");
   const executableName = platform === "win32" ? "codex.exe" : "codex";
   const gate = yield* Semaphore.make(1);
-  const updateCheckGate = yield* Semaphore.make(1);
   const leases = new Map<string, number>();
   let running: { readonly operationId: string; readonly fiber: Fiber.Fiber<void> } | undefined;
-  let upstream: CodexReleaseAsset | null = null;
-  let upstreamCheckedAt: number | null = null;
+  const upstream: CodexReleaseAsset | null = null;
 
   // A local Codex is used as is, so only a managed install is ever updated.
   const managedVersion = (current: ProviderInstallState) =>
@@ -313,68 +306,15 @@ export const makeCodexInstallation = Effect.fn("makeCodexInstallation")(function
   });
   const isSupported = (version: string) =>
     compatibility(version).pipe(Effect.map((advisory) => advisory?.status === "supported"));
-  // Forgets what the manifest withdrew after it was seen. Managed resolution
-  // refuses a withdrawn install, so the pin replaces it rather than a re-check.
   const keptInstall = Effect.fn("CodexInstallation.keptInstall")(function* (
     installedVersion: string | null,
   ) {
-    if (upstream && !(yield* isSupported(upstream.version))) upstream = null;
     return installedVersion !== null && (yield* isSupported(installedVersion))
       ? installedVersion
       : null;
   });
-  // npm names the latest stable release; its GitHub release lists the package
-  // checksums, so an upstream update stays SHA-256 verified.
-  const lookupUpstream = Effect.gen(function* () {
-    if (!asset) return null;
-    const latest = yield* http
-      .execute(HttpClientRequest.get(UPSTREAM_LATEST_URL))
-      .pipe(Effect.flatMap(HttpClientResponse.filterStatusOk));
-    const { version } = yield* latest.json.pipe(Effect.flatMap(decodeNpmLatest));
-    // Managed resolution refuses anything else, so offering it would break sessions.
-    if (!(yield* isSupported(version))) return null;
-    const releaseUrl = `${UPSTREAM_RELEASES_URL}/rust-v${version}`;
-    const checksums = yield* http
-      .execute(HttpClientRequest.get(`${releaseUrl}/codex-package_SHA256SUMS`))
-      .pipe(
-        Effect.flatMap(HttpClientResponse.filterStatusOk),
-        Effect.flatMap((response) => response.text),
-      );
-    const fileName = `codex-package-${asset.target}.tar.gz`;
-    const sha256 = parseChecksums(checksums).get(fileName);
-    if (!sha256) return null;
-    return {
-      version,
-      target: asset.target,
-      url: `${releaseUrl}/${fileName}`,
-      sha256,
-      archiveBytes: null,
-    } satisfies CodexReleaseAsset;
-  });
-  // A check already in flight covers concurrent subscribers, including when it fails.
-  const checkForUpdate = updateCheckGate
-    .withPermitsIfAvailable(1)(
-      Effect.gen(function* () {
-        const now = yield* Clock.currentTimeMillis;
-        if (upstreamCheckedAt === null || now - upstreamCheckedAt >= UPDATE_CHECK_INTERVAL_MS) {
-          // A failed lookup counts too, and keeps whatever release was offered before.
-          upstreamCheckedAt = now;
-          upstream = yield* lookupUpstream.pipe(
-            Effect.timeout(UPDATE_CHECK_TIMEOUT),
-            Effect.orElseSucceed(() => upstream),
-          );
-        }
-        // A running install already published the release it is installing.
-        yield* SubscriptionRef.updateEffect(state, (current) =>
-          isRunning(current)
-            ? Effect.succeed(current)
-            : keptInstall(managedVersion(current)).pipe(
-                Effect.map((kept) => ({ ...current, ...offer(kept) })),
-              ),
-        );
-      }),
-    )
-    .pipe(Effect.ignore);
+  // Background provider CLI update checks are disabled in V3 Code.
+  const checkForUpdate: Effect.Effect<void> = Effect.void;
   const resolveManaged = Effect.fn("CodexInstallation.resolveManaged")(
     function* () {
       const active = yield* readRecord(activePath, ActiveRelease);
@@ -388,7 +328,7 @@ export const makeCodexInstallation = Effect.fn("makeCodexInstallation")(function
       return executable;
     },
     Effect.mapError(
-      wrapFailure("resolve", "Codex is not installed in T3 Code. Install it to continue."),
+      wrapFailure("resolve", "Codex is not installed in V3 Code. Install it to continue."),
     ),
   );
   const acquire = Effect.fn("CodexInstallation.acquire")(function* () {
