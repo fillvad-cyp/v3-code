@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 340" width="1200" height="340" role="img" aria-label="V3 Code — Zero-telemetry, autonomous GUI for local AI coding agents">
+  <defs>
+    <linearGradient id="canvas-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#070B10"/>
+      <stop offset="55%" stop-color="#0D141F"/>
+      <stop offset="100%" stop-color="#111C2A"/>
+    </linearGradient>
+    <radialGradient id="glow-tr" cx="85%" cy="15%" r="55%">
+      <stop offset="0%" stop-color="#34D399" stop-opacity="0.18"/>
+      <stop offset="100%" stop-color="#34D399" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="glow-bl" cx="12%" cy="88%" r="48%">
+      <stop offset="0%" stop-color="#10B981" stop-opacity="0.14"/>
+      <stop offset="100%" stop-color="#10B981" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="logo-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0B0F14"/>
+      <stop offset="100%" stop-color="#151D28"/>
+    </linearGradient>
+    <linearGradient id="logo-accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34D399"/>
+      <stop offset="100%" stop-color="#F8FAFC"/>
+    </linearGradient>
+    <pattern id="dot-grid" width="28" height="28" patternUnits="userSpaceOnUse">
+      <circle cx="14" cy="14" r="1.1" fill="#94A3B8" fill-opacity="0.12"/>
+    </pattern>
+    <clipPath id="canvas-clip">
+      <rect x="1" y="1" width="1198" height="338" rx="23.5"/>
+    </clipPath>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1199" height="339" rx="24" fill="url(#canvas-bg)" stroke="#1E293B" stroke-width="1"/>
+  <g clip-path="url(#canvas-clip)">
+    <rect x="1" y="1" width="1198" height="338" fill="url(#dot-grid)"/>
+    <rect x="1" y="1" width="1198" height="338" fill="url(#glow-tr)"/>
+    <rect x="1" y="1" width="1198" height="338" fill="url(#glow-bl)"/>
+  </g>
+
+  <!-- V3 Emblem -->
+  <g transform="translate(56, 92) scale(0.15234375)">
+    <rect x="32" y="32" width="960" height="960" rx="220" fill="url(#logo-bg)" stroke="#34D399" stroke-opacity="0.4" stroke-width="20"/>
+    <path d="M210 310 L318 310 L404 612 L490 310 L594 310 L452 730 L352 730 Z" fill="url(#logo-accent)"/>
+    <path d="M618 310 L812 310 L812 392 L712 486 L744 486 C794 486 828 524 828 584 L828 634 C828 696 782 736 710 736 L608 736 L608 656 L706 656 C730 656 742 642 742 618 L742 596 C742 572 728 558 702 558 L628 558 L628 492 L716 392 L618 392 Z" fill="#F8FAFC"/>
+  </g>
+
+  <!-- Title + Badge -->
+  <text x="248" y="138" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', Helvetica, Arial, sans-serif" font-size="54" font-weight="800" letter-spacing="-1.2" fill="#F8FAFC">V3 Code</text>
+  <rect x="492" y="102" width="132" height="32" rx="16" fill="#064E3B" fill-opacity="0.65" stroke="#34D399" stroke-opacity="0.45" stroke-width="1"/>
+  <text x="558" y="123" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="13.5" font-weight="600" fill="#6EE7B7">v0.1.11 · MIT</text>
+
+  <!-- Tagline -->
+  <text x="248" y="177" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', Helvetica, Arial, sans-serif" font-size="20" font-weight="500" fill="#CBD5E1">Zero-telemetry, autonomous GUI for local AI coding agents</text>
+  <text x="248" y="206" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', Helvetica, Arial, sans-serif" font-size="14.5" font-weight="400" fill="#94A3B8">Linux · Windows · macOS · Android · Web UI · Standalone CLI</text>
+
+  <!-- Privacy Pills -->
+  <g transform="translate(248, 228)">
+    <rect x="0" y="0" width="144" height="34" rx="17" fill="#0F172A" stroke="#1E293B" stroke-width="1"/>
+    <circle cx="19" cy="17" r="4.5" fill="#34D399"/>
+    <text x="33" y="22" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="13.5" font-weight="600" fill="#E2E8F0">0 Telemetry</text>
+
+    <rect x="156" y="0" width="166" height="34" rx="17" fill="#0F172A" stroke="#1E293B" stroke-width="1"/>
+    <circle cx="175" cy="17" r="4.5" fill="#34D399"/>
+    <text x="189" y="22" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="13.5" font-weight="600" fill="#E2E8F0">0 Auto-Updates</text>
+
+    <rect x="334" y="0" width="154" height="34" rx="17" fill="#0F172A" stroke="#1E293B" stroke-width="1"/>
+    <circle cx="353" cy="17" r="4.5" fill="#34D399"/>
+    <text x="367" y="22" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="13.5" font-weight="600" fill="#E2E8F0">0 Cloud Relay</text>
+  </g>
+
+  <!-- Right-side Local Isolation Terminal Card -->
+  <g transform="translate(840, 52)">
+    <rect x="0" y="0" width="312" height="236" rx="16" fill="#090D14" stroke="#1E293B" stroke-width="1.2"/>
+    <rect x="0" y="0" width="312" height="34" rx="16" fill="#111827"/>
+    <rect x="0" y="18" width="312" height="16" fill="#111827"/>
+    <line x1="0" y1="34" x2="312" y2="34" stroke="#1E293B" stroke-width="1"/>
+    <circle cx="20" cy="17" r="5" fill="#334155"/>
+    <circle cx="36" cy="17" r="5" fill="#334155"/>
+    <circle cx="52" cy="17" r="5" fill="#334155"/>
+    <text x="156" y="21" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="11.5" fill="#94A3B8">v3 — local runtime</text>
+
+    <text x="20" y="64" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="13" fill="#34D399">$</text>
+    <text x="36" y="64" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="13" fill="#F8FAFC">v3 --host 127.0.0.1</text>
+
+    <text x="20" y="98" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" fill="#64748B">home</text>
+    <text x="116" y="98" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" fill="#E2E8F0">~/.v3</text>
+
+    <text x="20" y="124" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" fill="#64748B">listen</text>
+    <text x="116" y="124" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" fill="#E2E8F0">127.0.0.1:3873</text>
+
+    <text x="20" y="150" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" fill="#64748B">telemetry</text>
+    <text x="116" y="150" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" fill="#34D399">disabled (0 B)</text>
+
+    <text x="20" y="176" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" fill="#64748B">updates</text>
+    <text x="116" y="176" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" fill="#34D399">disabled</text>
+
+    <line x1="20" y1="194" x2="292" y2="194" stroke="#1E293B" stroke-width="1"/>
+    <circle cx="26" cy="214" r="4.5" fill="#34D399"/>
+    <text x="40" y="218" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" font-weight="600" fill="#6EE7B7">outbound: 0 connections</text>
+  </g>
+</svg>

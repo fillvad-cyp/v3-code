@@ -1,0 +1,81 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 640" width="1280" height="640" role="img" aria-label="V3 Code GitHub Social Preview">
+  <defs>
+    <linearGradient id="sp-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#070B10"/>
+      <stop offset="50%" stop-color="#0C131E"/>
+      <stop offset="100%" stop-color="#111C2A"/>
+    </linearGradient>
+    <radialGradient id="sp-glow-1" cx="80%" cy="20%" r="55%">
+      <stop offset="0%" stop-color="#34D399" stop-opacity="0.22"/>
+      <stop offset="100%" stop-color="#34D399" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="sp-glow-2" cx="18%" cy="84%" r="50%">
+      <stop offset="0%" stop-color="#10B981" stop-opacity="0.16"/>
+      <stop offset="100%" stop-color="#10B981" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="sp-logo-bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0B0F14"/>
+      <stop offset="100%" stop-color="#151D28"/>
+    </linearGradient>
+    <linearGradient id="sp-logo-accent" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#34D399"/>
+      <stop offset="100%" stop-color="#F8FAFC"/>
+    </linearGradient>
+    <pattern id="sp-dots" width="32" height="32" patternUnits="userSpaceOnUse">
+      <circle cx="2" cy="2" r="1.2" fill="#94A3B8" fill-opacity="0.12"/>
+    </pattern>
+  </defs>
+
+  <rect x="0" y="0" width="1280" height="640" fill="url(#sp-bg)"/>
+  <rect x="0" y="0" width="1280" height="640" fill="url(#sp-dots)"/>
+  <rect x="0" y="0" width="1280" height="640" fill="url(#sp-glow-1)"/>
+  <rect x="0" y="0" width="1280" height="640" fill="url(#sp-glow-2)"/>
+
+  <!-- Subtle outer frame -->
+  <rect x="36" y="36" width="1208" height="568" rx="28" fill="none" stroke="#1E293B" stroke-width="1.5"/>
+
+  <!-- Emblem + Heading -->
+  <g transform="translate(88, 96) scale(0.1875)">
+    <rect x="32" y="32" width="960" height="960" rx="220" fill="url(#sp-logo-bg)" stroke="#34D399" stroke-opacity="0.45" stroke-width="20"/>
+    <path d="M210 310 L318 310 L404 612 L490 310 L594 310 L452 730 L352 730 Z" fill="url(#sp-logo-accent)"/>
+    <path d="M618 310 L812 310 L812 392 L712 486 L744 486 C794 486 828 524 828 584 L828 634 C828 696 782 736 710 736 L608 736 L608 656 L706 656 C730 656 742 642 742 618 L742 596 C742 572 728 558 702 558 L628 558 L628 492 L716 392 L618 392 Z" fill="#F8FAFC"/>
+  </g>
+
+  <text x="320" y="178" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="82" font-weight="700" fill="#F8FAFC">V3 Code</text>
+  <rect x="692" y="128" width="176" height="42" rx="21" fill="#064E3B" fill-opacity="0.7" stroke="#34D399" stroke-opacity="0.55" stroke-width="1.5"/>
+  <text x="780" y="156" text-anchor="middle" font-family="'Liberation Mono', monospace" font-size="18" font-weight="700" fill="#6EE7B7">ZERO TELEMETRY</text>
+
+  <text x="320" y="232" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="28" fill="#CBD5E1">Autonomous open-source GUI for local AI coding agents</text>
+  <text x="320" y="272" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="20" fill="#94A3B8">Claude Code · Codex · OpenCode · Cursor · Grok · Pi · Muse · Local Git</text>
+
+  <!-- Bottom 4 feature cards -->
+  <g transform="translate(88, 364)">
+    <rect x="0" y="0" width="260" height="184" rx="18" fill="#0E1522" stroke="#1E293B" stroke-width="1.4"/>
+    <circle cx="32" cy="36" r="6" fill="#34D399"/>
+    <text x="48" y="42" font-family="'Liberation Mono', monospace" font-size="14" font-weight="700" fill="#6EE7B7">PRIVACY</text>
+    <text x="26" y="84" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="24" font-weight="700" fill="#F8FAFC">0 Outbound</text>
+    <text x="26" y="118" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="16" fill="#94A3B8">No PostHog, no Axiom,</text>
+    <text x="26" y="142" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="16" fill="#94A3B8">no Clerk, no cloud relay</text>
+
+    <rect x="282" y="0" width="260" height="184" rx="18" fill="#0E1522" stroke="#1E293B" stroke-width="1.4"/>
+    <circle cx="314" cy="36" r="6" fill="#34D399"/>
+    <text x="330" y="42" font-family="'Liberation Mono', monospace" font-size="14" font-weight="700" fill="#6EE7B7">DESKTOP</text>
+    <text x="308" y="84" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="24" font-weight="700" fill="#F8FAFC">All OS Ready</text>
+    <text x="308" y="118" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="16" fill="#94A3B8">Linux AppImage &amp; deb,</text>
+    <text x="308" y="142" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="16" fill="#94A3B8">Windows exe, macOS app</text>
+
+    <rect x="564" y="0" width="260" height="184" rx="18" fill="#0E1522" stroke="#1E293B" stroke-width="1.4"/>
+    <circle cx="596" cy="36" r="6" fill="#34D399"/>
+    <text x="612" y="42" font-family="'Liberation Mono', monospace" font-size="14" font-weight="700" fill="#6EE7B7">MOBILE &amp; WEB</text>
+    <text x="590" y="84" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="24" font-weight="700" fill="#F8FAFC">Android + Web</text>
+    <text x="590" y="118" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="16" fill="#94A3B8">Direct LAN, Tailscale &amp;</text>
+    <text x="590" y="142" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="16" fill="#94A3B8">SSH — no middlemen</text>
+
+    <rect x="846" y="0" width="258" height="184" rx="18" fill="#0E1522" stroke="#1E293B" stroke-width="1.4"/>
+    <circle cx="878" cy="36" r="6" fill="#34D399"/>
+    <text x="894" y="42" font-family="'Liberation Mono', monospace" font-size="14" font-weight="700" fill="#6EE7B7">CLI BINARY</text>
+    <text x="872" y="84" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="24" font-weight="700" fill="#F8FAFC">Standalone v3</text>
+    <text x="872" y="118" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="16" fill="#94A3B8">Single Node 26 SEA</text>
+    <text x="872" y="142" font-family="'Liberation Sans', Helvetica, Arial, sans-serif" font-size="16" fill="#94A3B8">server + embedded UI</text>
+  </g>
+</svg>

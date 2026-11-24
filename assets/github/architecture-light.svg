@@ -1,0 +1,85 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 370" width="1200" height="370" role="img" aria-label="V3 Code local-first architecture">
+  <defs>
+    <linearGradient id="arch-bg-l" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="100%" stop-color="#F8FAFC"/>
+    </linearGradient>
+    <marker id="arrow-em-l" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 10 5 L 0 9 z" fill="#059669"/>
+    </marker>
+  </defs>
+
+  <rect x="0.5" y="0.5" width="1199" height="369" rx="20" fill="url(#arch-bg-l)" stroke="#CBD5E1" stroke-width="1"/>
+
+  <!-- Column headers -->
+  <text x="40" y="46" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" font-weight="700" letter-spacing="1.2" fill="#64748B">01 · YOUR DEVICES</text>
+  <text x="424" y="46" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" font-weight="700" letter-spacing="1.2" fill="#059669">02 · DIRECT TRANSPORT</text>
+  <text x="800" y="46" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" font-weight="700" letter-spacing="1.2" fill="#64748B">03 · LOCAL HOST / SERVER</text>
+
+  <!-- Left column cards -->
+  <g transform="translate(40, 68)">
+    <rect x="0" y="0" width="320" height="78" rx="14" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.2"/>
+    <text x="20" y="31" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="16" font-weight="700" fill="#0F172A">Desktop App (Electron)</text>
+    <text x="20" y="55" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="13" fill="#475569">Linux · Windows (+WSL) · macOS</text>
+
+    <rect x="0" y="96" width="320" height="78" rx="14" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.2"/>
+    <text x="20" y="127" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="16" font-weight="700" fill="#0F172A">Mobile App (React Native)</text>
+    <text x="20" y="151" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="13" fill="#475569">Android APK · iOS (Xcode build)</text>
+
+    <rect x="0" y="192" width="320" height="78" rx="14" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.2"/>
+    <text x="20" y="223" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="16" font-weight="700" fill="#0F172A">Web Browser UI</text>
+    <text x="20" y="247" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="13" fill="#475569">Embedded SPA on localhost / LAN</text>
+  </g>
+
+  <!-- Connector lines Left -> Center -->
+  <path d="M 360 107 C 392 107, 392 168, 420 168" fill="none" stroke="#059669" stroke-opacity="0.7" stroke-width="1.8" marker-end="url(#arrow-em-l)"/>
+  <path d="M 360 203 L 420 203" fill="none" stroke="#059669" stroke-opacity="0.9" stroke-width="1.8" marker-end="url(#arrow-em-l)"/>
+  <path d="M 360 299 C 392 299, 392 238, 420 238" fill="none" stroke="#059669" stroke-opacity="0.7" stroke-width="1.8" marker-end="url(#arrow-em-l)"/>
+
+  <!-- Center transport box -->
+  <g transform="translate(424, 92)">
+    <rect x="0" y="0" width="312" height="222" rx="16" fill="#ECFDF5" stroke="#10B981" stroke-opacity="0.55" stroke-width="1.4"/>
+    <text x="156" y="34" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="16" font-weight="700" fill="#064E3B">Private WebSocket &amp; HTTP</text>
+    <text x="156" y="55" text-anchor="middle" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="12.5" fill="#047857">Direct connection — zero third-party hops</text>
+
+    <!-- 2x2 transport pills -->
+    <rect x="20" y="74" width="130" height="32" rx="8" fill="#FFFFFF" stroke="#6EE7B7"/>
+    <text x="85" y="95" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" font-weight="600" fill="#065F46">localhost</text>
+
+    <rect x="162" y="74" width="130" height="32" rx="8" fill="#FFFFFF" stroke="#6EE7B7"/>
+    <text x="227" y="95" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" font-weight="600" fill="#065F46">LAN</text>
+
+    <rect x="20" y="116" width="130" height="32" rx="8" fill="#FFFFFF" stroke="#6EE7B7"/>
+    <text x="85" y="137" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" font-weight="600" fill="#065F46">Tailscale</text>
+
+    <rect x="162" y="116" width="130" height="32" rx="8" fill="#FFFFFF" stroke="#6EE7B7"/>
+    <text x="227" y="137" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12.5" font-weight="600" fill="#065F46">SSH Tunnel</text>
+
+    <line x1="20" y1="166" x2="292" y2="166" stroke="#A7F3D0" stroke-width="1"/>
+    <text x="156" y="189" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="11.5" fill="#475569">No T3 Connect · No Clerk · No PostHog</text>
+    <text x="156" y="207" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="11.5" fill="#475569">No Relay · No Auto-Update Checks</text>
+  </g>
+
+  <!-- Connector Center -> Right -->
+  <path d="M 736 168 C 764 168, 764 128, 796 128" fill="none" stroke="#059669" stroke-opacity="0.9" stroke-width="1.8" marker-end="url(#arrow-em-l)"/>
+  <path d="M 736 238 C 764 238, 764 274, 796 274" fill="none" stroke="#059669" stroke-opacity="0.7" stroke-width="1.8" marker-end="url(#arrow-em-l)"/>
+
+  <!-- Right column cards -->
+  <g transform="translate(800, 68)">
+    <rect x="0" y="0" width="360" height="122" rx="14" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.2"/>
+    <text x="20" y="31" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="16" font-weight="700" fill="#0F172A">V3 Server &amp; Standalone CLI</text>
+    <text x="20" y="54" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="13" fill="#475569">Isolated profile in ~/.v3 (SQLite + worktrees)</text>
+    <rect x="20" y="72" width="104" height="28" rx="7" fill="#F8FAFC" stroke="#CBD5E1"/>
+    <text x="72" y="90" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12" fill="#334155">port 3873</text>
+    <rect x="134" y="72" width="114" height="28" rx="7" fill="#F8FAFC" stroke="#CBD5E1"/>
+    <text x="191" y="90" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12" fill="#334155">Node 26 SEA</text>
+    <rect x="258" y="72" width="82" height="28" rx="7" fill="#ECFDF5" stroke="#6EE7B7"/>
+    <text x="299" y="90" text-anchor="middle" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="12" font-weight="600" fill="#047857">v3 bin</text>
+
+    <rect x="0" y="142" width="360" height="128" rx="14" fill="#FFFFFF" stroke="#E2E8F0" stroke-width="1.2"/>
+    <text x="20" y="173" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="16" font-weight="700" fill="#0F172A">Local Coding Agents &amp; Git</text>
+    <text x="20" y="198" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="13" fill="#334155">Claude Code · Codex · OpenCode · Cursor</text>
+    <text x="20" y="219" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Liberation Sans', sans-serif" font-size="13" fill="#334155">Grok · Kiro · Pi · Muse · Local ACP</text>
+    <text x="20" y="246" font-family="ui-monospace, SFMono-Regular, Menlo, 'Liberation Mono', monospace" font-size="11.2" fill="#64748B">Git · GitHub · GitLab · Bitbucket · Linear</text>
+  </g>
+</svg>
