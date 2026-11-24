@@ -1,5 +1,9 @@
 import { assert, describe, it } from "@effect/vitest";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import {
+  CHROMIUM_PROXY_BYPASS_LIST,
+  CHROMIUM_PROXY_DNS_LEAK_GUARD_RULE,
+} from "@t3tools/shared/privacyShield";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -298,8 +302,50 @@ describe("DesktopPreReadyPlatform", () => {
         });
         assert.deepEqual(events, ["pre-ready", "clerk"]);
         assert.equal(registerSchemesMock.mock.calls.length, 1);
-        assert.equal(appendSwitchMock.mock.calls.length, 0);
+        assert.isFalse(
+          appendSwitchMock.mock.calls.some(
+            ([name]) => name === "password-store" || name === "force-device-scale-factor",
+          ),
+        );
         assert.equal(setDesktopNameMock.mock.calls.length, 0);
       }),
+  );
+
+  it.effect(
+    "normalizes socks5h to socks5 and appends --proxy-server, --host-resolver-rules, --proxy-bypass-list, and --disable-breakpad when V3CODE_PROXY is set",
+    () => {
+      vi.stubEnv("V3CODE_PROXY", "socks5h://127.0.0.1:9050");
+      hasSwitchMock.mockReturnValue(false);
+      getSwitchValueMock.mockReturnValue("");
+
+      return DesktopPreReadyPlatform.make.pipe(
+        Effect.tap(() =>
+          Effect.sync(() => {
+            assert.isTrue(
+              appendSwitchMock.mock.calls.some(
+                ([name, value]) => name === "proxy-server" && value === "socks5://127.0.0.1:9050",
+              ),
+            );
+            assert.isTrue(
+              appendSwitchMock.mock.calls.some(
+                ([name, value]) =>
+                  name === "host-resolver-rules" && value === CHROMIUM_PROXY_DNS_LEAK_GUARD_RULE,
+              ),
+            );
+            assert.isTrue(
+              appendSwitchMock.mock.calls.some(
+                ([name, value]) =>
+                  name === "proxy-bypass-list" && value === CHROMIUM_PROXY_BYPASS_LIST,
+              ),
+            );
+            assert.isTrue(
+              appendSwitchMock.mock.calls.some(([name]) => name === "disable-breakpad"),
+            );
+          }),
+        ),
+        Effect.provideService(HostProcess.Platform, "darwin"),
+        Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())),
+      );
+    },
   );
 });

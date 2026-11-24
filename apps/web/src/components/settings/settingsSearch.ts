@@ -58,6 +58,7 @@ export interface SettingsSearchItem {
   readonly searchTerms?: ReadonlyArray<string>;
   readonly scope?: SettingsSearchScope;
   readonly desktopOnly?: boolean;
+  readonly webOnly?: boolean;
   readonly macOnly?: boolean;
   readonly windowsOnly?: boolean;
   readonly releaseChannelOnly?: boolean;
@@ -774,6 +775,51 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: msg("Time format"),
     to: "/settings/general",
     searchTerms: [msg("timestamp clock locale system browser os 12 hour 24 hour")],
+  },
+  {
+    id: "home-screen-app",
+    title: msg("Home Screen app"),
+    to: "/settings/general",
+    searchTerms: [msg("pwa iphone ios safari mobile install pin home screen standalone web app")],
+    webOnly: true,
+  },
+  {
+    id: "privacy-shield-status",
+    title: msg("Ghost Mode & Telemetry Firewall"),
+    to: "/settings/general",
+    searchTerms: [
+      msg("ghost ephemeral ram shm privacy shield anonymous antidetect telemetry proxy tor socks5"),
+    ],
+  },
+  {
+    id: "privacy-exif-scrub",
+    title: msg("Strip EXIF & GPS from images"),
+    to: "/settings/general",
+    searchTerms: [msg("exif gps metadata scrub privacy photo camera location strip")],
+  },
+  {
+    id: "privacy-app-switcher-curtain",
+    title: msg("Hide screen in App Switcher"),
+    to: "/settings/general",
+    searchTerms: [msg("curtain blur screenshot iphone ios app switcher background privacy")],
+  },
+  {
+    id: "privacy-auto-lock",
+    title: msg("Auto-lock after inactivity"),
+    to: "/settings/general",
+    searchTerms: [msg("lock screen idle timeout inactivity privacy shield")],
+  },
+  {
+    id: "privacy-passcode",
+    title: msg("Screen lock & passcode"),
+    to: "/settings/general",
+    searchTerms: [msg("passcode pin password lock screen quick lock")],
+  },
+  {
+    id: "privacy-panic-wipe",
+    title: msg("Panic wipe & logout"),
+    to: "/settings/general",
+    searchTerms: [msg("panic wipe emergency logout revoke session clear storage cache")],
   },
   {
     id: "response-streaming",
@@ -1696,6 +1742,7 @@ export function settingsForThisPlatform(
   return items.filter(
     (item) =>
       (isElectron || item.desktopOnly !== true) &&
+      (!isElectron || item.webOnly !== true) &&
       (!item.releaseChannelOnly || isElectron || HOSTED_APP_CHANNEL !== null) &&
       (!item.macOnly || isMacPlatform(platform)) &&
       (!item.windowsOnly || isWindowsPlatform(platform)),

@@ -10,6 +10,7 @@ import * as Option from "effect/Option";
 
 import * as Electron from "electron";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { buildChromiumProxyConfig } from "@t3tools/shared/privacyShield";
 
 import * as DesktopEarlyElectronStartup from "./DesktopEarlyElectronStartup.ts";
 import { trimmedString } from "./DesktopConfig.ts";
@@ -60,6 +61,8 @@ const CHROMIUM_PRIVACY_DISABLE_FEATURES = [
   "AutofillServerCommunication",
   "OptimizationHints",
   "Translate",
+  "PrivacySandboxAdsAPIsOverride",
+  "InterestFeedContentSuggestions",
 ] as const;
 
 function appendPrivacyChromiumSwitches(commandLine: Electron.CommandLine): void {
@@ -68,9 +71,49 @@ function appendPrivacyChromiumSwitches(commandLine: Electron.CommandLine): void 
   commandLine.appendSwitch("disable-domain-reliability");
   commandLine.appendSwitch("disable-sync");
   commandLine.appendSwitch("disable-default-apps");
+  commandLine.appendSwitch("disable-breakpad");
+  commandLine.appendSwitch("disable-crash-reporter");
   commandLine.appendSwitch("no-pings");
   commandLine.appendSwitch("metrics-recording-only");
   commandLine.appendSwitch("force-webrtc-ip-handling-policy", "disable_non_proxied_udp");
+
+  // Forward Desktop CLI privacy flags to the embedded backend via environment variables.
+  if (commandLine.hasSwitch("ghost") || commandLine.hasSwitch("ephemeral")) {
+    process.env.V3CODE_EPHEMERAL = "true";
+    // Ghost mode always allocates an isolated ephemeral home; clear conflicting explicit homes.
+    delete process.env.V3CODE_HOME;
+    delete process.env.T3CODE_HOME;
+  }
+  if (commandLine.hasSwitch("no-logs")) {
+    process.env.V3CODE_NO_LOGS = "true";
+  }
+  if (commandLine.hasSwitch("strict-privacy")) {
+    process.env.V3CODE_STRICT_PRIVACY = "true";
+  }
+
+  const rawProxy =
+    readCommandLineSwitchValue(commandLine, "proxy") ?? process.env.V3CODE_PROXY?.trim() ?? null;
+  if (rawProxy !== null && rawProxy.length > 0) {
+    const chromiumProxy = buildChromiumProxyConfig(rawProxy);
+    if (chromiumProxy === null) {
+      // Fail closed: never silently fall back to direct unproxied traffic when a proxy was requested.
+      process.stderr.write(
+        "[v3-privacy] Refusing to start with invalid --proxy / V3CODE_PROXY value.\n",
+      );
+      Electron.app.exit(1);
+      return;
+    }
+    process.env.V3CODE_PROXY = rawProxy;
+    if (!commandLine.hasSwitch("proxy-server")) {
+      commandLine.appendSwitch("proxy-server", chromiumProxy.proxyServer);
+    }
+    if (!commandLine.hasSwitch("host-resolver-rules")) {
+      commandLine.appendSwitch("host-resolver-rules", chromiumProxy.hostResolverRules);
+    }
+    if (!commandLine.hasSwitch("proxy-bypass-list")) {
+      commandLine.appendSwitch("proxy-bypass-list", chromiumProxy.proxyBypassList);
+    }
+  }
 }
 
 function mergeDisableFeatures(existing: string | null, additions: ReadonlyArray<string>): string {

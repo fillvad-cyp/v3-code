@@ -690,6 +690,8 @@ const streamStaticFile = (file: FileSystem.File, size: bigint) =>
 const SPA_FRAME_HEADERS = {
   "Content-Security-Policy": "frame-ancestors 'none'",
   "X-Frame-Options": "DENY",
+  "Referrer-Policy": "no-referrer",
+  "X-Content-Type-Options": "nosniff",
 };
 
 const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
@@ -775,14 +777,27 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
 
     // A hash-like name is not enough: custom static files can use the same naming pattern.
     const relativePath = path.relative(staticRoot, filePath).replaceAll("\\", "/");
+    const isServiceWorker = relativePath === "sw.js";
+    const isWebManifest = relativePath === "manifest.webmanifest";
     const immutable =
       !isHtml &&
+      !isServiceWorker &&
+      !isWebManifest &&
       /^assets\/.+-[\w-]{8}\.[^/]+$/.test(relativePath) &&
       immutableBuildAssets.has(relativePath);
-    const cacheControl = immutable ? "public, max-age=31536000, immutable" : "no-cache";
+    const cacheControl = isServiceWorker
+      ? "no-cache, no-store, must-revalidate"
+      : immutable
+        ? "public, max-age=31536000, immutable"
+        : "no-cache";
+    const pwaHeaders: Record<string, string> = isServiceWorker
+      ? { "Service-Worker-Allowed": "/", "X-Content-Type-Options": "nosniff" }
+      : isWebManifest
+        ? { "X-Content-Type-Options": "nosniff" }
+        : {};
     const validators = (info: FileSystem.File.Info) => {
       // Deployments can preserve HTML size and mtime while changing its bundle URLs.
-      const modifiedAt = isHtml ? undefined : Option.getOrUndefined(info.mtime);
+      const modifiedAt = isHtml || isServiceWorker ? undefined : Option.getOrUndefined(info.mtime);
       return modifiedAt
         ? {
             ETag: `W/"${info.size.toString(16)}-${modifiedAt.getTime().toString(16)}"`,
@@ -793,6 +808,7 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
     const headers: Record<string, string> = {
       "Cache-Control": cacheControl,
       ...(isHtml ? SPA_FRAME_HEADERS : {}),
+      ...pwaHeaders,
       ...validators(fileInfo),
     };
     const etag = headers.ETag;
@@ -813,14 +829,18 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
         : ifModifiedSince !== undefined &&
           lastModified !== undefined &&
           Date.parse(lastModified) <= Date.parse(ifModifiedSince);
-    if (!isHtml && unchanged) {
+    if (!isHtml && !isServiceWorker && unchanged) {
       return HttpServerResponse.empty({
         status: 304,
         headers: { ...headers, Vary: "Accept-Encoding" },
       });
     }
 
-    const contentType = isHtml ? "text/html; charset=utf-8" : mimeType;
+    const contentType = isHtml
+      ? "text/html; charset=utf-8"
+      : isWebManifest
+        ? "application/manifest+json; charset=utf-8"
+        : mimeType;
     if (opened.file === null && request.method !== "HEAD") {
       const fileSystem = yield* FileSystem.FileSystem;
       // Complete fallback reads before success headers; stream errors arrive too late for a 500.
@@ -830,6 +850,7 @@ const handleStaticAndDevRequest = Effect.fn("handleStaticAndDevRequest")(
         headers: {
           "Cache-Control": cacheControl,
           ...(isHtml ? SPA_FRAME_HEADERS : {}),
+          ...pwaHeaders,
           ...validators({ ...info, size: ByteSize.bytes(bytes.byteLength) }),
         },
         contentType,

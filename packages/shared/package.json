@@ -682,6 +682,10 @@
     "./assistantInsights": {
       "types": "./src/assistantInsights.ts",
       "import": "./src/assistantInsights.ts"
+    },
+    "./privacyShield": {
+      "types": "./src/privacyShield.ts",
+      "import": "./src/privacyShield.ts"
     }
   },
   "scripts": {

@@ -1,4 +1,5 @@
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { stripFingerprintRequestHeaders } from "@t3tools/shared/privacyShield";
 import type { Certificate, Session, WebContents } from "electron";
 import { BrowserWindow, session } from "electron";
 import { msg } from "gt-i18n";
@@ -64,7 +65,8 @@ const externalProtocolPromptUrl = (rawUrl: string | undefined): string | null =>
 };
 
 // Teams sends Electron User-Agents to an error page before sign-in. Electron allows one listener per session.
-const TEAMS_URL_PATTERNS = ["https://teams.cloud.microsoft/*", "https://teams.microsoft.com/*"];
+const TEAMS_ORIGIN_PATTERN = /^https:\/\/teams\.(?:cloud\.)?microsoft\.com\//i;
+const ALL_HTTP_URL_PATTERNS = ["http://*/*", "https://*/*"];
 
 const MAX_PROMPT_URL_LENGTH = 300;
 
@@ -681,19 +683,19 @@ export const make = Effect.gen(function* BrowserSessionMake() {
               : ALLOWED_PREVIEW_PERMISSIONS.has(permission),
           );
           browserSession.webRequest.onBeforeSendHeaders(
-            { urls: TEAMS_URL_PATTERNS },
-            ({ requestHeaders }, callback) => {
-              const userAgent = Object.entries(requestHeaders).find(
-                ([name]) => name.toLowerCase() === "user-agent",
-              );
-              if (userAgent === undefined) {
-                callback({});
-                return;
+            { urls: ALL_HTTP_URL_PATTERNS },
+            ({ url, requestHeaders }, callback) => {
+              const sanitized = stripFingerprintRequestHeaders(requestHeaders);
+              if (TEAMS_ORIGIN_PATTERN.test(url)) {
+                const userAgent = Object.entries(sanitized).find(
+                  ([name]) => name.toLowerCase() === "user-agent",
+                );
+                if (userAgent !== undefined) {
+                  const [name, value] = userAgent;
+                  sanitized[name] = value.replace(/ Electron\/\S+/, "");
+                }
               }
-              const [name, value] = userAgent;
-              callback({
-                requestHeaders: { ...requestHeaders, [name]: value.replace(/ Electron\/\S+/, "") },
-              });
+              callback({ requestHeaders: sanitized });
             },
           );
           return browserSession;

@@ -10,6 +10,8 @@ import {
 import { msg } from "gt-react";
 
 import { m } from "../i18n/messages";
+import { scrubImageFileMetadata } from "./imageMetadataScrub";
+import { isExifMetadataScrubEnabled } from "./privacyShield";
 
 const MAX_DIMENSION = IMAGE_ATTACHMENT_MAX_EDGE;
 export const MAX_STASH_IMAGE_DATA_URL_CHARS = 1_300_000;
@@ -552,12 +554,13 @@ export async function compressImageForStash(
 ): Promise<CompressStashImageResult> {
   try {
     if (dataUrlLength(file) <= budgetChars) {
+      const scrubbed = await scrubImageFileMetadata(file, isExifMetadataScrubEnabled());
       return {
         ok: true,
         image: {
-          dataUrl: await readFileAsDataUrl(file),
-          mimeType: file.type,
-          sizeBytes: file.size,
+          dataUrl: await readFileAsDataUrl(scrubbed.file),
+          mimeType: scrubbed.file.type,
+          sizeBytes: scrubbed.file.size,
           recompressed: false,
         },
       };
@@ -620,7 +623,8 @@ export async function compressImageToByteLimit(
     return { ok: true, file: fitted.file, recompressed: true, imageSize: fitted.imageSize };
   }
   if (!fitted && file.size <= maxBytes) {
-    return { ok: true, file, recompressed: false };
+    const scrubbed = await scrubImageFileMetadata(file, isExifMetadataScrubEnabled());
+    return { ok: true, file: scrubbed.file, recompressed: false };
   }
   if ((options?.sourceSizeBytes ?? file.size) > MAX_COMPRESSIBLE_SOURCE_BYTES) {
     return { ok: false, reason: "too-large" };

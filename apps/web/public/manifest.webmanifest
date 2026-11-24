@@ -2,11 +2,14 @@
   "id": "/",
   "name": "V3 Code",
   "short_name": "V3 Code",
+  "description": "Zero-telemetry web app for local AI coding agents",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
-  "background_color": "#161616",
-  "theme_color": "#161616",
+  "display_override": ["standalone", "minimal-ui"],
+  "orientation": "any",
+  "background_color": "#0B0F14",
+  "theme_color": "#0B0F14",
   "icons": [
     {
       "src": "/favicon-32x32.png",
@@ -25,10 +28,22 @@
       "purpose": "any"
     },
     {
+      "src": "/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "maskable"
+    },
+    {
       "src": "/icon-512x512.png",
       "sizes": "512x512",
       "type": "image/png",
       "purpose": "any"
+    },
+    {
+      "src": "/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "maskable"
     }
   ]
 }

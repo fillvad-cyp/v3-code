@@ -17,6 +17,8 @@ import { Input } from "../ui/input";
 import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { m, type MessageResolver } from "../../i18n/messages";
+import { isElectron } from "../../env";
+import { isMobilePwaTarget, openPwaInstallPrompt, usePwaInstallStore } from "../../lib/pwaInstall";
 
 export function PairingPendingSurface() {
   const gt = useGT();
@@ -138,7 +140,32 @@ export function PairingRouteSurface({
       <div className="mt-6 rounded-lg border border-border/70 bg-background/55 px-3 py-3 text-xs leading-relaxed text-muted-foreground">
         {describeSupportedMethods(auth.bootstrapMethods, messages)}
       </div>
+
+      <PairingHomeScreenHint />
     </StandalonePage>
+  );
+}
+
+function PairingHomeScreenHint() {
+  const installed = usePwaInstallStore((state) => state.installed);
+  const platform = usePwaInstallStore((state) => state.platform);
+
+  if (isElectron || installed || !isMobilePwaTarget(platform)) {
+    return null;
+  }
+
+  return (
+    <div className="mt-4 flex items-center justify-between gap-3 rounded-lg border border-border/70 bg-muted/35 px-3 py-2.5 text-xs text-muted-foreground">
+      <span>
+        <T>
+          Using iPhone or mobile? Pin this app to your Home Screen first so your paired session
+          stays inside the app.
+        </T>
+      </span>
+      <Button size="xs" variant="outline" onClick={openPwaInstallPrompt}>
+        <T>How to pin</T>
+      </Button>
+    </div>
   );
 }
 

@@ -37,50 +37,61 @@ export const layer = Layer.unwrap(
       HttpObservability.layer,
     );
 
-    const layerTracer = Layer.unwrap(
-      Effect.gen(function* () {
-        const sink = yield* makeTraceSink({
-          filePath: config.serverTracePath,
-          maxBytes: config.traceMaxBytes,
-          maxFiles: config.traceMaxFiles,
-          batchWindowMs: config.traceBatchWindowMs,
-          onFlush: (stats) =>
-            attribution.record({
-              component: "server-trace",
-              operation: "append",
-              logicalWriteBytes: stats.logicalWriteBytes,
-              count: stats.count,
-              durationMs: stats.durationMs,
+    const layerTracer =
+      config.noLogs === true
+        ? Layer.mergeAll(
+            Layer.succeed(
+              BrowserTraceCollector.BrowserTraceCollector,
+              BrowserTraceCollector.BrowserTraceCollector.of({
+                record: Effect.fn("BrowserTraceCollector.noopRecord")(function* () {}),
+              }),
+            ),
+            layerSerialization,
+          )
+        : Layer.unwrap(
+            Effect.gen(function* () {
+              const sink = yield* makeTraceSink({
+                filePath: config.serverTracePath,
+                maxBytes: config.traceMaxBytes,
+                maxFiles: config.traceMaxFiles,
+                batchWindowMs: config.traceBatchWindowMs,
+                onFlush: (stats) =>
+                  attribution.record({
+                    component: "server-trace",
+                    operation: "append",
+                    logicalWriteBytes: stats.logicalWriteBytes,
+                    count: stats.count,
+                    durationMs: stats.durationMs,
+                  }),
+              });
+              const delegate =
+                config.otlpTracesUrl === undefined
+                  ? undefined
+                  : yield* OtlpTracer.make({
+                      url: config.otlpTracesUrl,
+                      exportInterval: `${traces.exportIntervalMs} millis`,
+                      headers: traces.headers,
+                      resource,
+                    }).pipe(Effect.provide(OtlpExportFailures.layer("traces")));
+
+              const tracer = yield* makeLocalFileTracer({
+                filePath: config.serverTracePath,
+                maxBytes: config.traceMaxBytes,
+                maxFiles: config.traceMaxFiles,
+                batchWindowMs: config.traceBatchWindowMs,
+                sink,
+                ...(delegate ? { delegate } : {}),
+              });
+
+              const heapAttribution = yield* HeapAttribution.make(tracer);
+              yield* heapAttribution.run;
+
+              return Layer.mergeAll(
+                Layer.succeed(Tracer.Tracer, heapAttribution.tracer),
+                BrowserTraceCollector.layer(sink),
+              );
             }),
-        });
-        const delegate =
-          config.otlpTracesUrl === undefined
-            ? undefined
-            : yield* OtlpTracer.make({
-                url: config.otlpTracesUrl,
-                exportInterval: `${traces.exportIntervalMs} millis`,
-                headers: traces.headers,
-                resource,
-              }).pipe(Effect.provide(OtlpExportFailures.layer("traces")));
-
-        const tracer = yield* makeLocalFileTracer({
-          filePath: config.serverTracePath,
-          maxBytes: config.traceMaxBytes,
-          maxFiles: config.traceMaxFiles,
-          batchWindowMs: config.traceBatchWindowMs,
-          sink,
-          ...(delegate ? { delegate } : {}),
-        });
-
-        const heapAttribution = yield* HeapAttribution.make(tracer);
-        yield* heapAttribution.run;
-
-        return Layer.mergeAll(
-          Layer.succeed(Tracer.Tracer, heapAttribution.tracer),
-          BrowserTraceCollector.layer(sink),
-        );
-      }),
-    ).pipe(Layer.provide(OtlpExporter.layerFlusher), Layer.provideMerge(layerSerialization));
+          ).pipe(Layer.provide(OtlpExporter.layerFlusher), Layer.provideMerge(layerSerialization));
 
     const metricsLayer =
       config.otlpMetricsUrl === undefined

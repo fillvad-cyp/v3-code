@@ -31,6 +31,7 @@ import { CliCommandSettingsRow } from "./CliCommandSettingsRow";
 import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import { isElectron } from "../../env";
+import { openPwaInstallPrompt, usePwaInstallStore } from "../../lib/pwaInstall";
 import {
   readAppearanceModePreference,
   readThemeHalves,
@@ -93,6 +94,7 @@ import { nativeLanguageName, SYSTEM_LANGUAGE } from "@t3tools/client-runtime/loc
 import { SUPPORTED_LOCALES } from "../../i18n/locales";
 import { BackgroundActivitySettingsRow } from "./BackgroundActivitySettings";
 import { AdvancedSettings } from "./AdvancedSettings";
+import { PrivacyShieldSettingsSection } from "./PrivacyShieldSettings";
 import { PullRequestLinksOpenInAppSetting } from "./IntegrationsSettings";
 import { StorageCleanupSections } from "./StorageSettings";
 
@@ -880,8 +882,46 @@ export function GeneralSettingsPanel() {
             </Select>
           }
         />
+        {!isElectron ? <HomeScreenAppSettingsRow setting={setting} /> : null}
       </SettingsSection>
+
+      <PrivacyShieldSettingsSection setting={setting} />
     </SettingsPageContainer>
+  );
+}
+
+function HomeScreenAppSettingsRow({
+  setting,
+}: {
+  readonly setting: ReturnType<typeof useSearchableSetting>;
+}) {
+  const installed = usePwaInstallStore((state) => state.installed);
+  return (
+    <SettingsRow
+      {...setting("home-screen-app")}
+      description={
+        installed ? (
+          <T>Running as a pinned Home Screen web app with an isolated session.</T>
+        ) : (
+          <T>
+            Pin this web interface to your iPhone, Android, or desktop Home Screen for fullscreen
+            access.
+          </T>
+        )
+      }
+      control={
+        installed ? (
+          <span className="inline-flex items-center gap-1.5 text-xs font-medium text-success">
+            <CheckIcon className="size-3.5" />
+            <T>Pinned</T>
+          </span>
+        ) : (
+          <Button size="xs" variant="outline" onClick={openPwaInstallPrompt}>
+            <T>Add to Home Screen</T>
+          </Button>
+        )
+      }
+    />
   );
 }
 

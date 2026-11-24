@@ -9,6 +9,7 @@ import type * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
 import type { OtlpEndpointSource } from "@t3tools/contracts";
+import type { EphemeralStorageKind } from "@t3tools/shared/privacyShield";
 import { sweepStalePendingAttachments } from "./attachmentStore.ts";
 import { markNoCopyOnWrite } from "./noCopyOnWrite.ts";
 import {
@@ -112,6 +113,13 @@ export class ServerConfig extends Context.Service<
     readonly logWebSocketEvents: boolean;
     readonly tailscaleServeEnabled: boolean;
     readonly tailscaleServePort: number;
+    readonly ephemeral?: boolean | undefined;
+    readonly ephemeralStorage?: EphemeralStorageKind | undefined;
+    readonly noLogs?: boolean | undefined;
+    readonly strictPrivacy?: boolean | undefined;
+    readonly proxyUrl?: string | undefined;
+    readonly privacyTelemetryOptOutCount?: number | undefined;
+    readonly privacyScrubbedEnvCount?: number | undefined;
   }
 >()("v3code/config/ServerConfig") {
   static readonly layerTest = (

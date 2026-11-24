@@ -15,6 +15,7 @@ import * as Path from "effect/Path";
 import * as Redacted from "effect/Redacted";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
+import * as CliError from "effect/cli/CliError";
 
 import {
   DesktopBackendBootstrap,
@@ -33,6 +34,7 @@ import {
   SERVICE_LAUNCHER_PROTOCOL,
 } from "../cloud/serviceProtocol.ts";
 import { deriveServerPaths } from "../config.ts";
+import { EPHEMERAL_DIR_PREFIX, secureWipeEphemeralDirectory } from "../privacyWipe.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { acquireServerOwnership } from "../serverOwnership.ts";
 import { resolveServerConfig } from "./config.ts";
@@ -1085,5 +1087,120 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
         privateNetworkOnly: undefined,
       });
     }),
+  );
+
+  it.effect(
+    "allocates a v3-ghost-* ephemeral dir and forces noLogs and strictPrivacy for --ephemeral / --ghost",
+    () =>
+      Effect.gen(function* () {
+        for (const variant of [
+          {
+            flags: {
+              ephemeral: Option.some(true),
+              noLogs: Option.some(false),
+              strictPrivacy: Option.some(false),
+            },
+            env: {} as Record<string, string>,
+          },
+          {
+            flags: {},
+            env: {
+              V3CODE_GHOST: "true",
+              V3CODE_NO_LOGS: "false",
+              V3CODE_STRICT_PRIVACY: "false",
+            },
+          },
+        ]) {
+          let allocatedBaseDir: string | undefined;
+          try {
+            const resolved = yield* resolveServerConfig(
+              {
+                ...minimalWebFlags(NodeOS.tmpdir()),
+                baseDir: Option.none(),
+                ...variant.flags,
+              },
+              Option.none(),
+            ).pipe(
+              Effect.provide(
+                Layer.mergeAll(
+                  ConfigProvider.layer(ConfigProvider.fromEnv({ env: variant.env })),
+                  NetService.layer,
+                ),
+              ),
+            );
+            allocatedBaseDir = resolved.baseDir;
+            expect(NodePath.basename(resolved.baseDir).startsWith(EPHEMERAL_DIR_PREFIX)).toBe(true);
+            expect(resolved.ephemeral).toBe(true);
+            expect(["ram", "tmp"]).toContain(resolved.ephemeralStorage);
+            expect(resolved.noLogs).toBe(true);
+            expect(resolved.strictPrivacy).toBe(true);
+          } finally {
+            if (allocatedBaseDir !== undefined) {
+              secureWipeEphemeralDirectory(allocatedBaseDir);
+            }
+          }
+        }
+      }),
+  );
+
+  it.effect("rejects combining --ephemeral with --base-dir with CliError.UserError", () =>
+    Effect.gen(function* () {
+      const baseDir = yield* FileSystem.FileSystem.pipe(
+        Effect.flatMap((fs) =>
+          fs.makeTempDirectoryScoped({ prefix: "v3-cli-ephemeral-conflict-" }),
+        ),
+      );
+      const error = yield* resolveServerConfig(
+        {
+          ...minimalWebFlags(baseDir),
+          ephemeral: Option.some(true),
+        },
+        Option.none(),
+      ).pipe(
+        Effect.provide(
+          Layer.mergeAll(
+            ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+            NetService.layer,
+          ),
+        ),
+        Effect.flip,
+      );
+
+      expect(error).toBeInstanceOf(CliError.UserError);
+      expect(String(error)).toContain("Cannot combine --ephemeral / --ghost with --base-dir");
+    }),
+  );
+
+  it.effect(
+    "accepts valid --proxy values and rejects invalid schemes with CliError.UserError",
+    () =>
+      Effect.gen(function* () {
+        const baseDir = yield* FileSystem.FileSystem.pipe(
+          Effect.flatMap((fs) => fs.makeTempDirectoryScoped({ prefix: "v3-cli-proxy-" })),
+        );
+        const envLayer = Layer.mergeAll(
+          ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+          NetService.layer,
+        );
+
+        const resolved = yield* resolveServerConfig(
+          {
+            ...minimalWebFlags(baseDir),
+            proxy: Option.some("socks5h://127.0.0.1:9050"),
+          },
+          Option.none(),
+        ).pipe(Effect.provide(envLayer));
+        expect(resolved.proxyUrl).toBe("socks5h://127.0.0.1:9050");
+
+        const error = yield* resolveServerConfig(
+          {
+            ...minimalWebFlags(baseDir),
+            proxy: Option.some("ftp://bad"),
+          },
+          Option.none(),
+        ).pipe(Effect.provide(envLayer), Effect.flip);
+        expect(error).toBeInstanceOf(CliError.UserError);
+        expect(String(error)).toContain("Invalid --proxy / V3CODE_PROXY value");
+      }),
   );
 });

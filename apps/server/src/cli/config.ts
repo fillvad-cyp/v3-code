@@ -1,3 +1,4 @@
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import {
   OtlpHeadersFromString,
@@ -5,6 +6,7 @@ import {
   type SignalExport,
 } from "@t3tools/shared/observability";
 import * as OtelEnvironment from "@t3tools/shared/otelEnvironment";
+import { type EphemeralStorageKind, validateOutboundProxyUrl } from "@t3tools/shared/privacyShield";
 import { parsePersistedServerObservabilitySettings } from "@t3tools/shared/serverSettings";
 import { DesktopBackendBootstrap, PortSchema } from "@t3tools/contracts";
 import * as Config from "effect/Config";
@@ -26,6 +28,7 @@ import { readBootstrapEnvelope } from "../bootstrap.ts";
 import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
 import { expandHomePath, resolveBaseDir } from "../os-jank.ts";
+import { createEphemeralBaseDir } from "../privacyWipe.ts";
 import { isProcessAlive, readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { isServerOwnershipHeld } from "../serverOwnership.ts";
 import { resolveHostCliCommand } from "./invocation.ts";
@@ -90,6 +93,31 @@ const tailscaleServePortFlag = Flag.Int("tailscale-serve-port").pipe(
 const lanFlag = Flag.Boolean("lan").pipe(
   Flag.withDescription(
     "Accept connections from your local network and tailnet, not only this machine (equivalent to V3CODE_LAN).",
+  ),
+  Flag.optional,
+);
+const ephemeralFlag = Flag.Boolean("ephemeral").pipe(
+  Flag.withAlias("ghost"),
+  Flag.withDescription(
+    "Ghost mode: keep state in RAM (/dev/shm when available), disable disk logs, scrub host fingerprint env vars, and securely wipe state on exit (equivalent to V3CODE_EPHEMERAL or V3CODE_GHOST).",
+  ),
+  Flag.optional,
+);
+const noLogsFlag = Flag.Boolean("no-logs").pipe(
+  Flag.withDescription(
+    "Disable server trace and provider event log files on disk (equivalent to V3CODE_NO_LOGS).",
+  ),
+  Flag.optional,
+);
+const strictPrivacyFlag = Flag.Boolean("strict-privacy").pipe(
+  Flag.withDescription(
+    "Scrub host/terminal fingerprint environment variables from spawned agents and shells (equivalent to V3CODE_STRICT_PRIVACY).",
+  ),
+  Flag.optional,
+);
+const proxyFlag = Flag.String("proxy").pipe(
+  Flag.withDescription(
+    "Route outbound provider and network traffic through an explicit HTTP(S) or SOCKS5(h) proxy, e.g. socks5h://127.0.0.1:9050 (equivalent to V3CODE_PROXY).",
   ),
   Flag.optional,
 );
@@ -174,6 +202,17 @@ const EnvServerConfig = Config.all({
     Config.map(Option.getOrUndefined),
   ),
   lan: Config.Boolean("V3CODE_LAN").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  ephemeral: Config.Boolean("V3CODE_EPHEMERAL").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  ghost: Config.Boolean("V3CODE_GHOST").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  noLogs: Config.Boolean("V3CODE_NO_LOGS").pipe(Config.option, Config.map(Option.getOrUndefined)),
+  strictPrivacy: Config.Boolean("V3CODE_STRICT_PRIVACY").pipe(
+    Config.option,
+    Config.map(Option.getOrUndefined),
+  ),
+  proxy: Config.String("V3CODE_PROXY").pipe(Config.option, Config.map(Option.getOrUndefined)),
 });
 
 const DevAuthTokenConfig = Config.Redacted("V3CODE_DEV_AUTH_TOKEN").pipe(
@@ -210,7 +249,21 @@ export interface CliServerFlags {
   readonly tailscaleServeEnabled: Option.Option<boolean>;
   readonly tailscaleServePort: Option.Option<number>;
   readonly lan: Option.Option<boolean>;
+  readonly ephemeral: Option.Option<boolean>;
+  readonly noLogs: Option.Option<boolean>;
+  readonly strictPrivacy: Option.Option<boolean>;
+  readonly proxy: Option.Option<string>;
 }
+
+export type ResolveServerConfigFlags = Omit<
+  CliServerFlags,
+  "ephemeral" | "noLogs" | "strictPrivacy" | "proxy"
+> & {
+  readonly ephemeral?: Option.Option<boolean>;
+  readonly noLogs?: Option.Option<boolean>;
+  readonly strictPrivacy?: Option.Option<boolean>;
+  readonly proxy?: Option.Option<string>;
+};
 
 export interface CliAuthLocationFlags {
   readonly baseDir: Option.Option<string>;
@@ -245,6 +298,10 @@ export const sharedServerCommandFlags = {
   tailscaleServeEnabled: tailscaleServeFlag,
   tailscaleServePort: tailscaleServePortFlag,
   lan: lanFlag,
+  ephemeral: ephemeralFlag,
+  noLogs: noLogsFlag,
+  strictPrivacy: strictPrivacyFlag,
+  proxy: proxyFlag,
 } as const;
 
 const resolveOptionPrecedence = <Value>(
@@ -263,7 +320,7 @@ const loadPersistedObservabilitySettings = Effect.fn(function* (settingsPath: st
 });
 
 export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(function* (
-  flags: CliServerFlags,
+  flags: ResolveServerConfigFlags,
   cliLogLevel: Option.Option<LogLevel.LogLevel>,
   options?: {
     readonly startupPresentation?: ServerConfig.StartupPresentation;
@@ -294,6 +351,10 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     tailscaleServeEnabled: flags.tailscaleServeEnabled ?? Option.none(),
     tailscaleServePort: flags.tailscaleServePort ?? Option.none(),
     lan: flags.lan ?? Option.none(),
+    ephemeral: flags.ephemeral ?? Option.none(),
+    noLogs: flags.noLogs ?? Option.none(),
+    strictPrivacy: flags.strictPrivacy ?? Option.none(),
+    proxy: flags.proxy ?? Option.none(),
   } satisfies CliServerFlags;
   const bootstrapFd = Option.getOrUndefined(normalizedFlags.bootstrapFd) ?? env.bootstrapFd;
   const bootstrapEnvelope =
@@ -317,19 +378,73 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
   );
   const devAuthToken =
     mode === "web" && devUrl !== undefined ? yield* DevAuthTokenConfig : undefined;
+  const ephemeral = Option.getOrElse(
+    resolveOptionPrecedence(
+      normalizedFlags.ephemeral,
+      Option.fromUndefinedOr(env.ephemeral),
+      Option.fromUndefinedOr(env.ghost),
+    ),
+    () => false,
+  );
+  const noLogs = ephemeral
+    ? true
+    : Option.getOrElse(
+        resolveOptionPrecedence(normalizedFlags.noLogs, Option.fromUndefinedOr(env.noLogs)),
+        () => false,
+      );
+  const strictPrivacy = ephemeral
+    ? true
+    : Option.getOrElse(
+        resolveOptionPrecedence(
+          normalizedFlags.strictPrivacy,
+          Option.fromUndefinedOr(env.strictPrivacy),
+        ),
+        () => false,
+      );
+  const rawProxy = Option.getOrUndefined(
+    resolveOptionPrecedence(normalizedFlags.proxy, Option.fromUndefinedOr(env.proxy)).pipe(
+      Option.filter((value) => value.trim().length > 0),
+    ),
+  );
+  let proxyUrl: string | undefined;
+  if (rawProxy !== undefined) {
+    const validatedProxy = validateOutboundProxyUrl(rawProxy);
+    if (!validatedProxy.ok) {
+      return yield* new CliError.UserError({
+        cause: `Invalid --proxy / V3CODE_PROXY value: ${validatedProxy.reason}`,
+      });
+    }
+    proxyUrl = validatedProxy.url;
+  }
+
   const explicitBaseDir = resolveOptionPrecedence(
     normalizedFlags.baseDir,
     Option.fromUndefinedOr(env.t3Home),
   ).pipe(Option.filter((value) => value.trim().length > 0));
-  const baseDir = yield* resolveBaseDir(
-    Option.getOrUndefined(
-      resolveOptionPrecedence(explicitBaseDir, Option.fromUndefinedOr(bootstrap?.t3Home)),
-    ),
-  );
+  if (ephemeral && Option.isSome(explicitBaseDir)) {
+    return yield* new CliError.UserError({
+      cause:
+        "Cannot combine --ephemeral / --ghost with --base-dir or V3CODE_HOME. Ghost mode always allocates an isolated RAM/tmp directory that is wiped on exit.",
+    });
+  }
+  let ephemeralStorage: EphemeralStorageKind = "disk";
+  let baseDir: string;
+  if (ephemeral) {
+    const platform = yield* HostProcess.Platform;
+    const allocated = createEphemeralBaseDir({ platform });
+    baseDir = allocated.baseDir;
+    ephemeralStorage = allocated.storage;
+  } else {
+    baseDir = yield* resolveBaseDir(
+      Option.getOrUndefined(
+        resolveOptionPrecedence(explicitBaseDir, Option.fromUndefinedOr(bootstrap?.t3Home)),
+      ),
+    );
+  }
   const rawCwd = Option.getOrElse(normalizedFlags.cwd, () => process.cwd());
   const cwd = path.resolve(yield* expandHomePath(rawCwd.trim()));
   const derivedPaths = yield* ServerConfig.deriveServerPaths(baseDir, devUrl, {
-    baseDirIsExplicit: Option.isSome(explicitBaseDir),
+    baseDirIsExplicit: ephemeral || Option.isSome(explicitBaseDir),
   });
   // An interactive CLI must not start over a discovered server. Lifetime locking
   // and supervisor handoff are separate; this preflight cannot arbitrate two starts.
@@ -361,7 +476,9 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     derivedPaths.settingsPath,
   );
   const serverTracePath = env.traceFile ?? derivedPaths.serverTracePath;
-  yield* fs.makeDirectory(path.dirname(serverTracePath), { recursive: true });
+  if (!noLogs) {
+    yield* fs.makeDirectory(path.dirname(serverTracePath), { recursive: true });
+  }
   const startupPresentation = options?.startupPresentation ?? "browser";
   const isHeadlessStartup = startupPresentation === "headless";
   const noBrowser = Option.getOrElse(
@@ -497,9 +614,9 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     traceBatchWindowMs: env.traceBatchWindowMs,
     traceMaxBytes: env.traceMaxBytes,
     traceMaxFiles: env.traceMaxFiles,
-    otlpTracesUrl: traces?.url,
-    otlpMetricsUrl: metrics?.url,
-    otlpLogsUrl: logs?.url,
+    otlpTracesUrl: noLogs ? undefined : traces?.url,
+    otlpMetricsUrl: noLogs ? undefined : metrics?.url,
+    otlpLogsUrl: noLogs ? undefined : logs?.url,
     otlpTracesExport: traces?.export ?? signalExport,
     otlpMetricsExport: metrics?.export ?? signalExport,
     otlpLogsExport: logs?.export ?? signalExport,
@@ -538,6 +655,10 @@ export const resolveServerConfig = Effect.fn("config.resolveServerConfig")(funct
     logWebSocketEvents,
     tailscaleServeEnabled,
     tailscaleServePort,
+    ...(ephemeral ? { ephemeral, ephemeralStorage } : {}),
+    ...(noLogs ? { noLogs } : {}),
+    ...(strictPrivacy ? { strictPrivacy } : {}),
+    ...(proxyUrl !== undefined ? { proxyUrl } : {}),
   };
 
   return config;
@@ -563,6 +684,8 @@ export const resolveCliAuthConfig = (
       tailscaleServeEnabled: Option.none(),
       tailscaleServePort: Option.none(),
       lan: Option.none(),
+      // Auth CLI subcommands inspect an existing home; never allocate a throwaway Ghost dir.
+      ephemeral: Option.some(false),
     },
     cliLogLevel,
   );

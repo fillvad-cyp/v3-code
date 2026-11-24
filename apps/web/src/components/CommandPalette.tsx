@@ -72,14 +72,17 @@ import {
   FolderPlusIcon,
   MessageSquareDashedIcon,
   LinkIcon,
+  LockIcon,
   MessageSquareIcon,
   PaletteIcon,
   RotateCcwIcon,
   SettingsIcon,
+  ShieldAlertIcon,
   MonitorIcon,
   PinIcon,
   PinOffIcon,
   PlugIcon,
+  SmartphoneIcon,
   SquarePenIcon,
   TextSearchIcon,
   UserPlusIcon,
@@ -106,6 +109,10 @@ import { useDesktopLocalBootstraps } from "../connection/useDesktopLocalBootstra
 import { useHandleNewThread } from "../hooks/useHandleNewThread";
 import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl";
 import { copyThreadReference } from "../lib/copyThreadReference";
+import { isElectron } from "../env";
+import { isStandaloneDisplayMode, openPwaInstallPrompt } from "../lib/pwaInstall";
+import { executePanicWipe, lockPrivacyScreen } from "../lib/privacyShield";
+import { ensureLocalApi } from "../localApi";
 import {
   queueWorkspaceFocusFromPalette,
   restoreWorkspaceFocusFromPalette,
@@ -1801,6 +1808,49 @@ function OpenCommandPaletteDialog(props: {
     icon: <SettingsIcon className={ITEM_ICON_CLASS} />,
     run: async () => {
       await navigate({ to: "/settings" });
+    },
+  });
+
+  if (!isElectron && !isStandaloneDisplayMode()) {
+    actionItems.push({
+      kind: "action",
+      value: "action:install-home-screen-app",
+      searchTerms: ["pwa", "iphone", "ios", "safari", "install", "home screen", "mobile", "pin"],
+      title: gt("Add to Home Screen"),
+      icon: <SmartphoneIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        openPwaInstallPrompt();
+      },
+    });
+  }
+
+  actionItems.push({
+    kind: "action",
+    value: "action:privacy-lock-screen",
+    searchTerms: ["lock", "privacy", "shield", "hide", "screen", "ghost", "curtain"],
+    title: gt("Lock V3 Code screen"),
+    icon: <LockIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      lockPrivacyScreen();
+    },
+  });
+
+  actionItems.push({
+    kind: "action",
+    value: "action:privacy-panic-wipe",
+    searchTerms: ["panic", "wipe", "logout", "revoke", "emergency", "clear", "ghost", "privacy"],
+    title: gt("Panic wipe and lock session"),
+    icon: <ShieldAlertIcon className={ITEM_ICON_CLASS} />,
+    run: async () => {
+      const api = readLocalApi() ?? ensureLocalApi();
+      const confirmed = await api.dialogs.confirm(
+        gt(
+          "Revoke all active sessions, expire the session cookie, wipe local browser storage and caches, and lock the screen?",
+        ),
+        { variant: "destructive" },
+      );
+      if (!confirmed) return;
+      await executePanicWipe({ revokeAll: true });
     },
   });
 

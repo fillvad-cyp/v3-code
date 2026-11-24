@@ -1635,7 +1635,7 @@ function toSessionKey(threadId: string, terminalId: string): string {
 
 function shouldExcludeTerminalEnvKey(key: string): boolean {
   const normalizedKey = key.toUpperCase();
-  if (normalizedKey.startsWith("T3CODE_")) {
+  if (normalizedKey.startsWith("T3CODE_") || normalizedKey.startsWith("V3CODE_")) {
     return true;
   }
   if (normalizedKey.startsWith("VITE_")) {
@@ -1739,6 +1739,7 @@ interface TerminalManagerOptions {
     Record<string, string>,
     TerminalProviderInstanceNotFoundError | TerminalProviderEnvironmentError
   >;
+  disableDiskLogs?: boolean;
 }
 
 export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
@@ -1787,7 +1788,8 @@ export const resolveProviderInstanceTerminalEnvironment = Effect.fn(
 export const make = Effect.fn("TerminalManager.make")(function* (
   deriveConfigMap: typeof deriveProviderInstanceConfigMap,
 ) {
-  const { terminalLogsDir, providerStatusCacheDir, baseDir } = yield* ServerConfig.ServerConfig;
+  const { terminalLogsDir, providerStatusCacheDir, baseDir, noLogs } =
+    yield* ServerConfig.ServerConfig;
   const ptyAdapter = yield* PtyAdapter.PtyAdapter;
   const portDiscovery = yield* PortScanner.PortDiscovery;
   const nativeTelemetry = yield* NativeTelemetryClient.NativeTelemetryClient;
@@ -1817,6 +1819,7 @@ export const make = Effect.fn("TerminalManager.make")(function* (
     registerTerminalProcesses: portDiscovery.registerTerminalProcesses,
     unregisterTerminal: portDiscovery.unregisterTerminal,
     resolveProviderInstanceEnvironment,
+    disableDiskLogs: noLogs === true,
   });
 });
 
@@ -1972,7 +1975,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const registerTerminalProcesses = options.registerTerminalProcesses ?? (() => Effect.void);
   const unregisterTerminal = options.unregisterTerminal ?? (() => Effect.void);
 
-  yield* fileSystem.makeDirectory(logsDir, { recursive: true }).pipe(Effect.orDie);
+  const disableDiskLogs = options.disableDiskLogs === true;
+  if (!disableDiskLogs) {
+    yield* fileSystem.makeDirectory(logsDir, { recursive: true }).pipe(Effect.orDie);
+  }
 
   const managerId = NodeCrypto.randomUUID();
   const managerStateRef = yield* SynchronizedRef.make<TerminalManagerState>({
@@ -2319,6 +2325,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         return;
       }
 
+      if (disableDiskLogs) return;
       const update = request.history.persistenceUpdate(
         request.immediate ? undefined : persistedHistory.get(request.history),
       );

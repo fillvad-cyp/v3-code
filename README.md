@@ -48,6 +48,7 @@
 | **Linux** (универсальный)   | `x86_64`                               | **[V3-Code-0.1.11-x86_64.AppImage](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-x86_64.AppImage)** | 238 MB | Запуск без установки (`chmod +x`), нативные утилиты внутри |
 | **Linux** (Debian / Ubuntu) | `amd64`                                | **[V3-Code-0.1.11-amd64.deb](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-amd64.deb)**             | 195 MB | Системный пакет `v3code`, схема `v3code://`                |
 | **Android**                 | `arm64-v8a` / `armeabi-v7a` / `x86_64` | **[V3-Code-0.1.11-android.apk](https://github.com/fillvad-cyp/v3-code/releases/download/v0.1.11/V3-Code-0.1.11-android.apk)**         | 195 MB | Release APK (`org.v3code.app`), готов к установке          |
+| **iPhone / iPad**           | Safari (PWA)                           | Открыть адрес сервера в Safari                                                                                                        |   0 MB | Встроенный поп-ап «На экран „Домой“», полноэкранный режим  |
 
 ### Автономный CLI + Server + Web UI (Node.js не требуется)
 
@@ -106,7 +107,16 @@ tar -xzf v3-0.1.11-linux-x64.tar.gz
 
 _(На macOS Apple Silicon предварительно выполните `xattr -cr v3-0.1.11-darwin-arm64 && codesign --force --sign - v3-0.1.11-darwin-arm64/v3`.)_
 
-#### iOS (сборка на Mac через Xcode)
+#### iPhone / iPad (веб-приложение на экран «Домой» — без Xcode)
+
+Откройте адрес вашего сервера V3 Code (по Wi-Fi LAN или через Tailscale HTTPS `https://<host>.ts.net`) в **Safari** на iPhone:
+
+1. При открытии сразу появится поп-ап **«Добавить V3 Code на экран „Домой“»** с подсказкой и статусом безопасности соединения.
+2. Нажмите **«Поделиться» (`□↑`) → «На экран „Домой“» → «Добавить»**.
+3. Запустите закреплённую иконку **V3 Code** с рабочего стола и выполните сопряжение один раз внутри приложения — iOS хранит сессию в изолированной `HttpOnly`-cookie (секретные токены никогда не сохраняются в URL ярлыка).
+4. Вернуть инструкцию можно в любой момент: **Настройки → Основные → Приложение на экране «Домой»** или через палитру команд.
+
+#### iOS (нативная сборка на Mac через Xcode)
 
 Сборка `.ipa` требует macOS и Xcode (достаточно бесплатного Apple ID / Personal Team):
 
@@ -138,6 +148,31 @@ sha256sum -c SHA256SUMS.txt
 </div>
 
 Все поверхности (**Desktop**, **Android**, **Web UI**, **CLI**) общаются напрямую с вашим локальным или удалённым сервером `v3` через `localhost`, домашнюю сеть **LAN**, **Tailscale** или **SSH-туннель** — без сторонних облачных релеев, аккаунтов и посредников.
+
+---
+
+## Ghost Mode и Privacy Shield («антидетект-харнес»)
+
+V3 Code включает встроенный уровень приватности и защиты от утечек отпечатков на всех уровнях (Server, CLI, Desktop, Web / iPhone PWA):
+
+```bash
+# Ghost Mode: БД, секреты и кэш только в RAM (/dev/shm на Linux), 0 логов на диске,
+# очистка переменных окружения хоста и затирание нулями при выходе
+v3 --ghost
+
+# Ghost Mode + маршрутизация всего исходящего трафика через Tor / SOCKS5 с защитой от DNS-утечек
+v3 --ghost --proxy socks5h://127.0.0.1:9050
+
+# Отдельные флаги (или переменные V3CODE_GHOST=1, V3CODE_NO_LOGS=1, V3CODE_STRICT_PRIVACY=1, V3CODE_PROXY)
+v3 --no-logs --strict-privacy --proxy http://127.0.0.1:8080
+```
+
+- **Эфемерный Ghost Mode (`--ghost` / `--ephemeral`)**: размещает состояние в `/dev/shm/v3-ghost-*` (`0700`, только в оперативной памяти на Linux), отключает все файловые логи (серверные трейсы, логи провайдеров, историю терминалов, OTLP) и при завершении перезаписывает файлы нулями перед удалением.
+- **Брандмауэр телеметрии провайдеров (всегда активен)**: автоматически передаёт 20 официальных opt-out переменных (`DISABLE_TELEMETRY`, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`, `CODEX_TELEMETRY_DISABLED`, `OPENCODE_DISABLE_TELEMETRY`, `OTEL_SDK_DISABLED`, `DO_NOT_TRACK`, `SENTRY_DSN=""` и др.) всем запускаемым CLI-агентам и терминалам.
+- **Очистка отпечатков окружения (`--strict-privacy`)**: вырезает `SSH_*`, `TERM_SESSION_ID`, `ITERM_*`, `VSCODE_*`, `TMUX*`, `XDG_SESSION_ID`, `COMPUTERNAME`, `USERDOMAIN` и `V3CODE_*` из дочерних процессов.
+- **Явный прокси без утечек DNS (`--proxy`)**: валидирует `http(s)://` и `socks5(h)://`, сохраняет `NO_PROXY` для `localhost/127.0.0.1/::1`, а в Desktop-приложении включает Chromium `--proxy-server` + `--host-resolver-rules` (fail-closed) и вырезает high-entropy `Sec-CH-UA-*` Client Hints и `X-Requested-With`.
+- **Очистка EXIF/GPS из изображений (включена по умолчанию)**: перед отправкой/кэшированием без потерь качества удаляет GPS-координаты, модель камеры, Apple MakerNotes, XMP, IPTC и PNG `eXIf`/`tEXt`/`tIME` (корректно сохраняя ориентацию портретных фото с iPhone).
+- **Шторка App Switcher, автоблокировка и Panic Wipe («Красная кнопка»)**: в **Настройки → Основные → Privacy Shield и Ghost Mode** и в палитре команд (`Alt+Shift+L`) доступны: шторка от скриншотов переключателя задач iOS, автоблокировка по таймеру, локальный код-пароль (PBKDF2-SHA256 с экспоненциальной задержкой при подборе) и экстренная очистка (`POST /api/privacy/panic-logout` с отзывом сессий, pairing-ссылок, cookie, `localStorage`, `IndexedDB` и кэша Service Worker).
 
 ---
 

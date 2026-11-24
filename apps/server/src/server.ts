@@ -19,6 +19,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentHttpApi, type RepositoryIdentity } from "@t3tools/contracts";
 import * as FeatureFlags from "@t3tools/shared/FeatureFlags";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { applyProcessPrivacyShield } from "@t3tools/shared/privacyShield";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
@@ -185,6 +186,7 @@ import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as EnvironmentAuthPolicy from "./auth/EnvironmentAuthPolicy.ts";
 import * as CloudHttp from "./cloud/http.ts";
 import * as GuestHttp from "./guest/http.ts";
+import * as PrivacyHttp from "./privacy/http.ts";
 import * as LinkThreadHttp from "./peer/linkThreadHttp.ts";
 import * as CloudLink from "./cloud/CloudLink.ts";
 import * as ConnectReachability from "./cloud/ConnectReachability.ts";
@@ -256,7 +258,8 @@ const layerApplicationObservability = EventLoopMonitor.layer.pipe(
 const layerProviderEventLoggers = Layer.effect(
   ProviderEventLoggers.ProviderEventLoggers,
   Effect.gen(function* () {
-    const { providerEventLogPath } = yield* ServerConfig.ServerConfig;
+    const { providerEventLogPath, noLogs } = yield* ServerConfig.ServerConfig;
+    if (noLogs === true) return ProviderEventLoggers.NoOpProviderEventLoggers;
     const attribution = yield* ResourceAttribution.ResourceAttribution;
     const store = yield* EventNdjsonLogger.makeEventNdjsonLogStore(providerEventLogPath, {
       attribution,
@@ -893,6 +896,7 @@ const layerMakeRoutes = Layer.mergeAll(
     ServerHttp.layerDesktopReadinessProofRoute,
     ServerHttp.layerAssetRoute,
     ServerHttp.layerAttachmentUploadRoute,
+    PrivacyHttp.layer,
     GuestHttp.layer,
     LinkThreadHttp.layer,
     DeviceHubProxy.layer,
@@ -970,6 +974,32 @@ const layerMakeServer = Layer.unwrap(
     // fixPath rewrites PATH, so pin the launcher the shell chose before it does.
     const invokedAs = (yield* resolveLauncherPath) ?? (yield* HostProcess.InvokedAs);
     yield* fixPath({ shellEnvironmentPrepared: config.shellEnvironmentPrepared });
+
+    const shieldResult = applyProcessPrivacyShield(process.env, {
+      strictPrivacy: config.strictPrivacy === true,
+      proxyUrl: config.proxyUrl,
+    });
+    const shieldedConfig: ServerConfig.ServerConfig["Service"] = {
+      ...config,
+      privacyTelemetryOptOutCount: shieldResult.telemetryOptOutCount,
+      privacyScrubbedEnvCount: shieldResult.scrubbedEnvCount,
+    };
+    if (
+      shieldedConfig.ephemeral === true ||
+      shieldedConfig.noLogs === true ||
+      shieldedConfig.strictPrivacy === true ||
+      shieldResult.proxyDisplay !== null
+    ) {
+      yield* Effect.logInfo("V3 Privacy Shield active", {
+        ephemeral: shieldedConfig.ephemeral === true,
+        storage: shieldedConfig.ephemeralStorage ?? "disk",
+        noLogs: shieldedConfig.noLogs === true,
+        strictPrivacy: shieldedConfig.strictPrivacy === true,
+        telemetryOptOutCount: shieldResult.telemetryOptOutCount,
+        scrubbedEnvCount: shieldResult.scrubbedEnvCount,
+        proxy: shieldResult.proxyDisplay,
+      });
+    }
 
     const layerHttpListening = Layer.effectDiscard(
       Effect.gen(function* () {
@@ -1215,6 +1245,7 @@ const layerMakeServer = Layer.unwrap(
       Layer.provideMerge(layerPlatformServices),
       Layer.provideMerge(FeatureFlags.layer),
       Layer.provide(Layer.succeed(HostProcess.InvokedAs, invokedAs)),
+      Layer.provide(Layer.succeed(ServerConfig.ServerConfig, shieldedConfig)),
     );
   }),
 ).pipe(Layer.provide(ProcessRunner.layer));

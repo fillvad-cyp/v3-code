@@ -415,6 +415,41 @@ it.layer(
     }),
   );
 
+  it.effect("serves PWA manifest, service worker, and HTML with security headers", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const staticDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-static-pwa-" });
+      yield* fs.writeFileString(
+        path.join(staticDir, "index.html"),
+        "<!doctype html><title>V3</title>",
+      );
+      yield* fs.writeFileString(path.join(staticDir, "manifest.webmanifest"), '{"name":"V3 Code"}');
+      yield* fs.writeFileString(
+        path.join(staticDir, "sw.js"),
+        "self.addEventListener('fetch',()=>{});",
+      );
+      const request = yield* makeStaticRequest(staticDir);
+
+      const html = yield* request("/");
+      expect(html.status).toBe(200);
+      expect(html.headers["referrer-policy"]).toBe("no-referrer");
+      expect(html.headers["x-content-type-options"]).toBe("nosniff");
+      expect(html.headers["x-frame-options"]).toBe("DENY");
+
+      const manifest = yield* request("/manifest.webmanifest");
+      expect(manifest.status).toBe(200);
+      expect(manifest.headers["content-type"]).toContain("application/manifest+json");
+      expect(manifest.headers["x-content-type-options"]).toBe("nosniff");
+
+      const sw = yield* request("/sw.js");
+      expect(sw.status).toBe(200);
+      expect(sw.headers["cache-control"]).toBe("no-cache, no-store, must-revalidate");
+      expect(sw.headers["service-worker-allowed"]).toBe("/");
+      expect(sw.headers["x-content-type-options"]).toBe("nosniff");
+    }),
+  );
+
   it.effect("serves static files without handles and skips fallback reads for HEAD and 304", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;

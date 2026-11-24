@@ -48,6 +48,8 @@ import {
 import { syncBrowserChromeTheme } from "./hooks/useTheme";
 import { startThreadVisitedMigration } from "./hooks/useThreadVisitedMigration";
 import { installDesktopPasteAsText } from "./lib/desktopPasteAsText";
+import { startPrivacyShieldService } from "./lib/privacyShield";
+import { startPwaInstallService } from "./lib/pwaInstall";
 import {
   syncDocumentElectronPlatformClasses,
   syncDocumentWindowControlsOverlayClass,
@@ -268,7 +270,10 @@ export function startAppServices(): AppRouter {
   if (isElectron) {
     syncDocumentElectronPlatformClasses(navigator.platform);
     syncDocumentWindowControlsOverlayClass();
+  } else {
+    startPwaInstallService();
   }
+  startPrivacyShieldService();
 
   installDesktopPasteAsText(window.desktopBridge, window);
   guardDomAgainstPageTranslation();

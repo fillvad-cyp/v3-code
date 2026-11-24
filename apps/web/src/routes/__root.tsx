@@ -36,6 +36,9 @@ import { ProjectCloneToastCoordinator } from "../components/ProjectCloneToastCoo
 import { ConnectDeviceApprovalCoordinator } from "../components/ConnectDeviceApprovalCoordinator";
 import { ChatGptWelcomeCoordinator } from "../components/settings/ChatGptWelcomeCoordinator";
 import { ThemeEditorHost } from "../components/settings/ThemeEditorHost";
+import { HomeScreenInstallPromptHost } from "../components/pwa/HomeScreenInstallPrompt";
+import { PrivacyLockOverlayHost } from "../components/pwa/PrivacyLockOverlay";
+import { usePrivacyShieldStore } from "../lib/privacyShield";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { Button } from "../components/ui/button";
 import { StandalonePage, StandalonePageHeader } from "../components/ui/standalone-page";
@@ -137,12 +140,19 @@ function RootRouteNotFoundView() {
 }
 
 function RootRouteView() {
+  const privacyOverlayActive = usePrivacyShieldStore(
+    (state) => state.locked || state.curtainVisible || state.wiped,
+  );
   // Above every branch: app services raise toasts for the whole page, so the surface they write to
   // must not unmount when the root switches branches (for example /welcome to the app shell).
   return (
     <ToastProvider>
       <AnchoredToastProvider>
-        <RootRouteBranch />
+        <div className="contents" inert={privacyOverlayActive}>
+          <RootRouteBranch />
+          <HomeScreenInstallPromptHost />
+        </div>
+        <PrivacyLockOverlayHost />
       </AnchoredToastProvider>
     </ToastProvider>
   );

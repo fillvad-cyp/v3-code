@@ -102,6 +102,11 @@ const DESKTOP_BACKEND_ENV_NAMES = [
 const WSL_FORWARDED_ENV_NAMES = [
   "OPENAI_API_KEY",
   "ANTHROPIC_API_KEY",
+  "V3CODE_EPHEMERAL",
+  "V3CODE_GHOST",
+  "V3CODE_NO_LOGS",
+  "V3CODE_STRICT_PRIVACY",
+  "V3CODE_PROXY",
   "T3CODE_TELEMETRY_ENABLED",
   "T3CODE_FEATURE_FLAGS",
   // Otherwise the WSL server keeps exporting to endpoints from the bootstrap.
