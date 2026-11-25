@@ -23,11 +23,17 @@ import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as Schema from "effect/Schema";
 
+import * as ProjectAccess from "../access/ProjectAccess.ts";
 import * as CloudLink from "../cloud/CloudLink.ts";
 import * as ServerConfig from "../config.ts";
 import { makeDpopKey } from "./dpop.testkit.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerHttp from "../http.ts";
+import * as InvitationService from "../identity/InvitationService.ts";
+import * as AuditEvents from "../persistence/AuditEvents.ts";
+import * as Invitations from "../persistence/Invitations.ts";
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
@@ -44,10 +50,24 @@ class AuthTestApi extends HttpApi.make("environment")
 const layerConfig = ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-oauth-test-" });
 const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
   Layer.provide(ManagedPolicy.layerTest()),
-  Layer.provide(Sqlite.layerMemory),
+  Layer.provideMerge(Sqlite.layerMemory),
   Layer.provideMerge(ServerSecretStore.layer),
   Layer.provideMerge(ServerEnvironment.layerIdentity),
   Layer.provide(layerConfig),
+);
+const layerIdentityRepositories = Layer.mergeAll(
+  Principals.layer,
+  Memberships.layer,
+  Invitations.layer,
+  AuditEvents.layer,
+);
+const layerIdentity = Layer.mergeAll(
+  InvitationService.layer.pipe(
+    Layer.provide(ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories))),
+    Layer.provide(layerIdentityRepositories),
+  ),
+  ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories)),
+  layerIdentityRepositories,
 );
 const notLinked: EnvironmentCloudLinkStateResult = {
   linked: false,
@@ -76,6 +96,7 @@ const makeLayerRoutes = (
         ),
       ),
       Layer.provide(AuthHttp.layerAuthenticatedAuth),
+      Layer.provide(layerIdentity),
       Layer.provide(ServerHttp.layerApiBodyLimit),
     ),
   ).pipe(

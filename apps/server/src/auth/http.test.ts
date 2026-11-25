@@ -5,6 +5,10 @@ import {
   AuthEnvironmentBootstrapTokenType,
   AuthAccessTokenType,
   EnvironmentHttpApi,
+  ProjectId,
+  ceilingScopes,
+  intersectScopes,
+  roleScopes,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
@@ -20,12 +24,19 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpRouter from "effect/http/HttpRouter";
 
+import * as ProjectAccess from "../access/ProjectAccess.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as InvitationService from "../identity/InvitationService.ts";
+import * as AuditEvents from "../persistence/AuditEvents.ts";
+import * as Invitations from "../persistence/Invitations.ts";
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import { makeDpopKey } from "./dpop.testkit.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
+import * as SessionStore from "./SessionStore.ts";
 import * as AuthHttp from "./http.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 
@@ -47,14 +58,29 @@ const layerConfig = Layer.effect(
 
 const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
   Layer.provide(ManagedPolicy.layerTest()),
-  Layer.provide(SqlitePersistence.layerMemory),
-  Layer.provide(ServerSecretStore.layer),
+  Layer.provideMerge(SqlitePersistence.layerMemory),
+  Layer.provideMerge(ServerSecretStore.layer),
   Layer.provide(ServerEnvironment.layerIdentity),
   Layer.provide(layerConfig),
+);
+const layerIdentityRepositories = Layer.mergeAll(
+  Principals.layer,
+  Memberships.layer,
+  Invitations.layer,
+  AuditEvents.layer,
+);
+const layerIdentity = Layer.mergeAll(
+  InvitationService.layer.pipe(
+    Layer.provide(ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories))),
+    Layer.provide(layerIdentityRepositories),
+  ),
+  ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories)),
+  layerIdentityRepositories,
 );
 const layerRoutes = HttpApiBuilder.layer(AuthTestApi).pipe(
   Layer.provide(AuthHttp.layer),
   Layer.provide(AuthHttp.layerAuthenticatedAuth),
+  Layer.provide(layerIdentity),
   Layer.provideMerge(layerEnvironmentAuth),
   Layer.provide(layerConfig),
   Layer.provideMerge(
@@ -264,4 +290,218 @@ it.live("checks token-endpoint DPoP proofs without writing replay state", () =>
       (environment) => Effect.promise(() => environment.dispose()),
     );
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.effect(
+  "issues, serves, accepts, and revokes invitations with principal-bound sessions over HTTP",
+  () =>
+    Effect.gen(function* () {
+      const random = yield* SecureRandom.SecureRandom;
+      let capturedSessions: SessionStore.SessionStore["Service"] | undefined;
+      const captureSessionsLayer = Layer.effectDiscard(
+        SessionStore.SessionStore.pipe(
+          Effect.tap((sessions) =>
+            Effect.sync(() => {
+              capturedSessions = sessions;
+            }),
+          ),
+        ),
+      );
+      const testLayer = captureSessionsLayer.pipe(
+        Layer.provideMerge(layerRoutes),
+        Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      );
+      const requestContext = Context.make(SecureRandom.SecureRandom, random);
+
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => HttpRouter.toWebHandler(testLayer, { disableLogger: true })),
+        (environment) =>
+          Effect.gen(function* () {
+            const devResponse = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/browser-session", { credential: DEV_TOKEN }),
+                requestContext,
+              ),
+            );
+            expect(devResponse.status).toBe(200);
+            const ownerCookie =
+              devResponse.headers
+                .getSetCookie()
+                .find((cookie) => cookie.startsWith("t3_dev_session_"))
+                ?.split(";", 1)[0] ?? "";
+
+            const projectId = ProjectId.make("kotcrm");
+            const createResponse = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/invitations",
+                  { kind: "staff", role: "developer", projectId },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(createResponse.status).toBe(200);
+            const created = (yield* Effect.promise(() => createResponse.json())) as {
+              invitation: { id: string; role: string; projectId: string | null };
+              code: string;
+            };
+            expect(created.invitation.role).toBe("developer");
+            expect(created.invitation.projectId).toBe(projectId);
+            expect(created.code).toMatch(/^[A-Z0-9]{4}-[A-Z0-9]{4}-[A-Z0-9]{4}$/);
+
+            const listResponse = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/invitations", {
+                  headers: { cookie: ownerCookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(listResponse.status).toBe(200);
+            const pending = (yield* Effect.promise(() => listResponse.json())) as Array<{
+              id: string;
+            }>;
+            expect(pending.map((row) => row.id)).toEqual([created.invitation.id]);
+
+            const pageResponse = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/invite/${encodeURIComponent(created.code)}`),
+                requestContext,
+              ),
+            );
+            expect(pageResponse.status).toBe(200);
+            expect(pageResponse.headers.get("content-type")).toContain("text/html");
+            const html = yield* Effect.promise(() => pageResponse.text());
+            expect(html).toContain(created.code);
+            expect(html).toContain("/api/auth/invitations/accept");
+            expect(html).toContain("Ready - open the app");
+
+            const acceptResponse = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/invitations/accept", {
+                  code: created.code,
+                  displayName: "Grace Hopper",
+                }),
+                requestContext,
+              ),
+            );
+            expect(acceptResponse.status).toBe(200);
+            const acceptBody = (yield* Effect.promise(() => acceptResponse.json())) as {
+              authenticated: boolean;
+              sessionMethod: string;
+              binding_kind: string;
+              binding: { _tag: string };
+              role: string;
+              permissions: Array<string>;
+            };
+            expect(acceptBody.authenticated).toBe(true);
+            expect(acceptBody.sessionMethod).toBe("browser-session-cookie");
+            expect(acceptBody.binding_kind).toBe("principal");
+            expect(acceptBody.binding).toEqual({ _tag: "principal" });
+            expect(acceptBody.role).toBe("developer");
+            expect(acceptBody.permissions).toEqual(
+              intersectScopes(roleScopes("developer"), ceilingScopes("staff")),
+            );
+
+            const sessionCookie = acceptResponse.headers
+              .getSetCookie()
+              .find((cookie) => cookie.startsWith("t3_session_"));
+            expect(sessionCookie).toBeDefined();
+            const cookiePair = sessionCookie!.split(";", 1)[0]!;
+            const sessionToken = cookiePair.slice(cookiePair.indexOf("=") + 1);
+
+            const verified = yield* capturedSessions!.verify(sessionToken);
+            expect(verified.principalId).toBeDefined();
+            expect(verified.subject).toBe(`principal:${verified.principalId}`);
+            expect(verified.binding).toEqual({ _tag: "principal" });
+            expect(verified.method).toBe("browser-session-cookie");
+
+            // Double-accept fails with 409 Conflict.
+            const doubleAccept = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/invitations/accept", {
+                  code: created.code,
+                  displayName: "Again",
+                }),
+                requestContext,
+              ),
+            );
+            expect(doubleAccept.status).toBe(409);
+
+            // Developer cannot issue invitations (403).
+            const devInviteAttempt = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/invitations",
+                  { kind: "staff", role: "viewer", projectId },
+                  { cookie: cookiePair },
+                ),
+                requestContext,
+              ),
+            );
+            expect(devInviteAttempt.status).toBe(403);
+
+            // Owner lists members and sees owner + Grace Hopper with developer membership.
+            const membersResponse = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/members", {
+                  headers: { cookie: ownerCookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(membersResponse.status).toBe(200);
+            const members = (yield* Effect.promise(() => membersResponse.json())) as Array<{
+              principal: { id: string; displayName: string; kind: string; status: string };
+              memberships: Array<{ projectId: string; role: string; state: string }>;
+            }>;
+            const grace = members.find((entry) => entry.principal.id === verified.principalId);
+            expect(grace).toBeDefined();
+            expect(grace!.principal.displayName).toBe("Grace Hopper");
+            expect(grace!.memberships).toEqual([
+              expect.objectContaining({ projectId, role: "developer", state: "active" }),
+            ]);
+
+            // Create and revoke a second invitation, then confirm accept fails with 400.
+            const secondCreate = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/invitations",
+                  { kind: "staff", role: "viewer", projectId },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            const second = (yield* Effect.promise(() => secondCreate.json())) as {
+              invitation: { id: string };
+              code: string;
+            };
+            const revokeResponse = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/api/auth/invitations/${second.invitation.id}`, {
+                  method: "DELETE",
+                  headers: { cookie: ownerCookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(revokeResponse.status).toBe(200);
+            expect(yield* Effect.promise(() => revokeResponse.json())).toEqual({ revoked: true });
+
+            const revokedAccept = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/invitations/accept", {
+                  code: second.code,
+                  displayName: "Revoked",
+                }),
+                requestContext,
+              ),
+            );
+            expect(revokedAccept.status).toBe(400);
+          }),
+        (environment) => Effect.promise(() => environment.dispose()),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );

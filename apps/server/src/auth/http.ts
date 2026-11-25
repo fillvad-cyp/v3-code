@@ -1,13 +1,19 @@
 import {
   authScopeRequiredResponse,
+  authScopeResponse,
+  AuthAccessReadScope,
   AuthAccessTokenType,
   AuthAccessWriteScope,
+  AuthEnvironmentScope,
   AuthStandardClientScopes,
   AuthGrantScope,
+  type AuthBrowserSessionResult,
   EnvironmentAuthInvalidError,
   type EnvironmentAuthInvalidReason,
   EnvironmentConnectApprovalPendingError,
   EnvironmentHttpApi,
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpConflictError,
   EnvironmentHttpForbiddenError,
   EnvironmentInternalError,
   type EnvironmentInternalErrorReason,
@@ -19,9 +25,11 @@ import {
   EnvironmentScopeRequiredError,
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
+  intersectScopes,
   mcpClientScopes,
+  roleScopes,
 } from "@t3tools/contracts";
-import type { AuthEnvironmentScope, DpopFailureReason } from "@t3tools/contracts";
+import type { DpopFailureReason, MemberWithMemberships } from "@t3tools/contracts";
 import { parseOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as Clock from "effect/Clock";
@@ -35,7 +43,12 @@ import * as HttpEffect from "effect/http/HttpEffect";
 import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
+import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as InvitationService from "../identity/InvitationService.ts";
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
+import { renderInvitePage } from "./inviteHtml.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { traceAuthenticatedRelayRequest, traceRelayRequest } from "../cloud/traceRelayRequest.ts";
 import { deriveAuthClientMetadata } from "./utils.ts";
@@ -46,6 +59,17 @@ const CREDENTIAL_RESPONSE_HEADERS = {
   "cache-control": "no-store",
   pragma: "no-cache",
 } as const;
+
+const INVITE_PAGE_HEADERS = {
+  "content-security-policy":
+    "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self'; form-action 'self'; frame-ancestors 'none'",
+  "x-frame-options": "DENY",
+  "cache-control": "no-store",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+} as const;
+
+const isAuthEnvironmentScope = Schema.is(AuthEnvironmentScope);
 
 const appendCredentialResponseHeaders = HttpEffect.appendPreResponseHandler((_request, response) =>
   Effect.succeed(HttpServerResponse.setHeaders(response, CREDENTIAL_RESPONSE_HEADERS)),
@@ -289,6 +313,28 @@ export const layer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
     const sessions = yield* SessionStore.SessionStore;
+    const invitations = yield* InvitationService.InvitationService;
+    const projectAccess = yield* ProjectAccess.ProjectAccess;
+    const principals = yield* Principals.PrincipalRepository;
+    const memberships = yield* Memberships.MembershipRepository;
+
+    const resolveSessionActor = (session: EnvironmentAuthenticatedPrincipal["Service"]) =>
+      projectAccess
+        .resolve({
+          sessionId: session.sessionId,
+          subject: session.subject,
+          scopes: [...session.scopes],
+          principalId: session.principalId,
+          binding: session.binding,
+        })
+        .pipe(
+          Effect.catchTags({
+            AccessResolveError: (error) =>
+              error.reason === "repository_error"
+                ? failEnvironmentInternal("internal_error", error)
+                : Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+          }),
+        );
 
     return handlers
       .handle(
@@ -602,6 +648,192 @@ export const layer = HttpApiBuilder.group(
             failEnvironmentInternal("client_session_revoke_failed", error),
           ),
         ),
+      )
+      .handle(
+        "acceptInvitation",
+        Effect.fn("environment.auth.acceptInvitation")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const clientMetadata = deriveAuthClientMetadata({ request });
+            const accepted = yield* invitations.consume({
+              code: args.payload.code,
+              displayName: args.payload.displayName,
+              audit: {
+                ip: clientMetadata.ipAddress ?? null,
+                userAgent: clientMetadata.userAgent ?? null,
+              },
+            });
+            const principalCeiling = accepted.principal.ceiling.filter(isAuthEnvironmentScope);
+            const scopes = intersectScopes(roleScopes(accepted.invitation.role), principalCeiling);
+            const binding = { _tag: "principal" as const };
+            const issued = yield* sessions
+              .issue({
+                method: "browser-session-cookie",
+                subject: `principal:${accepted.principal.id}`,
+                scopes,
+                principalId: accepted.principal.id,
+                binding,
+                client: {
+                  ...clientMetadata,
+                  label: accepted.principal.displayName,
+                },
+              })
+              .pipe(
+                Effect.catch((error) =>
+                  failEnvironmentInternal("browser_session_issuance_failed", error),
+                ),
+              );
+            yield* appendSessionCookie(
+              request,
+              sessions.cookieName,
+              issued.token,
+              issued.expiresAt,
+            );
+            yield* appendCredentialResponseHeaders;
+            return {
+              authenticated: true,
+              ...authScopeResponse(issued.scopes),
+              sessionMethod: issued.method,
+              expiresAt: DateTime.toUtc(issued.expiresAt),
+              binding_kind: "principal",
+              binding,
+              role: accepted.invitation.role,
+            } satisfies AuthBrowserSessionResult;
+          },
+          Effect.catchTags({
+            InvitationInvalidError: (error) =>
+              Effect.fail(new EnvironmentHttpBadRequestError({ message: error.message })),
+            InvitationExpiredError: (error) =>
+              Effect.fail(new EnvironmentHttpBadRequestError({ message: error.message })),
+            InvitationAlreadyUsedError: (error) =>
+              Effect.fail(new EnvironmentHttpConflictError({ message: error.message })),
+            InvitationInternalError: (error) =>
+              failEnvironmentInternal("browser_session_issuance_failed", error),
+          }),
+        ),
+      )
+      .handleRaw("invitePage", ({ params }) =>
+        Effect.succeed(
+          HttpServerResponse.text(renderInvitePage(params.code), {
+            status: 200,
+            contentType: "text/html; charset=utf-8",
+            headers: INVITE_PAGE_HEADERS,
+          }),
+        ),
+      )
+      .handle(
+        "createInvitation",
+        Effect.fn("environment.auth.createInvitation")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const clientMetadata = deriveAuthClientMetadata({ request });
+            const actor = yield* resolveSessionActor(session);
+            const createdBy = session.principalId ?? InvitationService.OWNER_PRINCIPAL_ID;
+            yield* appendCredentialResponseHeaders;
+            return yield* invitations.issue({
+              ...(args.payload.kind === undefined ? {} : { kind: args.payload.kind }),
+              role: args.payload.role,
+              projectId: args.payload.projectId,
+              createdBy,
+              actor,
+              audit: {
+                sessionId: session.sessionId,
+                ip: clientMetadata.ipAddress ?? null,
+                userAgent: clientMetadata.userAgent ?? null,
+              },
+            });
+          },
+          Effect.catchTags({
+            InvitationForbiddenError: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+            InvitationInternalError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
+      )
+      .handle(
+        "listInvitations",
+        Effect.fn("environment.auth.listInvitations")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* requireEnvironmentScope(AuthAccessReadScope);
+            const actor = yield* resolveSessionActor(session);
+            const actorId = session.principalId ?? InvitationService.OWNER_PRINCIPAL_ID;
+            return yield* invitations.listPending({
+              actorId,
+              actor,
+              ...(args.query.projectId === undefined ? {} : { projectId: args.query.projectId }),
+            });
+          },
+          Effect.catchTags({
+            InvitationForbiddenError: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+            InvitationInternalError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
+      )
+      .handle(
+        "revokeInvitation",
+        Effect.fn("environment.auth.revokeInvitation")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const clientMetadata = deriveAuthClientMetadata({ request });
+            const actor = yield* resolveSessionActor(session);
+            const revokedBy = session.principalId ?? InvitationService.OWNER_PRINCIPAL_ID;
+            const revoked = yield* invitations.revoke({
+              id: args.params.id,
+              revokedBy,
+              actor,
+              audit: {
+                sessionId: session.sessionId,
+                ip: clientMetadata.ipAddress ?? null,
+                userAgent: clientMetadata.userAgent ?? null,
+              },
+            });
+            return { revoked };
+          },
+          Effect.catchTags({
+            InvitationForbiddenError: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+            InvitationInternalError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
+      )
+      .handle(
+        "listMembers",
+        Effect.fn("environment.auth.listMembers")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const session = yield* requireEnvironmentScope(AuthAccessReadScope);
+          const actor = yield* resolveSessionActor(session);
+          const accessibleProjects = projectAccess.accessibleProjectIds(actor);
+          const allPrincipals = yield* principals.list.pipe(
+            Effect.catch((error) => failEnvironmentInternal("internal_error", error)),
+          );
+          const rows = yield* Effect.forEach(allPrincipals, (principal) =>
+            memberships.listForPrincipal(principal.id).pipe(
+              Effect.catch((error) => failEnvironmentInternal("internal_error", error)),
+              Effect.map((principalMemberships): MemberWithMemberships => ({
+                principal,
+                memberships:
+                  accessibleProjects === undefined
+                    ? principalMemberships
+                    : principalMemberships.filter((entry) =>
+                        accessibleProjects.has(entry.projectId),
+                      ),
+              })),
+            ),
+          );
+          if (accessibleProjects === undefined) {
+            return rows;
+          }
+          return rows.filter(
+            (row) => row.principal.id === actor.principalId || row.memberships.length > 0,
+          );
+        }),
       );
   }),
 );

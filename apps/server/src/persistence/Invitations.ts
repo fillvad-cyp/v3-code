@@ -82,6 +82,9 @@ export class InvitationRepository extends Context.Service<
     readonly consume: (
       input: ConsumeInvitationInput,
     ) => Effect.Effect<Option.Option<Invitation>, InvitationRepositoryError>;
+    readonly getById: (
+      id: InvitationId,
+    ) => Effect.Effect<Option.Option<Invitation>, InvitationRepositoryError>;
     readonly getByTokenHash: (
       tokenHash: string,
     ) => Effect.Effect<Option.Option<Invitation>, InvitationRepositoryError>;
@@ -152,6 +155,12 @@ const make = Effect.gen(function* () {
       `,
   });
 
+  const getRowById = SqlSchema.findOneOption({
+    Request: InvitationId,
+    Result: InvitationRow,
+    execute: (id) => sql`${selectRow} WHERE id = ${id}`,
+  });
+
   const getRowByTokenHash = SqlSchema.findOneOption({
     Request: Schema.String,
     Result: InvitationRow,
@@ -213,6 +222,9 @@ const make = Effect.gen(function* () {
       consumeRow(input).pipe(
         Effect.mapError(toSqlOrDecodeError("consumeInvitation", "Invitation")),
       ),
+    ),
+    getById: Effect.fn("InvitationRepository.getById")((id) =>
+      getRowById(id).pipe(Effect.mapError(toSqlOrDecodeError("getInvitationById", "Invitation"))),
     ),
     getByTokenHash: Effect.fn("InvitationRepository.getByTokenHash")((tokenHash) =>
       getRowByTokenHash(tokenHash).pipe(

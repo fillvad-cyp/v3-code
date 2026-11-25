@@ -50,11 +50,21 @@ import {
 import {
   DpopFailureReason,
   AuthSessionId,
+  InvitationId,
   PrincipalId,
+  ProjectId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
-import type { SessionBinding } from "./membership.ts";
+import {
+  Invitation,
+  InvitationAcceptInput,
+  InvitationCreateInput,
+  InvitationCreateResult,
+  InvitationRevokeResult,
+  MemberWithMemberships,
+  type SessionBinding,
+} from "./membership.ts";
 import {
   CloudSpeechApiKey,
   CloudSpeechError,
@@ -415,6 +425,22 @@ const EnvironmentSessionRevokeErrors = [
   EnvironmentOperationForbiddenError,
   EnvironmentInternalError,
 ] as const;
+const EnvironmentInvitationAcceptErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpConflictError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentInvitationManageErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentInvitationListErrors = [
+  EnvironmentHttpForbiddenError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
 const EnvironmentProjectSnapshotErrors = [
   EnvironmentAuthInvalidError,
   EnvironmentScopeRequiredError,
@@ -687,6 +713,49 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       headers: OptionalBearerHeaders,
       success: AuthOtherClientSessionsRevokeResult,
       error: EnvironmentScopedOperationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("acceptInvitation", "/api/auth/invitations/accept", {
+      payload: InvitationAcceptInput,
+      success: AuthBrowserSessionResult,
+      error: EnvironmentInvitationAcceptErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("invitePage", "/invite/:code", {
+      params: Schema.Struct({ code: Schema.String }),
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("createInvitation", "/api/auth/invitations", {
+      headers: OptionalBearerHeaders,
+      payload: InvitationCreateInput,
+      success: InvitationCreateResult,
+      error: EnvironmentInvitationManageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listInvitations", "/api/auth/invitations", {
+      headers: OptionalBearerHeaders,
+      query: Schema.Struct({ projectId: Schema.optionalKey(ProjectId) }),
+      success: Schema.Array(Invitation),
+      error: EnvironmentInvitationListErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("revokeInvitation", "/api/auth/invitations/:id", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: InvitationId }),
+      success: InvitationRevokeResult,
+      error: EnvironmentInvitationListErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listMembers", "/api/auth/members", {
+      headers: OptionalBearerHeaders,
+      success: Schema.Array(MemberWithMemberships),
+      error: EnvironmentInvitationListErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 

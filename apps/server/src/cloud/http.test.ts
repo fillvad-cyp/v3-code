@@ -25,6 +25,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as NetAddress from "effect/net/NetAddress";
 import { decodeRelayJwt, RELAY_LINK_PROOF_TYP, verifyRelayJwt } from "@t3tools/shared/relayJwt";
 
+import * as ProjectAccess from "../access/ProjectAccess.ts";
 import * as EnvironmentKeys from "./environmentKeys.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as AuthHttp from "../auth/http.ts";
@@ -32,6 +33,11 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerHttp from "../http.ts";
+import * as InvitationService from "../identity/InvitationService.ts";
+import * as AuditEvents from "../persistence/AuditEvents.ts";
+import * as Invitations from "../persistence/Invitations.ts";
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as AgentAwarenessRelay from "../relay/AgentAwarenessRelay.ts";
 import * as CliTokenManager from "./CliTokenManager.ts";
@@ -75,10 +81,26 @@ const layerConfig = Layer.effect(
   }),
 ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-link-proof-test-" })));
 
+const layerIdentityRepositories = Layer.mergeAll(
+  Principals.layer,
+  Memberships.layer,
+  Invitations.layer,
+  AuditEvents.layer,
+);
+const layerIdentity = Layer.mergeAll(
+  InvitationService.layer.pipe(
+    Layer.provide(ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories))),
+    Layer.provide(layerIdentityRepositories),
+  ),
+  ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories)),
+  layerIdentityRepositories,
+);
+
 // Real credential issuance, verification, origin checks and signing; no relay or tunnel is started.
 const layerLinkProofRoutes = HttpApiBuilder.layer(LinkProofTestApi).pipe(
   Layer.provide([AuthHttp.layer, ConnectHttp.layer]),
   Layer.provide(AuthHttp.layerAuthenticatedAuth),
+  Layer.provide(layerIdentity),
   Layer.provide(ServerHttp.layerApiBodyLimit),
   Layer.provide(CloudLink.layer),
   Layer.provide(ServerSettings.ServerSettingsService.layerTest()),

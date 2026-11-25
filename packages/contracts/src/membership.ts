@@ -216,3 +216,33 @@ export const SessionPrincipal = Schema.Struct({
   binding: SessionBinding,
 });
 export type SessionPrincipal = typeof SessionPrincipal.Type;
+
+export const InvitationCreateInput = Schema.Struct({
+  kind: Schema.optionalKey(Schema.Literal("staff")),
+  role: ProjectRole,
+  projectId: Schema.NullOr(ProjectId),
+});
+export type InvitationCreateInput = typeof InvitationCreateInput.Type;
+
+export const InvitationCreateResult = Schema.Struct({
+  invitation: Invitation,
+  code: TrimmedNonEmptyString,
+});
+export type InvitationCreateResult = typeof InvitationCreateResult.Type;
+
+export const InvitationAcceptInput = Schema.Struct({
+  code: TrimmedNonEmptyString,
+  displayName: TrimmedNonEmptyString,
+});
+export type InvitationAcceptInput = typeof InvitationAcceptInput.Type;
+
+export const InvitationRevokeResult = Schema.Struct({
+  revoked: Schema.Boolean,
+});
+export type InvitationRevokeResult = typeof InvitationRevokeResult.Type;
+
+export const MemberWithMemberships = Schema.Struct({
+  principal: Principal,
+  memberships: Schema.Array(ProjectMembership),
+});
+export type MemberWithMemberships = typeof MemberWithMemberships.Type;
