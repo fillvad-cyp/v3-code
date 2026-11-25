@@ -483,6 +483,8 @@ const EnvironmentOrchestrationThreadSnapshotErrors = [
   EnvironmentInternalError,
 ] as const;
 const EnvironmentProjectMutationErrors = [
+  EnvironmentAuthInvalidError,
+  EnvironmentHttpForbiddenError,
   EnvironmentRequestInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentInternalError,

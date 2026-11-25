@@ -24,6 +24,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as Schema from "effect/Schema";
 
 import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as CloudLink from "../cloud/CloudLink.ts";
 import * as ServerConfig from "../config.ts";
 import { makeDpopKey } from "./dpop.testkit.ts";
@@ -68,7 +69,10 @@ const layerIdentityRepositories = Layer.mergeAll(
   MemberLimits.layer,
   SessionPrincipals.layer,
 );
-const layerAccess = ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories));
+const layerAccess = ProjectAccess.layer.pipe(
+  Layer.provide(layerIdentityRepositories),
+  Layer.provide(ProjectStore.layer),
+);
 const layerMembership = MembershipService.layer.pipe(
   Layer.provide(layerAccess),
   Layer.provide(layerIdentityRepositories),

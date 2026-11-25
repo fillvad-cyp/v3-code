@@ -1,5 +1,6 @@
 import {
   CommandId,
+  EnvironmentHttpForbiddenError,
   type OrchestrationProjectShell,
   PROJECT_TRACKED_FOLDERS_MAX,
   ProjectId,
@@ -9,11 +10,12 @@ import {
   type ProjectUpdatePayload,
   type ProjectSnapshot,
   type ThreadId,
+  passesProjectChecks,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as Clock from "effect/Clock";
-import { isWslSharePath } from "@t3tools/shared/path";
+import { isHostPath, isWslSharePath, newProjectFolderName } from "@t3tools/shared/path";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -25,6 +27,9 @@ import * as Path from "effect/Path";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 
+import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ServerConfig from "../config.ts";
+import * as MembershipService from "../identity/MembershipService.ts";
 import { withCommandMetrics } from "../observability/Metrics.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -57,6 +62,9 @@ import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 export interface ProjectCreateInput extends ProjectCreatePayload {
   readonly commandId: CommandId;
   readonly projectId: ProjectId;
+  readonly actor?: ProjectAccess.AccessActor | undefined;
+  /** Internal: ManagedProjectFolders already claimed a unique folder under the members root. */
+  readonly managedWorkspaceRoot?: boolean | undefined;
 }
 
 export interface ProjectUpdateInput extends ProjectUpdatePayload {
@@ -126,6 +134,8 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "list-threads",
       "delete-thread",
       "dispatch-project-command",
+      "set-ownership",
+      "grant-creator-membership",
     ]),
     projectId: Schema.optional(ProjectId),
     workspaceRoot: Schema.optional(Schema.String),
@@ -142,7 +152,8 @@ export type ProjectServiceError =
   | ProjectConflictError
   | ProjectNotEmptyError
   | ProjectInvalidError
-  | ProjectOperationError;
+  | ProjectOperationError
+  | EnvironmentHttpForbiddenError;
 
 export class ProjectService extends Context.Service<
   ProjectService,
@@ -191,8 +202,10 @@ export class ProjectService extends Context.Service<
 >()("v3code/project/ProjectService") {}
 
 const FOLDER_SYNC_INTERVAL_MS = 30_000;
+const MAX_MEMBER_PROJECT_FOLDER_ATTEMPTS = 100;
 
 export const make = Effect.gen(function* () {
+  const config = yield* ServerConfig.ServerConfig;
   const projects = yield* ProjectStore.ProjectStoreV2;
   const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
@@ -202,6 +215,7 @@ export const make = Effect.gen(function* () {
   const legacyImporter = yield* LegacyV1ThreadImporter.LegacyV1ThreadImporter;
   const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const membershipService = yield* Effect.serviceOption(MembershipService.MembershipService);
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
@@ -534,31 +548,216 @@ export const make = Effect.gen(function* () {
     return Option.isNone(row) ? Option.none() : Option.some(yield* hydrate(row.value));
   });
 
+  const assertMemberPathWithinBaseDir = Effect.fnUntraced(function* (
+    rawPath: string,
+    resolvedBaseDir: string,
+    realBaseDir: string,
+    membersRoot: string,
+  ) {
+    const trimmed = rawPath.trim();
+    const forbidden = () =>
+      new EnvironmentHttpForbiddenError({
+        message: "Non-owner members may only create projects under the managed projects directory.",
+      });
+    let candidate: string;
+    if (trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+      const home = yield* HostProcess.HomeDirectory;
+      candidate = path.resolve(home, trimmed.slice(2));
+    } else if (isHostPath(trimmed)) {
+      if (!path.isAbsolute(trimmed)) {
+        return yield* forbidden();
+      }
+      candidate = path.resolve(trimmed);
+    } else {
+      candidate = path.resolve(membersRoot, trimmed);
+    }
+    if (!isWithinRoot(path, candidate, resolvedBaseDir)) {
+      return yield* forbidden();
+    }
+    const realCandidate = yield* fileSystem
+      .realPath(candidate)
+      .pipe(Effect.orElseSucceed(() => null));
+    if (realCandidate !== null && !isWithinRoot(path, realCandidate, realBaseDir)) {
+      return yield* forbidden();
+    }
+  });
+
+  const claimMemberProjectDir = Effect.fn("ProjectService.claimMemberProjectDir")(function* (
+    projectId: ProjectId,
+    membersRoot: string,
+    title: string,
+  ) {
+    yield* fileSystem.makeDirectory(membersRoot, { recursive: true }).pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProjectOperationError({
+            operation: "normalize-workspace",
+            projectId,
+            workspaceRoot: membersRoot,
+            cause,
+          }),
+      ),
+    );
+    const baseSlug = newProjectFolderName(title);
+    for (let attempt = 1; attempt <= MAX_MEMBER_PROJECT_FOLDER_ATTEMPTS; attempt++) {
+      const candidate = path.join(membersRoot, attempt === 1 ? baseSlug : `${baseSlug}-${attempt}`);
+      const claimed = yield* fileSystem.makeDirectory(candidate).pipe(
+        Effect.as(true),
+        Effect.catchIf(
+          (error) => error.reason._tag === "AlreadyExists",
+          () => Effect.succeed(false),
+        ),
+        Effect.mapError(
+          (cause) =>
+            new ProjectOperationError({
+              operation: "normalize-workspace",
+              projectId,
+              workspaceRoot: candidate,
+              cause,
+            }),
+        ),
+      );
+      if (claimed) return candidate;
+    }
+    return yield* new ProjectOperationError({
+      operation: "normalize-workspace",
+      projectId,
+      workspaceRoot: path.join(membersRoot, baseSlug),
+      cause: `Every folder name for "${baseSlug}" is taken.`,
+    });
+  });
+
   const create: ProjectService["Service"]["create"] = Effect.fn("ProjectService.create")(
     function* (input) {
-      yield* rejectWslSharePath(input.projectId, input.workspaceRoot);
-      const workspaceRoot = yield* normalizeWorkspaceRoot({
-        projectId: input.projectId,
-        workspaceRoot: input.workspaceRoot,
-        createIfMissing: input.createWorkspaceRootIfMissing ?? false,
-      });
-      yield* rejectWorktreeContainer(input.projectId, workspaceRoot);
-      const trackedFolders = yield* normalizeTrackedFolders(
-        input.projectId,
-        workspaceRoot,
-        input.trackedFolders ?? [],
+      const isMemberCreate =
+        input.actor !== undefined &&
+        !input.actor.isOwner &&
+        !passesProjectChecks(input.actor.binding);
+
+      let requestedRoot = input.workspaceRoot;
+      let createIfMissing = input.createWorkspaceRootIfMissing ?? false;
+      let claimedMemberDir: string | undefined;
+
+      if (isMemberCreate) {
+        if (input.actor.principalId === undefined) {
+          return yield* new EnvironmentHttpForbiddenError({
+            message: "A principal identity is required to create a project.",
+          });
+        }
+        const resolvedBaseDir = path.resolve(config.baseDir);
+        const realBaseDir = yield* fileSystem
+          .realPath(resolvedBaseDir)
+          .pipe(Effect.orElseSucceed(() => resolvedBaseDir));
+        const membersRoot = path.join(resolvedBaseDir, "projects");
+
+        yield* assertMemberPathWithinBaseDir(
+          input.workspaceRoot,
+          resolvedBaseDir,
+          realBaseDir,
+          membersRoot,
+        );
+        for (const folder of input.trackedFolders ?? []) {
+          yield* assertMemberPathWithinBaseDir(
+            folder.path,
+            resolvedBaseDir,
+            realBaseDir,
+            membersRoot,
+          );
+        }
+        if (input.managedWorkspaceRoot !== true) {
+          claimedMemberDir = yield* claimMemberProjectDir(
+            input.projectId,
+            membersRoot,
+            input.title,
+          );
+          requestedRoot = claimedMemberDir;
+          createIfMissing = false;
+        }
+      }
+
+      const cleanupClaimedDir = (dir: string) =>
+        projects.findActiveByWorkspaceRoot(dir).pipe(
+          Effect.flatMap((owner) =>
+            Option.isNone(owner)
+              ? fileSystem.remove(dir, { recursive: true }).pipe(Effect.ignore)
+              : Effect.void,
+          ),
+          Effect.ignore,
+        );
+
+      return yield* Effect.gen(function* () {
+        yield* rejectWslSharePath(input.projectId, requestedRoot);
+        const workspaceRoot = yield* normalizeWorkspaceRoot({
+          projectId: input.projectId,
+          workspaceRoot: requestedRoot,
+          createIfMissing,
+        });
+        yield* rejectWorktreeContainer(input.projectId, workspaceRoot);
+        const trackedFolders = yield* normalizeTrackedFolders(
+          input.projectId,
+          workspaceRoot,
+          input.trackedFolders ?? [],
+        );
+        yield* commit({
+          type: "project.create",
+          commandId: input.commandId,
+          projectId: input.projectId,
+          title: input.title,
+          workspaceRoot,
+          ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
+          trackedFolders,
+        });
+        if (isMemberCreate && input.actor.principalId !== undefined) {
+          const creatorPrincipalId = input.actor.principalId;
+          yield* projects
+            .setOwnership({
+              projectId: input.projectId,
+              ownerId: creatorPrincipalId,
+              visibility: "private",
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectOperationError({
+                    operation: "set-ownership",
+                    projectId: input.projectId,
+                    cause,
+                  }),
+              ),
+            );
+          if (Option.isNone(membershipService)) {
+            return yield* new ProjectOperationError({
+              operation: "grant-creator-membership",
+              projectId: input.projectId,
+              cause: "MembershipService is unavailable for non-owner project creation.",
+            });
+          }
+          yield* membershipService.value
+            .grantCreatorAdmin({
+              projectId: input.projectId,
+              principalId: creatorPrincipalId,
+              audit: { sessionId: input.actor.sessionId },
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new ProjectOperationError({
+                    operation: "grant-creator-membership",
+                    projectId: input.projectId,
+                    cause,
+                  }),
+              ),
+            );
+        }
+        yield* projectEnrichment.invalidate([workspaceRoot]);
+        return yield* readCommitted(input.projectId);
+      }).pipe(
+        Effect.tapError((error) =>
+          claimedMemberDir !== undefined && error._tag !== "ProjectConflictError"
+            ? cleanupClaimedDir(claimedMemberDir)
+            : Effect.void,
+        ),
       );
-      yield* commit({
-        type: "project.create",
-        commandId: input.commandId,
-        projectId: input.projectId,
-        title: input.title,
-        workspaceRoot,
-        ...(input.scripts === undefined ? {} : { scripts: input.scripts }),
-        trackedFolders,
-      });
-      yield* projectEnrichment.invalidate([workspaceRoot]);
-      return yield* readCommitted(input.projectId);
     },
   );
 

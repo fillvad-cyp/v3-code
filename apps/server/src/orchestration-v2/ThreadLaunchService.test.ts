@@ -316,6 +316,8 @@ function makeHarness(options: HarnessOptions = {}) {
               trackedFolders: [],
               pinnedAt: null,
               archivedAt: null,
+              ownerId: null,
+              visibility: "shared" as const,
               createdAt: project.createdAt,
               updatedAt: project.updatedAt,
               deletedAt: project.deletedAt,

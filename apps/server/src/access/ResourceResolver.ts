@@ -365,6 +365,10 @@ export function resourcesForRpcCall(method: string, payload: unknown): RpcResour
     return buildResource({ threadId: readString(payload, "threadId") });
   }
 
+  if (method === WS_METHODS.projectsMutate && payload.type === "project.create") {
+    return undefined;
+  }
+
   if (PROJECT_ID_METHODS.has(method)) {
     return buildResource({ projectId: readString(payload, "projectId") });
   }

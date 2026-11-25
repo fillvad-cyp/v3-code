@@ -6,11 +6,16 @@ import { assert, it } from "@effect/vitest";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  AuthSessionId,
+  AuthStandardClientScopes,
   CommandId,
+  EnvironmentHttpForbiddenError,
+  PrincipalId,
   type Project,
   ProjectId,
   type ProjectTrackedFolder,
   ProviderInstanceId,
+  ceilingScopes,
 } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Deferred from "effect/Deferred";
@@ -26,7 +31,12 @@ import * as Ref from "effect/Ref";
 import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
 
+import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as MembershipService from "../identity/MembershipService.ts";
 import {
   orchestrationCommandDuration,
   orchestrationCommandsTotal,
@@ -38,6 +48,13 @@ import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
+import * as ApiTokens from "../persistence/ApiTokens.ts";
+import * as AuditEvents from "../persistence/AuditEvents.ts";
+import * as Invitations from "../persistence/Invitations.ts";
+import * as MemberLimits from "../persistence/MemberLimits.ts";
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
+import * as SessionPrincipals from "../persistence/SessionPrincipals.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -1148,4 +1165,213 @@ it.effect("rejects an update that waited on the lock while its project was delet
       "Update race",
     );
   }).pipe(Effect.provide(layerProjectServiceDependencies)),
+);
+
+const makeMemberProjectServiceLayer = () => {
+  const config = ServerConfig.layerTest(process.cwd(), { prefix: "project-service-member-" });
+  const secrets = ServerSecretStore.layer.pipe(Layer.provide(config));
+  const sessions = SessionStore.layer.pipe(
+    Layer.provide(ServerEnvironment.layerIdentity),
+    Layer.provide(secrets),
+    Layer.provide(config),
+  );
+  const repos = Layer.mergeAll(
+    Principals.layer,
+    Memberships.layer,
+    Invitations.layer,
+    AuditEvents.layer,
+    ApiTokens.layer,
+    MemberLimits.layer,
+    SessionPrincipals.layer,
+    ProjectStore.layer,
+  );
+  const access = ProjectAccess.layer.pipe(Layer.provide(repos));
+  const membershipService = MembershipService.layer.pipe(
+    Layer.provide(access),
+    Layer.provide(repos),
+    Layer.provide(sessions),
+  );
+  const projectService = RuntimeLayer.layerProjectService.pipe(
+    Layer.provide(membershipService),
+    Layer.provideMerge(ProjectEnrichmentService.layer),
+    Layer.provideMerge(layerWorkspacePaths),
+    Layer.provideMerge(layerMetadata),
+  );
+  return Layer.mergeAll(projectService, membershipService, access, repos).pipe(
+    Layer.provideMerge(config),
+    Layer.provideMerge(SqlitePersistence.layerMemory),
+    Layer.provideMerge(ServerSettings.layerTest()),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+  );
+};
+
+it.effect(
+  "member create lands under baseDir/projects with private visibility, owner_id, and admin membership; rejects foreign host paths",
+  () =>
+    Effect.gen(function* () {
+      const config = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const service = yield* ProjectService.ProjectService;
+      const projectStore = yield* ProjectStore.ProjectStoreV2;
+      const principals = yield* Principals.PrincipalRepository;
+      const memberships = yield* Memberships.MembershipRepository;
+      const access = yield* ProjectAccess.ProjectAccess;
+
+      const now = "2026-11-25T12:00:00.000Z";
+      const devId = PrincipalId.make("member-dev-1");
+      const strangerId = PrincipalId.make("member-stranger-1");
+      const sharedProjectId = ProjectId.make("project:kotcrm");
+
+      yield* principals.create({
+        id: devId,
+        kind: "member",
+        displayName: "Developer",
+        email: null,
+        status: "active",
+        ceiling: [...ceilingScopes("staff")],
+        createdAt: now,
+      });
+      yield* principals.create({
+        id: strangerId,
+        kind: "member",
+        displayName: "Stranger",
+        email: null,
+        status: "active",
+        ceiling: [...ceilingScopes("staff")],
+        createdAt: now,
+      });
+      yield* memberships.upsert({
+        projectId: sharedProjectId,
+        principalId: devId,
+        role: "developer",
+        state: "active",
+        invitedBy: PrincipalId.make("owner"),
+        expiresAt: null,
+        updatedAt: now,
+      });
+      yield* memberships.upsert({
+        projectId: sharedProjectId,
+        principalId: strangerId,
+        role: "developer",
+        state: "active",
+        invitedBy: PrincipalId.make("owner"),
+        expiresAt: null,
+        updatedAt: now,
+      });
+
+      const devActor = yield* access.resolve({
+        sessionId: AuthSessionId.make("session-dev"),
+        subject: "dev",
+        scopes: [...AuthStandardClientScopes],
+        principalId: devId,
+        binding: { _tag: "principal" },
+      });
+      const ownerActor = yield* access.resolve({
+        sessionId: AuthSessionId.make("session-owner"),
+        subject: "owner",
+        scopes: [...AuthStandardClientScopes],
+        principalId: PrincipalId.make("owner"),
+        binding: { _tag: "environment" },
+      });
+
+      // Owner-created project keeps arbitrary host path and stays shared.
+      const ownerProject = yield* service.create({
+        commandId: CommandId.make("cmd-owner-create"),
+        projectId: sharedProjectId,
+        title: "KotCRM",
+        workspaceRoot: "/work/kotcrm",
+        actor: ownerActor,
+      });
+      assert.equal(ownerProject.workspaceRoot, "/work/kotcrm");
+      const ownerRow = Option.getOrThrow(yield* projectStore.get(sharedProjectId));
+      assert.isNull(ownerRow.ownerId);
+      assert.equal(ownerRow.visibility, "shared");
+
+      // Member supplying a foreign host path outside baseDir is rejected with 403.
+      for (const foreignPath of [
+        "/etc/passwd",
+        "/work/other-repo",
+        "~/secret-repo",
+        path.join(config.baseDir, "..", "escaped"),
+      ]) {
+        const err = yield* service
+          .create({
+            commandId: CommandId.make(`cmd-foreign:${foreignPath}`),
+            projectId: ProjectId.make(`project:foreign:${foreignPath}`),
+            title: "Escape Attempt",
+            workspaceRoot: foreignPath,
+            actor: devActor,
+          })
+          .pipe(Effect.flip);
+        assert.instanceOf(err, EnvironmentHttpForbiddenError);
+      }
+
+      // Member create lands under baseDir/projects/<slug>, creates dir, sets private + owner_id + admin membership.
+      const firstId = ProjectId.make("project:member-1");
+      const firstCreated = yield* service.create({
+        commandId: CommandId.make("cmd-member-1"),
+        projectId: firstId,
+        title: "My Side Project!",
+        workspaceRoot: path.join(config.baseDir, "projects", "ignored-name"),
+        actor: devActor,
+      });
+      const expectedFirstRoot = path.join(
+        path.resolve(config.baseDir),
+        "projects",
+        "my-side-project",
+      );
+      assert.equal(firstCreated.workspaceRoot, expectedFirstRoot);
+      assert.isTrue(yield* fileSystem.exists(expectedFirstRoot));
+
+      const firstRow = Option.getOrThrow(yield* projectStore.get(firstId));
+      assert.equal(firstRow.ownerId, devId);
+      assert.equal(firstRow.visibility, "private");
+
+      const membership = Option.getOrThrow(yield* memberships.get(firstId, devId));
+      assert.equal(membership.role, "admin");
+      assert.equal(membership.state, "active");
+
+      // Second project with the same title gets a unique slug suffix.
+      const secondId = ProjectId.make("project:member-2");
+      const secondCreated = yield* service.create({
+        commandId: CommandId.make("cmd-member-2"),
+        projectId: secondId,
+        title: "My Side Project!",
+        workspaceRoot: ".",
+        actor: devActor,
+      });
+      const expectedSecondRoot = path.join(
+        path.resolve(config.baseDir),
+        "projects",
+        "my-side-project-2",
+      );
+      assert.equal(secondCreated.workspaceRoot, expectedSecondRoot);
+      assert.isTrue(yield* fileSystem.exists(expectedSecondRoot));
+
+      // Re-resolving access: creator sees private projects as admin (no delete), stranger does not, owner sees all.
+      const refreshedDev = yield* access.resolve({
+        sessionId: AuthSessionId.make("session-dev-2"),
+        subject: "dev",
+        scopes: [...AuthStandardClientScopes],
+        principalId: devId,
+        binding: { _tag: "principal" },
+      });
+      const stranger = yield* access.resolve({
+        sessionId: AuthSessionId.make("session-stranger"),
+        subject: "stranger",
+        scopes: [...AuthStandardClientScopes],
+        principalId: strangerId,
+        binding: { _tag: "principal" },
+      });
+
+      assert.deepEqual(
+        access.accessibleProjectIds(refreshedDev),
+        new Set([sharedProjectId, firstId, secondId]),
+      );
+      assert.isTrue(access.can(refreshedDev, firstId, "project:settings"));
+      assert.isFalse(access.can(refreshedDev, firstId, "project:delete"));
+      assert.deepEqual(access.accessibleProjectIds(stranger), new Set([sharedProjectId]));
+      assert.isUndefined(access.accessibleProjectIds(ownerActor));
+    }).pipe(Effect.scoped, Effect.provide(makeMemberProjectServiceLayer())),
 );

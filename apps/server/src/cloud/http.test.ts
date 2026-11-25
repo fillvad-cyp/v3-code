@@ -26,6 +26,7 @@ import * as NetAddress from "effect/net/NetAddress";
 import { decodeRelayJwt, RELAY_LINK_PROOF_TYP, verifyRelayJwt } from "@t3tools/shared/relayJwt";
 
 import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as EnvironmentKeys from "./environmentKeys.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as AuthHttp from "../auth/http.ts";
@@ -94,7 +95,10 @@ const layerIdentityRepositories = Layer.mergeAll(
   MemberLimits.layer,
   SessionPrincipals.layer,
 );
-const layerAccess = ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories));
+const layerAccess = ProjectAccess.layer.pipe(
+  Layer.provide(layerIdentityRepositories),
+  Layer.provide(ProjectStore.layer),
+);
 const layerMembership = MembershipService.layer.pipe(
   Layer.provide(layerAccess),
   Layer.provide(layerIdentityRepositories),

@@ -21,6 +21,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as InvitationService from "../identity/InvitationService.ts";
 import * as MembershipService from "../identity/MembershipService.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ApiTokens from "../persistence/ApiTokens.ts";
 import * as AuditEvents from "../persistence/AuditEvents.ts";
 import * as Invitations from "../persistence/Invitations.ts";
@@ -79,7 +80,7 @@ const makeLocalMembersLayer = () => {
     MemberLimits.layer,
     SessionPrincipals.layer,
   );
-  const access = ProjectAccess.layer.pipe(Layer.provide(repos));
+  const access = ProjectAccess.layer.pipe(Layer.provide(repos), Layer.provide(ProjectStore.layer));
   const membershipService = MembershipService.layer.pipe(
     Layer.provide(access),
     Layer.provide(repos),

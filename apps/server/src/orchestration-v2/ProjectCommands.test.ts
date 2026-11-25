@@ -27,6 +27,8 @@ const row = (overrides: Partial<ProjectRow> = {}): ProjectRow => ({
   trackedFolders: [],
   pinnedAt: null,
   archivedAt: null,
+  ownerId: null,
+  visibility: "shared",
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
   deletedAt: null,

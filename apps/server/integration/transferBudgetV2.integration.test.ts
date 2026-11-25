@@ -207,7 +207,9 @@ const layerServices = layerManagement.pipe(
   ),
   Layer.provideMerge(ProjectStore.layer),
   Layer.provideMerge(
-    ProjectAccess.layer.pipe(Layer.provide(Layer.merge(Principals.layer, Memberships.layer))),
+    ProjectAccess.layer.pipe(
+      Layer.provide(Layer.mergeAll(Principals.layer, Memberships.layer, ProjectStore.layer)),
+    ),
   ),
   Layer.provideMerge(Layer.mock(ProjectService.ProjectService)({})),
   Layer.provideMerge(layerEnrichment),

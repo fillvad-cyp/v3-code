@@ -25,6 +25,7 @@ import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpRouter from "effect/http/HttpRouter";
 
 import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as InvitationService from "../identity/InvitationService.ts";
@@ -76,7 +77,10 @@ const layerIdentityRepositories = Layer.mergeAll(
   MemberLimits.layer,
   SessionPrincipals.layer,
 );
-const layerAccess = ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories));
+const layerAccess = ProjectAccess.layer.pipe(
+  Layer.provide(layerIdentityRepositories),
+  Layer.provide(ProjectStore.layer),
+);
 const layerMembership = MembershipService.layer.pipe(
   Layer.provide(layerAccess),
   Layer.provide(layerIdentityRepositories),

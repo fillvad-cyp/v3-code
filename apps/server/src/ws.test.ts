@@ -997,7 +997,9 @@ it.live.each([
         }),
         ProviderInstallationGate.layer,
         FetchHttpClient.layer,
-        ProjectAccess.layer.pipe(Layer.provide(Layer.merge(Principals.layer, Memberships.layer))),
+        ProjectAccess.layer.pipe(
+          Layer.provide(Layer.mergeAll(Principals.layer, Memberships.layer, ProjectStore.layer)),
+        ),
         ResourceResolver.layer.pipe(Layer.provide(ProjectionStore.layer)),
       );
       const context = yield* Layer.build(

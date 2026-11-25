@@ -2108,7 +2108,12 @@ export const layerWsRpc = (
       );
 
       const mutateProject = Effect.fn("ws.projects.mutate")(function* (mutation: ProjectMutation) {
-        return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation);
+        return yield* mutateProjectWithClone(
+          projectService,
+          projectCloneTracker,
+          mutation,
+          currentActor,
+        );
       });
 
       const handlers = ServerWsRpcGroup.of({
@@ -3193,7 +3198,10 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.projectsCreateNew]: (input) =>
           managedFolders
-            .createNamedProject(input)
+            .createNamedProject({
+              ...input,
+              ...(currentActor === undefined ? {} : { actor: currentActor }),
+            })
             .pipe(
               Effect.mapError(
                 (cause) => new OrchestrationDispatchCommandError({ message: cause.message, cause }),
@@ -3318,7 +3326,9 @@ export const layerWsRpc = (
                 new ProjectMutationError({
                   commandId: mutation.commandId,
                   message:
-                    cause._tag === "ProjectNotEmptyError" || cause._tag === "ProjectInvalidError"
+                    cause._tag === "ProjectNotEmptyError" ||
+                    cause._tag === "ProjectInvalidError" ||
+                    cause._tag === "EnvironmentHttpForbiddenError"
                       ? cause.message
                       : "Failed to mutate project.",
                   cause,

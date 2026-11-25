@@ -403,7 +403,9 @@ const TestLayer = Layer.mergeAll(
   Layer.mock(OrchestrationEventStore.OrchestrationEventStore)({}),
   Layer.mock(ProjectStore.ProjectStoreV2)({}),
   Layer.mock(ProjectEnrichmentService.ProjectEnrichmentService)({}),
-  ProjectAccess.layer.pipe(Layer.provide(Layer.merge(Principals.layer, Memberships.layer))),
+  ProjectAccess.layer.pipe(
+    Layer.provide(Layer.mergeAll(Principals.layer, Memberships.layer, ProjectStore.layer)),
+  ),
 ).pipe(Layer.provideMerge(store));
 
 const withHttp = <A>(use: (get: (path: string) => Promise<Response>) => Promise<A>) =>

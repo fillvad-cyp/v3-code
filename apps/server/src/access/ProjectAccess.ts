@@ -21,6 +21,7 @@ import {
 
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 
 const isAuthEnvironmentScope = Schema.is(AuthEnvironmentScope);
 
@@ -70,6 +71,7 @@ export type AccessActor = {
   readonly isOwner: boolean;
   readonly ceiling?: ReadonlyArray<AuthEnvironmentScope>;
   readonly roles: ReadonlyMap<ProjectId | string, ProjectRole>;
+  readonly ownedProjectIds?: ReadonlySet<string>;
 };
 
 function canActor(
@@ -94,7 +96,13 @@ export function accessibleProjectIdsForActor(actor: AccessActor): ReadonlySet<st
   if (actor.binding?._tag === "projects") {
     return boundProjectIds(actor.binding);
   }
-  return new Set<string>(actor.roles.keys());
+  const ids = new Set<string>(actor.roles.keys());
+  if (actor.ownedProjectIds !== undefined) {
+    for (const projectId of actor.ownedProjectIds) {
+      ids.add(projectId);
+    }
+  }
+  return ids;
 }
 
 function effectiveScopesForActor(actor: AccessActor): ReadonlyArray<AuthEnvironmentScope> {
@@ -128,6 +136,7 @@ export class ProjectAccess extends Context.Service<
 const make = Effect.gen(function* () {
   const principals = yield* Principals.PrincipalRepository;
   const memberships = yield* Memberships.MembershipRepository;
+  const projects = yield* ProjectStore.ProjectStoreV2;
 
   const resolve = Effect.fn("ProjectAccess.resolve")(function* (session: AccessSessionInput) {
     const bindingProps = session.binding === undefined ? {} : { binding: session.binding };
@@ -196,13 +205,17 @@ const make = Effect.gen(function* () {
     const ceiling = isOwner ? undefined : principal.ceiling.filter(isAuthEnvironmentScope);
 
     const roles = new Map<ProjectId | string, ProjectRole>();
+    let ownedProjectIds: ReadonlySet<string> | undefined;
     if (!isOwner && !passesProjectChecks(session.binding)) {
       if (session.binding?._tag === "projects") {
         for (const entry of session.binding.projects) {
           roles.set(entry.projectId, entry.role);
         }
       } else if (session.binding?._tag === "principal") {
-        const rows = yield* memberships.listForPrincipal(principal.id).pipe(
+        const [rows, ownedRows] = yield* Effect.all([
+          memberships.listForPrincipal(principal.id),
+          projects.listOwnedByPrincipal(principal.id),
+        ]).pipe(
           Effect.mapError(
             (cause) =>
               new AccessResolveError({
@@ -217,6 +230,9 @@ const make = Effect.gen(function* () {
             roles.set(row.projectId, row.role);
           }
         }
+        if (ownedRows.length > 0) {
+          ownedProjectIds = new Set<string>(ownedRows);
+        }
       }
     }
 
@@ -229,6 +245,7 @@ const make = Effect.gen(function* () {
       isOwner,
       ...(ceiling === undefined ? {} : { ceiling }),
       roles,
+      ...(ownedProjectIds === undefined ? {} : { ownedProjectIds }),
     } satisfies AccessActor;
   });
 

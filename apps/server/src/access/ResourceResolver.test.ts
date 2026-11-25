@@ -18,6 +18,7 @@ import * as Layer from "effect/Layer";
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProjectAccess from "./ProjectAccess.ts";
 import * as ResourceResolver from "./ResourceResolver.ts";
 
@@ -157,10 +158,10 @@ describe("ResourceResolver", () => {
         capability: "project:settings",
       },
       {
-        name: "projectsMutate create requires project:create",
+        name: "projectsMutate create requires project:create without an existing project resource",
         method: WS_METHODS.projectsMutate,
         payload: { type: "project.create", projectId: PROJECT_ID, title: "New" },
-        resource: { projectId: PROJECT_ID },
+        resource: undefined,
         capability: "project:create",
       },
       {
@@ -482,6 +483,9 @@ describe("ResourceResolver", () => {
             setState: () => Effect.die("unused"),
             delete: () => Effect.die("unused"),
           }),
+          Layer.succeed(ProjectStore.ProjectStoreV2, {
+            listOwnedByPrincipal: () => Effect.succeed([]),
+          } as unknown as ProjectStore.ProjectStoreV2["Service"]),
         ),
       ),
     );

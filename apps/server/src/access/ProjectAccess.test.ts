@@ -27,6 +27,7 @@ import * as Option from "effect/Option";
 
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProjectAccess from "./ProjectAccess.ts";
 
 const NOW = "2026-11-25T00:00:00.000Z";
@@ -72,9 +73,14 @@ function makeMembership(
 function makeAccessLayer(options: {
   readonly principals?: ReadonlyArray<Principal>;
   readonly memberships?: ReadonlyArray<ProjectMembership>;
+  readonly ownedProjects?: ReadonlyArray<{
+    readonly projectId: ProjectId;
+    readonly ownerId: PrincipalId;
+  }>;
 }) {
   const principalMap = new Map((options.principals ?? []).map((p) => [p.id, p]));
   const membershipList = options.memberships ?? [];
+  const ownedList = options.ownedProjects ?? [];
 
   const principalRepo = Layer.succeed(Principals.PrincipalRepository, {
     get: (id) => Effect.succeed(Option.fromNullishOr(principalMap.get(id))),
@@ -105,7 +111,23 @@ function makeAccessLayer(options: {
     delete: () => Effect.die("unused"),
   });
 
-  return ProjectAccess.layer.pipe(Layer.provide(Layer.mergeAll(principalRepo, membershipRepo)));
+  const projectStore = Layer.succeed(ProjectStore.ProjectStoreV2, {
+    apply: () => Effect.die("unused"),
+    get: () => Effect.die("unused"),
+    list: () => Effect.die("unused"),
+    findActiveByWorkspaceRoot: () => Effect.die("unused"),
+    getShell: () => Effect.die("unused"),
+    listShells: () => Effect.die("unused"),
+    setOwnership: () => Effect.die("unused"),
+    listOwnedByPrincipal: (principalId) =>
+      Effect.succeed(
+        ownedList.filter((row) => row.ownerId === principalId).map((row) => row.projectId),
+      ),
+  });
+
+  return ProjectAccess.layer.pipe(
+    Layer.provide(Layer.mergeAll(principalRepo, membershipRepo, projectStore)),
+  );
 }
 
 const baseLayer = makeAccessLayer({
@@ -418,5 +440,109 @@ describe("ProjectAccess", () => {
           }).pipe(Effect.provide(layer));
         }),
     );
+  });
+
+  describe("private project ownership and visibility", () => {
+    const CREATOR_ID = PrincipalId.make("member-creator");
+    const STRANGER_ID = PrincipalId.make("member-stranger");
+    const SHARED_PROJECT = ProjectId.make("project-kotcrm");
+    const PRIVATE_PROJECT = ProjectId.make("project-private");
+    const PRIVATE_OWNED_ONLY = ProjectId.make("project-private-owned-only");
+
+    const privateLayer = makeAccessLayer({
+      principals: [
+        makePrincipal({ id: OWNER_ID, kind: "owner", ceiling: [] }),
+        makePrincipal({
+          id: CREATOR_ID,
+          kind: "member",
+          ceiling: [...ceilingScopes("staff")],
+        }),
+        makePrincipal({
+          id: STRANGER_ID,
+          kind: "member",
+          ceiling: [...ceilingScopes("staff")],
+        }),
+      ],
+      memberships: [
+        makeMembership({ projectId: SHARED_PROJECT, principalId: CREATOR_ID, role: "developer" }),
+        makeMembership({ projectId: SHARED_PROJECT, principalId: STRANGER_ID, role: "developer" }),
+        makeMembership({ projectId: PRIVATE_PROJECT, principalId: CREATOR_ID, role: "admin" }),
+      ],
+      ownedProjects: [
+        { projectId: PRIVATE_PROJECT, ownerId: CREATOR_ID },
+        { projectId: PRIVATE_OWNED_ONLY, ownerId: CREATOR_ID },
+      ],
+    });
+
+    it.layer(privateLayer)("narrows visibility to owner, creator, and active members", (it) => {
+      it.effect(
+        "shows creator their private projects and shared memberships, never to strangers",
+        () =>
+          Effect.gen(function* () {
+            const access = yield* ProjectAccess.ProjectAccess;
+
+            const creator = yield* access.resolve({
+              sessionId: SESSION_ID,
+              subject: "creator",
+              scopes: [...AuthStandardClientScopes],
+              principalId: CREATOR_ID,
+              binding: { _tag: "principal" },
+            });
+            const stranger = yield* access.resolve({
+              sessionId: SESSION_ID,
+              subject: "stranger",
+              scopes: [...AuthStandardClientScopes],
+              principalId: STRANGER_ID,
+              binding: { _tag: "principal" },
+            });
+            const owner = yield* access.resolve({
+              sessionId: SESSION_ID,
+              subject: "owner",
+              scopes: [...AuthStandardClientScopes],
+              principalId: OWNER_ID,
+              binding: { _tag: "environment" },
+            });
+
+            // Creator sees shared membership plus owned/private projects.
+            expect(access.accessibleProjectIds(creator)).toEqual(
+              new Set([SHARED_PROJECT, PRIVATE_PROJECT, PRIVATE_OWNED_ONLY]),
+            );
+            expect(access.can(creator, PRIVATE_PROJECT, "project:settings")).toBe(true);
+            expect(access.can(creator, PRIVATE_PROJECT, "project:members")).toBe(true);
+            // Project delete remains owner-only, even for the creator/admin of a private project.
+            expect(access.can(creator, PRIVATE_PROJECT, "project:delete")).toBe(false);
+
+            // Stranger sees only their shared membership, never the creator's private projects.
+            expect(access.accessibleProjectIds(stranger)).toEqual(new Set([SHARED_PROJECT]));
+            expect(access.can(stranger, SHARED_PROJECT, "project:read")).toBe(true);
+            expect(access.can(stranger, PRIVATE_PROJECT, "project:read")).toBe(false);
+            expect(access.can(stranger, PRIVATE_OWNED_ONLY, "project:read")).toBe(false);
+
+            // Owner sees everything (undefined filter) and can delete any project.
+            expect(access.accessibleProjectIds(owner)).toBeUndefined();
+            expect(access.can(owner, PRIVATE_PROJECT, "project:read")).toBe(true);
+            expect(access.can(owner, PRIVATE_PROJECT, "project:delete")).toBe(true);
+          }),
+      );
+
+      it.effect("does not widen a projects-bound session to the principal's owned projects", () =>
+        Effect.gen(function* () {
+          const access = yield* ProjectAccess.ProjectAccess;
+          const narrowCreator = yield* access.resolve({
+            sessionId: SESSION_ID,
+            subject: "creator-narrow",
+            scopes: [...AuthStandardClientScopes],
+            principalId: CREATOR_ID,
+            binding: {
+              _tag: "projects",
+              projects: [{ projectId: SHARED_PROJECT, role: "developer" }],
+            },
+          });
+
+          expect(access.accessibleProjectIds(narrowCreator)).toEqual(new Set([SHARED_PROJECT]));
+          expect(access.can(narrowCreator, PRIVATE_PROJECT, "project:read")).toBe(false);
+        }),
+      );
+    });
   });
 });

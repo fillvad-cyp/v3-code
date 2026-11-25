@@ -16,6 +16,7 @@ import * as Option from "effect/Option";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerConfig from "../config.ts";
@@ -53,7 +54,7 @@ const makeTestLayer = () => {
     MemberLimits.layer,
     SessionPrincipals.layer,
   );
-  const access = ProjectAccess.layer.pipe(Layer.provide(repos));
+  const access = ProjectAccess.layer.pipe(Layer.provide(repos), Layer.provide(ProjectStore.layer));
   const membershipService = MembershipService.layer.pipe(
     Layer.provide(access),
     Layer.provide(repos),

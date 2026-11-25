@@ -216,6 +216,12 @@ interface UpdateMemberInput {
   readonly audit?: MembershipAuditContext;
 }
 
+interface GrantCreatorAdminInput {
+  readonly projectId: ProjectId;
+  readonly principalId: PrincipalId;
+  readonly audit?: MembershipAuditContext;
+}
+
 type MembershipMutationError =
   | MembershipForbiddenError
   | MembershipNotFoundError
@@ -257,6 +263,9 @@ export class MembershipService extends Context.Service<
     readonly canIssueInvite: (
       principalId: PrincipalId,
     ) => Effect.Effect<boolean, MembershipInternalError>;
+    readonly grantCreatorAdmin: (
+      input: GrantCreatorAdminInput,
+    ) => Effect.Effect<ProjectMembership, MembershipInternalError>;
   }
 >()("v3code/identity/MembershipService") {}
 
@@ -1287,6 +1296,56 @@ const make = Effect.gen(function* () {
     return recentCount < limit;
   });
 
+  const grantCreatorAdmin = Effect.fn("MembershipService.grantCreatorAdmin")(function* (
+    input: GrantCreatorAdminInput,
+  ) {
+    const nowIso = DateTime.formatIso(yield* DateTime.now);
+    return yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          yield* memberships.upsert({
+            projectId: input.projectId,
+            principalId: input.principalId,
+            role: "admin",
+            state: "active",
+            invitedBy: null,
+            expiresAt: null,
+            updatedAt: nowIso,
+          });
+          yield* principals.bumpAccessRevision(input.principalId, nowIso);
+          yield* auditEvents.append({
+            at: nowIso,
+            actorPrincipalId: input.principalId,
+            actorSessionId: input.audit?.sessionId ?? null,
+            action: "membership.role.changed",
+            resourceType: "membership",
+            resourceId: input.principalId,
+            projectId: input.projectId,
+            ip: input.audit?.ip ?? null,
+            userAgent: input.audit?.userAgent ?? null,
+            outcome: "allow",
+            metadata: { role: "admin", reason: "project_creator" },
+          });
+          const created = yield* memberships.get(input.projectId, input.principalId);
+          return Option.getOrElse(created, () => ({
+            projectId: input.projectId,
+            principalId: input.principalId,
+            role: "admin" as const,
+            state: "active" as const,
+            invitedBy: null,
+            expiresAt: null,
+            createdAt: nowIso,
+            updatedAt: nowIso,
+          }));
+        }),
+      )
+      .pipe(
+        Effect.mapError(
+          (cause) => new MembershipInternalError({ operation: "grantCreatorAdmin", cause }),
+        ),
+      );
+  });
+
   return MembershipService.of({
     listForActor,
     setRole,
@@ -1297,6 +1356,7 @@ const make = Effect.gen(function* () {
     suspendPrincipal,
     updateMember,
     canIssueInvite,
+    grantCreatorAdmin,
   });
 });
 

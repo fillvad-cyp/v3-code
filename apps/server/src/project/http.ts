@@ -1,6 +1,7 @@
 import {
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
+  EnvironmentHttpForbiddenError,
   requiredScopesForProjectMutation,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -23,6 +24,9 @@ import { mutateProjectWithClone } from "./ProjectMutation.ts";
 const failProjectMutation = Effect.fn("environment.projects.failMutation")(function* (
   cause: ProjectService.ProjectServiceError | ServerRuntimeStartup.ServerRuntimeStartupError,
 ) {
+  if (cause._tag === "EnvironmentHttpForbiddenError") {
+    return yield* cause;
+  }
   if (
     cause._tag === "ProjectNotFoundError" ||
     cause._tag === "ProjectConflictError" ||
@@ -86,10 +90,49 @@ export const layer = HttpApiBuilder.group(
         "mutate",
         Effect.fn("environment.projects.mutate")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          for (const scope of requiredScopesForProjectMutation(args.payload)) {
-            yield* requireEnvironmentScope(scope);
+          const requiredScopes = requiredScopesForProjectMutation(args.payload);
+          let session = yield* requireEnvironmentScope(requiredScopes[0]!);
+          for (const scope of requiredScopes.slice(1)) {
+            session = yield* requireEnvironmentScope(scope);
           }
-          const operation = mutateProjectWithClone(projects, projectClones, args.payload);
+          const actor = yield* projectAccess
+            .resolve({
+              sessionId: session.sessionId,
+              subject: session.subject,
+              scopes: Array.from(session.scopes),
+              principalId: session.principalId,
+              binding: session.binding,
+            })
+            .pipe(
+              Effect.catchTags({
+                AccessResolveError: (error) =>
+                  error.reason === "repository_error"
+                    ? failEnvironmentInternal("project_mutation_failed", error)
+                    : failEnvironmentAuthInvalid("invalid_credential"),
+              }),
+            );
+          const allowedProjectIds = projectAccess.accessibleProjectIds(actor);
+          if (allowedProjectIds !== undefined) {
+            if (args.payload.type === "project.create") {
+              const canCreate = Array.from(allowedProjectIds).some((projectId) =>
+                projectAccess.can(actor, projectId, "project:create"),
+              );
+              if (!canCreate) {
+                return yield* new EnvironmentHttpForbiddenError({
+                  message: "Missing required capability project:create.",
+                });
+              }
+            } else {
+              const requiredCapability =
+                args.payload.type === "project.delete" ? "project:delete" : "project:settings";
+              if (!projectAccess.can(actor, args.payload.projectId, requiredCapability)) {
+                return yield* new EnvironmentHttpForbiddenError({
+                  message: `Missing required capability ${requiredCapability} on project ${args.payload.projectId}.`,
+                });
+              }
+            }
+          }
+          const operation = mutateProjectWithClone(projects, projectClones, args.payload, actor);
           return yield* startup
             .enqueueCommand(operation)
             .pipe(traceLocalHandlerWork, Effect.catch(failProjectMutation));

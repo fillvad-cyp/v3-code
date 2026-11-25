@@ -38,6 +38,7 @@ import * as RpcTest from "effect/rpc/RpcTest";
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProjectAccess from "../access/ProjectAccess.ts";
 import * as ResourceResolver from "../access/ResourceResolver.ts";
 import {
@@ -1044,6 +1045,8 @@ describe("RPC project access gate", () => {
     ORCHESTRATION_V2_WS_METHODS.getThreadProjection,
     ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
     ORCHESTRATION_V2_WS_METHODS.searchThreads,
+    WS_METHODS.projectsMutate,
+    WS_METHODS.projectsCreateNew,
   ] as const;
   const group = WsRpcGroup.omit(
     ...[...WsRpcGroup.requests.keys()].filter(
@@ -1086,6 +1089,9 @@ describe("RPC project access gate", () => {
             Layer.succeed(Memberships.MembershipRepository, {
               listForPrincipal: () => Effect.succeed([]),
             } as unknown as Memberships.MembershipRepository["Service"]),
+            Layer.succeed(ProjectStore.ProjectStoreV2, {
+              listOwnedByPrincipal: () => Effect.succeed([]),
+            } as unknown as ProjectStore.ProjectStoreV2["Service"]),
           ),
         ),
       ),
@@ -1135,6 +1141,31 @@ describe("RPC project access gate", () => {
         Effect.sync(() => {
           handled.push(`search:${(projectIds ?? []).join(",")}`);
           return { matches: [] };
+        }),
+      ),
+      group.toLayerHandler(WS_METHODS.projectsMutate, (mutation) =>
+        Effect.sync(() => {
+          handled.push(`mutate:${mutation.type}:${mutation.projectId}`);
+          return {
+            id: mutation.projectId,
+            title: mutation.type === "project.create" ? mutation.title : "Project",
+            workspaceRoot:
+              mutation.type === "project.create" ? mutation.workspaceRoot : "/work/project",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-11-25T00:00:00.000Z",
+            updatedAt: "2026-11-25T00:00:00.000Z",
+            deletedAt: null,
+          };
+        }),
+      ),
+      group.toLayerHandler(WS_METHODS.projectsCreateNew, ({ name }) =>
+        Effect.sync(() => {
+          handled.push(`createNew:${name}`);
+          return {
+            projectId: ProjectId.make("project-created"),
+            workspaceRoot: `/managed/projects/${name}`,
+          };
         }),
       ),
     );
@@ -1357,5 +1388,124 @@ describe("RPC project access gate", () => {
       });
       expect(handled).toEqual([]);
     }).pipe(Effect.provide(makeGateServices(new Map())), Effect.scoped),
+  );
+
+  it.effect(
+    "gates project:create without a project resource: viewer forbidden, developer and owner allowed",
+    () =>
+      Effect.gen(function* () {
+        const access = yield* ProjectAccess.ProjectAccess;
+        const resolver = yield* ResourceResolver.ResourceResolver;
+        const newProjectId = ProjectId.make("project-brand-new");
+        const createMutation = {
+          type: "project.create" as const,
+          commandId: CommandId.make("create-new"),
+          projectId: newProjectId,
+          title: "My New App",
+          workspaceRoot: "/managed/projects/my-new-app",
+        };
+
+        const runWithActor = (actor: ProjectAccess.AccessActor) =>
+          Effect.gen(function* () {
+            const handled: Array<string> = [];
+            const gate = RpcAuthorization.makeAccessGate({ actor, access, resolver });
+            const client = yield* RpcTest.makeClient(group).pipe(
+              Effect.provide(
+                Layer.merge(
+                  makeHandlers(handled),
+                  RpcAuthorization.layer(baseScopes, undefined, gate),
+                ),
+              ),
+            );
+            return { client, handled };
+          });
+
+        const viewerActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("viewer-create"),
+          subject: "viewer",
+          scopes: baseScopes,
+          principalId: PrincipalId.make("principal-viewer"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "viewer"]]),
+        };
+        const { client: viewerClient, handled: viewerHandled } = yield* runWithActor(viewerActor);
+        const viewerMutateErr = yield* viewerClient[WS_METHODS.projectsMutate](createMutation).pipe(
+          Effect.flip,
+        );
+        expect(viewerMutateErr).toMatchObject({
+          _tag: "project_forbidden",
+          requiredPermission: "project:create",
+        });
+        const viewerCreateNewErr = yield* viewerClient[WS_METHODS.projectsCreateNew]({
+          name: "My New App",
+        }).pipe(Effect.flip);
+        expect(viewerCreateNewErr).toMatchObject({
+          _tag: "project_forbidden",
+          requiredPermission: "project:create",
+        });
+        expect(viewerHandled).toEqual([]);
+
+        const devActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("dev-create"),
+          subject: "developer",
+          scopes: baseScopes,
+          principalId: PrincipalId.make("principal-dev"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "developer"]]),
+        };
+        const { client: devClient, handled: devHandled } = yield* runWithActor(devActor);
+        yield* devClient[WS_METHODS.projectsMutate](createMutation);
+        yield* devClient[WS_METHODS.projectsCreateNew]({ name: "Another App" });
+        expect(devHandled).toEqual([
+          `mutate:project.create:${newProjectId}`,
+          "createNew:Another App",
+        ]);
+
+        // Even an admin cannot delete a project; delete stays owner-only.
+        const adminActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("admin-delete"),
+          subject: "admin",
+          scopes: baseScopes,
+          principalId: PrincipalId.make("principal-admin"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "admin"]]),
+        };
+        const { client: adminClient, handled: adminHandled } = yield* runWithActor(adminActor);
+        const adminDeleteErr = yield* adminClient[WS_METHODS.projectsMutate]({
+          type: "project.delete",
+          commandId: CommandId.make("delete-a"),
+          projectId: projectA,
+        }).pipe(Effect.flip);
+        expect(adminDeleteErr).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: projectA,
+          requiredPermission: "project:delete",
+        });
+        expect(adminHandled).toEqual([]);
+
+        const ownerActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("owner-create"),
+          subject: "owner",
+          scopes: baseScopes,
+          principalId: PrincipalId.make("owner"),
+          binding: { _tag: "environment" },
+          isOwner: true,
+          roles: new Map(),
+        };
+        const { client: ownerClient, handled: ownerHandled } = yield* runWithActor(ownerActor);
+        yield* ownerClient[WS_METHODS.projectsMutate](createMutation);
+        yield* ownerClient[WS_METHODS.projectsMutate]({
+          type: "project.delete",
+          commandId: CommandId.make("owner-delete-a"),
+          projectId: projectA,
+        });
+        expect(ownerHandled).toEqual([
+          `mutate:project.create:${newProjectId}`,
+          `mutate:project.delete:${projectA}`,
+        ]);
+      }).pipe(Effect.provide(makeGateServices(new Map())), Effect.scoped),
   );
 });

@@ -30,7 +30,8 @@ import {
   AuthTerminalReadScope,
   type AuthEnvironmentScope,
   EnvironmentAuthorizationError,
-  type ProjectForbiddenError,
+  ProjectForbiddenError,
+  ProjectId,
   RpcScopeAuthorization,
   WS_METHODS,
   WsRpcGroup,
@@ -377,7 +378,10 @@ export interface RpcAccessGate {
  */
 export function makeAccessGate(input: {
   readonly actor: ProjectAccess.AccessActor;
-  readonly access: Pick<ProjectAccess.ProjectAccess["Service"], "accessibleProjectIds" | "assert">;
+  readonly access: Pick<
+    ProjectAccess.ProjectAccess["Service"],
+    "accessibleProjectIds" | "assert" | "can"
+  >;
   readonly resolver: Pick<
     ResourceResolver.ResourceResolver["Service"],
     "capabilityForRpcCall" | "resourcesForRpcCall" | "resolveThreadProject"
@@ -386,8 +390,24 @@ export function makeAccessGate(input: {
   const check = Effect.fnUntraced(function* (method: string, payload: unknown) {
     const capability = input.resolver.capabilityForRpcCall(method, payload);
     if (capability === undefined) return;
-    if (input.access.accessibleProjectIds(input.actor) === undefined) return;
+    const accessibleIds = input.access.accessibleProjectIds(input.actor);
+    if (accessibleIds === undefined) return;
     const resources = input.resolver.resourcesForRpcCall(method, payload);
+
+    if (capability === "project:create" && resources?.projectId === undefined) {
+      const canCreate = Array.from(accessibleIds).some((projectId) =>
+        input.access.can(input.actor, projectId, "project:create"),
+      );
+      if (!canCreate) {
+        return yield* new ProjectForbiddenError({
+          message: "Missing required capability project:create.",
+          projectId: ProjectId.make("environment"),
+          requiredPermission: "project:create",
+        });
+      }
+      if (resources === undefined) return;
+    }
+
     if (resources === undefined) return;
 
     if (resources.projectId !== undefined) {

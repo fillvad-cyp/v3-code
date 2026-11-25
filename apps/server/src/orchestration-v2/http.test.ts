@@ -143,7 +143,9 @@ const serveOrchestrationHttp = (
         ),
         OrchestrationEventStore.layer,
         ProjectStore.layer,
-        ProjectAccess.layer.pipe(Layer.provide(Layer.merge(Principals.layer, Memberships.layer))),
+        ProjectAccess.layer.pipe(
+          Layer.provide(Layer.mergeAll(Principals.layer, Memberships.layer, ProjectStore.layer)),
+        ),
       ).pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
     );
     const eventSink = Context.get(services, EventSinkV2);

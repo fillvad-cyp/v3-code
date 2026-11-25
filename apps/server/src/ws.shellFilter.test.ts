@@ -781,7 +781,9 @@ describe("Projects list and search filtering", () => {
             Principals.layer,
             Memberships.layer,
             ProjectAccess.layer.pipe(
-              Layer.provide(Layer.merge(Principals.layer, Memberships.layer)),
+              Layer.provide(
+                Layer.mergeAll(Principals.layer, Memberships.layer, ProjectStore.layer),
+              ),
             ),
           ).pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
         ),

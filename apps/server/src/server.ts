@@ -600,7 +600,11 @@ const layerIdentityRepositories = Layer.mergeAll(
 ).pipe(Layer.provide(layerPersistence));
 
 const layerAccess = Layer.merge(
-  ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories)),
+  ProjectAccess.layer.pipe(
+    Layer.provide(layerIdentityRepositories),
+    Layer.provide(ProjectStore.layer),
+    Layer.provide(layerPersistence),
+  ),
   ResourceResolver.layer.pipe(
     Layer.provide(ProjectionStoreV2.layer),
     Layer.provide(layerPersistence),
