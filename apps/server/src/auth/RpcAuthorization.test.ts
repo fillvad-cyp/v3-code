@@ -1640,4 +1640,137 @@ describe("RPC project access gate", () => {
         Effect.scoped,
       ),
   );
+
+  it.effect(
+    "allows project admins to patch own projectSettingsOverrides and projectScriptOverrides, and rejects foreign projects, non-admins, and global settings",
+    () =>
+      Effect.gen(function* () {
+        const access = yield* ProjectAccess.ProjectAccess;
+        const resolver = yield* ResourceResolver.ResourceResolver;
+        const settingsService = yield* ServerSettings.ServerSettingsService;
+
+        const settingsGroup = WsRpcGroup.omit(
+          ...[...WsRpcGroup.requests.keys()].filter(
+            (
+              tag,
+            ): tag is Exclude<
+              keyof typeof RPC_REQUIRED_SCOPES,
+              typeof WS_METHODS.serverUpdateSettings
+            > => tag !== WS_METHODS.serverUpdateSettings,
+          ),
+        );
+        const settingsHandlers = settingsGroup.toLayerHandler(
+          WS_METHODS.serverUpdateSettings,
+          ({ patch }) => settingsService.updateSettings(patch),
+        );
+
+        const makeClientForActor = (actor: ProjectAccess.AccessActor) => {
+          const gate = RpcAuthorization.makeAccessGate({ actor, access, resolver });
+          return RpcTest.makeClient(settingsGroup).pipe(
+            Effect.provide(
+              Layer.merge(settingsHandlers, RpcAuthorization.layer(actor.scopes, undefined, gate)),
+            ),
+          );
+        };
+
+        const adminActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("admin-project-settings"),
+          subject: "admin",
+          scopes: [AuthSettingsWriteScope, AuthOrchestrationOperateScope, AuthAccessWriteScope],
+          principalId: PrincipalId.make("principal-admin"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "admin"]]),
+        };
+        const devActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("dev-project-settings"),
+          subject: "dev",
+          scopes: [AuthSettingsWriteScope, AuthOrchestrationOperateScope],
+          principalId: PrincipalId.make("principal-dev"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "developer"]]),
+        };
+
+        const adminClient = yield* makeClientForActor(adminActor);
+        const devClient = yield* makeClientForActor(devActor);
+
+        // Project admin may patch own project settings & script overrides.
+        const updatedSettings = yield* adminClient[WS_METHODS.serverUpdateSettings]({
+          patch: {
+            projectSettingsOverrides: { [projectA]: { defaultAutoPull: true } },
+          },
+        });
+        expect(updatedSettings.projectSettingsOverrides[projectA]).toMatchObject({
+          defaultAutoPull: true,
+        });
+
+        const updatedScripts = yield* adminClient[WS_METHODS.serverUpdateSettings]({
+          patch: {
+            projectScriptOverrides: {
+              [projectA]: [
+                {
+                  id: "test",
+                  name: "Test",
+                  command: "vp test",
+                  icon: "test",
+                  runOnWorktreeCreate: false,
+                },
+              ],
+            },
+          },
+        });
+        expect(updatedScripts.projectScriptOverrides[projectA]?.map((s) => s.id)).toEqual(["test"]);
+
+        // Project admin cannot patch a foreign project's overrides.
+        const foreignErr = yield* adminClient[WS_METHODS.serverUpdateSettings]({
+          patch: { projectSettingsOverrides: { [projectB]: { defaultAutoPull: true } } },
+        }).pipe(Effect.flip);
+        expect(foreignErr).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: projectB,
+          requiredPermission: "project:settings",
+        });
+
+        // Developer on projectA lacks project:settings.
+        const devErr = yield* devClient[WS_METHODS.serverUpdateSettings]({
+          patch: { projectSettingsOverrides: { [projectA]: { defaultAutoPull: false } } },
+        }).pipe(Effect.flip);
+        expect(devErr).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: projectA,
+          requiredPermission: "project:settings",
+        });
+
+        // Non-owner admin cannot patch any non-project global setting.
+        const globalErr = yield* adminClient[WS_METHODS.serverUpdateSettings]({
+          patch: { enablePreviewTunnel: true },
+        }).pipe(Effect.flip);
+        expect(globalErr).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthEnvironmentMaintainScope,
+        });
+        expect(globalErr.message).toContain("enablePreviewTunnel");
+      }).pipe(
+        Effect.provide(
+          (() => {
+            const config = ServerConfig.layerTest(process.cwd(), {
+              prefix: "t3-rpc-auth-project-settings-test-",
+            });
+            const sqlite = Layer.fresh(SqlitePersistence.layerMemory);
+            const secrets = ServerSecretStore.layer.pipe(Layer.provide(config));
+            const settingsLayer = ServerSettings.layer.pipe(
+              Layer.provide(secrets),
+              Layer.provide(ManagedPolicy.layerTest()),
+              Layer.provide(sqlite),
+              Layer.provide(config),
+            );
+            return Layer.mergeAll(makeGateServices(new Map()), settingsLayer).pipe(
+              Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+            );
+          })(),
+        ),
+        Effect.scoped,
+      ),
+  );
 });

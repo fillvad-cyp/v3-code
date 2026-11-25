@@ -1,6 +1,7 @@
 import {
   IssueLinkedThreadsResult,
   IssueOperationError,
+  type ProjectId,
   threadIssueKeysEqual,
   type ThreadIssueKey,
 } from "@t3tools/contracts";
@@ -13,7 +14,11 @@ const decodeLinkedThreads = Schema.decodeUnknownEffect(IssueLinkedThreadsResult)
 
 /** The threads an issue is linked to; the rows and filters `linkedThreads` uses for pull requests. */
 export const listLinkedIssueThreads = Effect.fn("listLinkedIssueThreads")(
-  function* (key: ThreadIssueKey) {
+  function* (key: ThreadIssueKey, options?: { readonly projectIds?: ReadonlyArray<ProjectId> }) {
+    const projectIds = options?.projectIds;
+    if (projectIds !== undefined && projectIds.length === 0) {
+      return { threads: [] };
+    }
     const sql = yield* SqlClient.SqlClient;
     // The CASE stops SQLite hoisting the side-chat check out of the link loop,
     // where it would re-parse every thread's payload, not just matching ones.
@@ -39,7 +44,9 @@ export const listLinkedIssueThreads = Effect.fn("listLinkedIssueThreads")(
         t.updated_at AS "updatedAt"
       FROM orchestration_v2_projection_threads AS t
       JOIN json_each(t.payload_json, '$.issues') AS link
-      WHERE t.deleted_at IS NULL
+      WHERE t.deleted_at IS NULL${
+        projectIds === undefined ? sql`` : sql` AND t.project_id IN ${sql.in(projectIds)}`
+      }
         AND CASE WHEN json_extract(link.value, '$.key') = ${key.key.trim()}
           THEN json_extract(t.payload_json, '$.lineage.sideChat') IS NOT 1
           ELSE 0

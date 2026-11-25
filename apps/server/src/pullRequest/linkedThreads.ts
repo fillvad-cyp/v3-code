@@ -10,6 +10,7 @@ import {
   threadIssueKeyOf,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
+  type ProjectId,
   type ThreadId,
   type ThreadPullRequestKey,
 } from "@t3tools/contracts";
@@ -22,7 +23,14 @@ import * as SqlClient from "effect/sql/SqlClient";
 const decodeLinkedThreads = Schema.decodeUnknownEffect(PullRequestLinkedThreadsResult);
 
 export const listLinkedPullRequestThreads = Effect.fn("listLinkedPullRequestThreads")(
-  function* (input: ThreadPullRequestKey) {
+  function* (
+    input: ThreadPullRequestKey,
+    options?: { readonly projectIds?: ReadonlyArray<ProjectId> },
+  ) {
+    const projectIds = options?.projectIds;
+    if (projectIds !== undefined && projectIds.length === 0) {
+      return { threads: [] };
+    }
     const key = normalizeThreadPullRequestKey(input);
     const sql = yield* SqlClient.SqlClient;
     const rows = yield* sql<{
@@ -50,7 +58,9 @@ export const listLinkedPullRequestThreads = Effect.fn("listLinkedPullRequestThre
       WHERE json_extract(link.value, '$.number') = ${key.number}
         AND json_extract(link.value, '$.source') != 'stack-dismissed'
         AND t.deleted_at IS NULL
-        AND json_extract(t.payload_json, '$.lineage.sideChat') IS NOT 1
+        AND json_extract(t.payload_json, '$.lineage.sideChat') IS NOT 1${
+          projectIds === undefined ? sql`` : sql` AND t.project_id IN ${sql.in(projectIds)}`
+        }
       ORDER BY "updatedAt" DESC, id ASC
     `.pipe(NodeSqliteClient.readOnly);
     const threads = rows

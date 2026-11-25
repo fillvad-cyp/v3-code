@@ -117,6 +117,7 @@ const METHOD_CAPABILITIES: Readonly<Partial<Record<string, ProjectCapability>>> 
   [WS_METHODS.pullRequestsListStats]: "project:read",
   [WS_METHODS.pullRequestsFilterOptions]: "project:read",
   [WS_METHODS.pullRequestsSummary]: "project:read",
+  [WS_METHODS.pullRequestsRouting]: "project:read",
   [WS_METHODS.pullRequestsRoutingIdentity]: "project:read",
   [WS_METHODS.pullRequestsStack]: "project:read",
   [WS_METHODS.pullRequestsLinkedThreads]: "project:read",
@@ -272,6 +273,7 @@ const PROJECT_ID_METHODS = new Set<string>([
   WS_METHODS.issuesReact,
   // PR review endpoints carry a GitHub review `threadId`, not an orchestration threadId.
   WS_METHODS.pullRequestsSummary,
+  WS_METHODS.pullRequestsRouting,
   WS_METHODS.pullRequestsRoutingIdentity,
   WS_METHODS.pullRequestsStack,
   WS_METHODS.pullRequestsLinkedThreads,
@@ -370,7 +372,10 @@ export function resourcesForRpcCall(method: string, payload: unknown): RpcResour
   }
 
   if (PROJECT_ID_METHODS.has(method)) {
-    return buildResource({ projectId: readString(payload, "projectId") });
+    const projectId =
+      readString(payload, "projectId") ??
+      (isRecord(payload.reference) ? readString(payload.reference, "projectId") : undefined);
+    return buildResource({ projectId });
   }
 
   if (

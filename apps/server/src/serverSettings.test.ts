@@ -44,6 +44,9 @@ import * as ManagedPolicy from "./policy/ManagedPolicy.ts";
 import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.ts";
 
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
+const decodeServerSettingsSync = Schema.decodeSync(ServerSettings);
+const encodeServerSettingsSync = Schema.encodeSync(ServerSettings);
+const decodeProjectScriptSync = Schema.decodeSync(ProjectScript);
 const decodeServerSettingsJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings));
 const decodeServerSettingsPatch = Schema.decodeUnknownEffect(ServerSettingsPatch);
 
@@ -3314,3 +3317,194 @@ it.effect("publishes edits made before the restored settings watch is registered
     }).pipe(Effect.provide(settingsLayer));
   }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
+
+it("redacts host paths, secrets, relay/device settings, and foreign project overrides for members", () => {
+  const projectAllowed = ProjectId.make("project-allowed");
+  const projectForeign = ProjectId.make("project-foreign");
+  const codexId = ProviderInstanceId.make("codex");
+  const secretProviderId = SecretProviderId.make("vault");
+  const usageId = UsageLimitSourceId.make("proxy");
+  const textGenId = ProviderInstanceId.make("textgen");
+
+  const fullSettings: ServerSettings = {
+    ...DEFAULT_SERVER_SETTINGS,
+    worktreesDirectory: "/srv/host/worktrees",
+    previousWorktreesDirectories: ["/srv/host/old-worktrees"],
+    addProjectBaseDirectory: "/srv/host/projects",
+    enablePreviewTunnel: true,
+    linkedEnvironmentsEnabled: true,
+    guestSharingEnabled: true,
+    requireConnectDeviceApproval: true,
+    enableDeviceSupport: true,
+    enableAgentDeviceAccess: true,
+    deviceOnboardingCompleted: true,
+    simlockDeviceHostsEnabled: true,
+    deviceHosts: [{ kind: "ssh", id: "dev-1", label: "Mac", target: "ops@mac.local", port: 22 }],
+    easDeviceHosts: [{ id: "eas-1", label: "EAS", host: "eas.local" }] as never,
+    simlockDeviceHosts: [
+      {
+        id: "sim-1",
+        label: "Sim",
+        url: "https://sim.local",
+        token: "tok",
+      } as unknown as SimlockDeviceHostConfig,
+    ],
+    secretProviders: {
+      [secretProviderId]: {
+        kind: "onepassword" as never,
+        label: "1Password",
+        config: { token: "op-secret" },
+      },
+    },
+    cloudSpeechCredentials: {
+      openai: "sk-openai-secret",
+      xai: "xai-secret",
+      openrouter: "or-secret",
+    },
+    sourceControlHosts: {
+      "github.com": { token: "ghp_secret", apiUrl: "https://api.github.com" },
+    },
+    usageLimitSources: {
+      [usageId]: {
+        kind: "cliproxy",
+        label: "Proxy",
+        url: "https://proxy.internal",
+        managementKey: "mgmt-secret",
+        enabled: true,
+      },
+    },
+    textGenerators: {
+      [textGenId]: {
+        kind: "openaiCompatible",
+        label: "Local LLM",
+        baseUrl: "https://llm.internal",
+        apiKey: "llm-secret",
+        enabled: true,
+      },
+    },
+    observability: {
+      otlpTracesUrl: "https://otlp.internal/traces",
+      otlpMetricsUrl: "https://otlp.internal/metrics",
+      otlpLogsUrl: "https://otlp.internal/logs",
+    },
+    defaultProjectScripts: [
+      decodeProjectScriptSync({
+        id: "setup",
+        name: "Setup",
+        command: "/usr/local/bin/setup.sh",
+        icon: "play",
+        runOnWorktreeCreate: false,
+      }),
+    ],
+    providerInstances: {
+      [codexId]: {
+        driver: ProviderDriverKind.make("codex"),
+        displayName: "Codex Work",
+        enabled: true,
+        config: {
+          binaryPath: "/opt/codex/bin/codex",
+          homePath: "/home/owner/.codex",
+          shadowHomePath: "/var/lib/t3/shadow",
+          launchArgs: ["--config", "/etc/codex.toml"],
+          environment: { OPENAI_API_KEY: "sk-live-123" },
+          apiKey: SECRET_REDACTED,
+          secretRef: { provider: secretProviderId, reference: "op://vault/codex/api-key" },
+          nestedPath: "~/private/file.txt",
+          safeFlag: "keep-me",
+        },
+      },
+    },
+    projectSettingsOverrides: {
+      [projectAllowed]: { defaultAutoPull: true },
+      [projectForeign]: { defaultAutoPull: false },
+    },
+    projectScriptOverrides: {
+      [projectAllowed]: [
+        decodeProjectScriptSync({
+          id: "test",
+          name: "Test",
+          command: "vp test",
+          icon: "test",
+          runOnWorktreeCreate: false,
+        }),
+      ],
+      [projectForeign]: [
+        decodeProjectScriptSync({
+          id: "secret-cmd",
+          name: "Secret",
+          command: "echo topsecret",
+          icon: "play",
+          runOnWorktreeCreate: false,
+        }),
+      ],
+    },
+    projectAgentBrowserAccessOverrides: {
+      [projectAllowed]: true,
+      [projectForeign]: false,
+    },
+    projectAutoPullOverrides: {
+      [projectAllowed]: true,
+      [projectForeign]: false,
+    },
+  };
+
+  const redacted = ServerSettingsModule.redactServerSettingsForMember(
+    fullSettings,
+    new Set([projectAllowed]),
+  );
+
+  // Wire schema remains valid for all clients.
+  const roundTripped = decodeServerSettingsSync(encodeServerSettingsSync(redacted));
+  assert.deepEqual(Object.keys(roundTripped.projectSettingsOverrides), [projectAllowed]);
+  assert.deepEqual(Object.keys(roundTripped.projectScriptOverrides), [projectAllowed]);
+  assert.deepEqual(Object.keys(roundTripped.projectAgentBrowserAccessOverrides), [projectAllowed]);
+  assert.deepEqual(Object.keys(roundTripped.projectAutoPullOverrides), [projectAllowed]);
+
+  // Provider instance keeps non-secret metadata and drops paths/secrets/env/args.
+  const codex = roundTripped.providerInstances[codexId];
+  assert.equal(codex?.displayName, "Codex Work");
+  assert.deepEqual(codex?.config, { safeFlag: "keep-me" });
+
+  // Server secrets, relay/device config, observability, and host directories are stripped.
+  assert.deepEqual(roundTripped.secretProviders, {});
+  assert.deepEqual(roundTripped.cloudSpeechCredentials, { openai: "", xai: "", openrouter: "" });
+  assert.deepEqual(roundTripped.sourceControlHosts, {});
+  assert.deepEqual(roundTripped.usageLimitSources, {});
+  assert.deepEqual(roundTripped.textGenerators, {});
+  assert.deepEqual(roundTripped.deviceHosts, []);
+  assert.deepEqual(roundTripped.easDeviceHosts, []);
+  assert.deepEqual(roundTripped.simlockDeviceHosts, []);
+  assert.isFalse(roundTripped.enablePreviewTunnel);
+  assert.isFalse(roundTripped.linkedEnvironmentsEnabled);
+  assert.isFalse(roundTripped.guestSharingEnabled);
+  assert.isFalse(roundTripped.enableDeviceSupport);
+  assert.equal(roundTripped.worktreesDirectory, "");
+  assert.deepEqual(roundTripped.previousWorktreesDirectories, []);
+  assert.equal(roundTripped.addProjectBaseDirectory, "");
+  assert.deepEqual(roundTripped.defaultProjectScripts, []);
+  assert.deepEqual(roundTripped.observability, {
+    otlpTracesUrl: "",
+    otlpMetricsUrl: "",
+    otlpLogsUrl: "",
+  });
+
+  // Serialized payload must not contain any secret value, redaction sentinel, or host path.
+  const serialized = JSON.stringify(roundTripped);
+  for (const forbidden of [
+    "/opt/codex",
+    "/home/owner",
+    "/var/lib/t3",
+    "/srv/host",
+    "~/private",
+    "sk-live-123",
+    "sk-openai-secret",
+    "ghp_secret",
+    "mgmt-secret",
+    "llm-secret",
+    "op-secret",
+    "topsecret",
+    SECRET_REDACTED,
+  ]) {
+    assert.notInclude(serialized, forbidden);
+  }
+});

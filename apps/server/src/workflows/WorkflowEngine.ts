@@ -57,7 +57,9 @@ import {
   WorkflowForge,
 } from "./WorkflowForge.ts";
 import {
+  AllowedProjectIds,
   hookId as hookIdOf,
+  ResolveAllowedProjectIds,
   WorkflowHookBusyError,
   WorkflowInputError,
   WorkflowNotRegisteredError,
@@ -782,6 +784,49 @@ const make = Effect.fn("WorkflowEngine.make")(function* (
     );
   }
 
+  const resolveAllowedProjectIds = Effect.flatMap(ResolveAllowedProjectIds, (resolve) =>
+    resolve !== undefined ? resolve : AllowedProjectIds,
+  );
+
+  const isRunVisible = (
+    projects: ReadonlySet<string> | undefined,
+    allowed: ReadonlySet<string>,
+  ): boolean => {
+    if (projects === undefined || projects.size === 0) return false;
+    for (const projectId of projects) {
+      if (!allowed.has(projectId)) return false;
+    }
+    return true;
+  };
+
+  const filterVisibleRunIds = Effect.fn("WorkflowEngine.filterVisibleRunIds")(function* (
+    runIds: ReadonlyArray<string>,
+    allowed: ReadonlySet<string>,
+  ) {
+    if (runIds.length === 0 || allowed.size === 0) return new Set<string>();
+    const byRun = yield* store.runProjectIds(runIds);
+    const visible = new Set<string>();
+    for (const runId of runIds) {
+      if (isRunVisible(byRun.get(runId), allowed)) {
+        visible.add(runId);
+      }
+    }
+    return visible;
+  });
+
+  const requireAccessibleRun = Effect.fn("WorkflowEngine.requireAccessibleRun")(function* (
+    runId: string,
+  ) {
+    const allowed = yield* resolveAllowedProjectIds;
+    if (allowed !== undefined) {
+      const visible = yield* filterVisibleRunIds([runId], allowed);
+      if (!visible.has(runId)) {
+        return yield* new WorkflowRunNotFoundError({ runId });
+      }
+    }
+    return yield* requireRun(runId);
+  });
+
   const questions = Effect.flatMap(store.requests, (waits) =>
     Effect.forEach(
       waits.filter((wait) => wait.request_json !== null),
@@ -809,18 +854,99 @@ const make = Effect.fn("WorkflowEngine.make")(function* (
       days === undefined ? "" : ` on ${days.map((day) => WEEKDAYS[day] ?? day).join(", ")}`
     }`;
   };
-  const summaries = [...new Set(registered.map(([definition]) => definition.name))].flatMap(
-    (name) => {
-      const found = latest(name);
-      return found === undefined
-        ? []
-        : [{ name, version: found[0].version, triggers: found[0].triggers.map(triggerText) }];
-    },
-  );
-  const snapshot = Effect.all({
-    workflows: Effect.succeed(summaries),
-    runs: Effect.map(store.runs(undefined), (rows) => rows.map(toRun)),
-    questions,
+  const summaryDefinitions = [
+    ...new Set(registered.map(([definition]) => definition.name)),
+  ].flatMap((name) => {
+    const found = latest(name);
+    return found === undefined ? [] : [found[0]];
+  });
+  const summaries = summaryDefinitions.map((definition) => ({
+    name: definition.name,
+    version: definition.version,
+    triggers: definition.triggers.map(triggerText),
+  }));
+  const visibleSummaries = (
+    allowed: ReadonlySet<string> | undefined,
+    visibleWorkflowNames: ReadonlySet<string>,
+  ) =>
+    allowed === undefined
+      ? summaries
+      : summaryDefinitions.flatMap((definition) => {
+          const projectTriggers = definition.triggers.filter(
+            (
+              trigger,
+            ): trigger is Extract<typeof trigger, { readonly kind: "issues" | "pullRequests" }> =>
+              trigger.kind === "issues" || trigger.kind === "pullRequests",
+          );
+          if (
+            projectTriggers.length > 0 &&
+            projectTriggers.every((trigger) => allowed.has(trigger.project))
+          ) {
+            return [
+              {
+                name: definition.name,
+                version: definition.version,
+                triggers: definition.triggers.map(triggerText),
+              },
+            ];
+          }
+          if (projectTriggers.length === 0 && visibleWorkflowNames.has(definition.name)) {
+            return [{ name: definition.name, version: definition.version, triggers: [] }];
+          }
+          return [];
+        });
+  const snapshot = Effect.gen(function* () {
+    const allowed = yield* resolveAllowedProjectIds;
+    if (allowed === undefined) {
+      return yield* Effect.all({
+        workflows: Effect.succeed(summaries),
+        runs: Effect.map(store.runs(undefined), (rows) => rows.map(toRun)),
+        questions,
+      });
+    }
+    if (allowed.size === 0) {
+      return { workflows: [], runs: [], questions: [] };
+    }
+    const [allRows, allQuestions] = yield* Effect.all([store.runs(undefined), questions]);
+    const runIds = [
+      ...new Set([
+        ...allRows.map((row) => row.run_id),
+        ...allQuestions.map((question) => question.runId),
+      ]),
+    ];
+    const visibleIds = yield* filterVisibleRunIds(runIds, allowed);
+    const runs = allRows.filter((row) => visibleIds.has(row.run_id)).map(toRun);
+    const visibleQuestions = allQuestions.filter((question) => visibleIds.has(question.runId));
+    const visibleWorkflowNames = new Set(runs.map((run) => run.workflow));
+    return {
+      workflows: visibleSummaries(allowed, visibleWorkflowNames),
+      runs,
+      questions: visibleQuestions,
+    };
+  });
+  const readCounts = Effect.gen(function* () {
+    const allowed = yield* resolveAllowedProjectIds;
+    if (allowed === undefined) {
+      return yield* store.counts;
+    }
+    if (allowed.size === 0) {
+      return { needsYou: 0, active: 0, total: 0 };
+    }
+    const [allRows, waits] = yield* Effect.all([store.runs(undefined), store.requests]);
+    const questionWaits = waits.filter((wait) => wait.request_json !== null);
+    const runIds = [
+      ...new Set([...allRows.map((row) => row.run_id), ...questionWaits.map((w) => w.run_id)]),
+    ];
+    const visibleIds = yield* filterVisibleRunIds(runIds, allowed);
+    const visibleRuns = allRows.filter((row) => visibleIds.has(row.run_id));
+    const visibleQuestions = questionWaits.filter((wait) => visibleIds.has(wait.run_id));
+    const paused = visibleRuns.filter((row) => row.status === "paused").length;
+    const active = visibleRuns.filter((row) => row.ended_at === null).length;
+    return {
+      needsYou: visibleQuestions.length + paused,
+      active,
+      total: visibleRuns.length,
+    };
   });
   const watch: Workflows["Service"]["watch"] = Stream.unwrap(
     Effect.gen(function* () {
@@ -841,10 +967,10 @@ const make = Effect.fn("WorkflowEngine.make")(function* (
     Effect.gen(function* () {
       const changes = yield* PubSub.subscribe(store.changes);
       return Stream.concat(
-        Stream.fromEffect(store.counts),
+        Stream.fromEffect(readCounts),
         Stream.fromSubscription(changes).pipe(
           Stream.debounce(WATCH_SETTLE),
-          Stream.mapEffect(() => store.counts),
+          Stream.mapEffect(() => readCounts),
         ),
         // Most changes move no count, and a badge has no use for hearing of those.
       ).pipe(Stream.changesWith((left, right) => JSON.stringify(left) === JSON.stringify(right)));
@@ -902,6 +1028,13 @@ const make = Effect.fn("WorkflowEngine.make")(function* (
   );
   const answer: Workflows["Service"]["answer"] = Effect.fn("Workflows.answer")(
     function* (runId, name, value) {
+      const allowed = yield* resolveAllowedProjectIds;
+      if (allowed !== undefined) {
+        const visible = yield* filterVisibleRunIds([runId], allowed);
+        if (!visible.has(runId)) {
+          return yield* new WorkflowInputError({ problem: `Workflow run ${runId} was not found.` });
+        }
+      }
       const wait = yield* store.waitAt({ runId, wait: name });
       // Answered already, or never asked: kept, it would answer whatever asks there next.
       if (wait === undefined || wait.request_json === null) return;
@@ -957,7 +1090,7 @@ const make = Effect.fn("WorkflowEngine.make")(function* (
   const cancelling = new Set<string>();
   const cancel: Workflows["Service"]["cancel"] = Effect.fn("Workflows.cancel")(
     function* (runId, reason) {
-      const row = yield* requireRun(runId);
+      const row = yield* requireAccessibleRun(runId);
       if (row.ended_at !== null) return;
       const threads = yield* store.runningThreads(runId);
       const engine = byTag.get(row.engine_tag);
@@ -1031,10 +1164,13 @@ const make = Effect.fn("WorkflowEngine.make")(function* (
     deliver,
     signal,
     answer,
-    resume,
+    resume: Effect.fn("Workflows.resume")(function* (runId) {
+      yield* requireAccessibleRun(runId);
+      return yield* resume(runId);
+    }),
     cancel,
     get: Effect.fn("Workflows.get")(function* (runId) {
-      const row = yield* requireRun(runId);
+      const row = yield* requireAccessibleRun(runId);
       const steps = yield* store.steps(runId);
       return {
         run: toRun(row),
@@ -1055,7 +1191,14 @@ const make = Effect.fn("WorkflowEngine.make")(function* (
       };
     }),
     list: Effect.fn("Workflows.list")(function* (filter) {
-      return (yield* store.runs(filter?.status)).map(toRun);
+      const allowed = yield* resolveAllowedProjectIds;
+      const rows = yield* store.runs(filter?.status);
+      if (allowed === undefined) return rows.map(toRun);
+      const visible = yield* filterVisibleRunIds(
+        rows.map((row) => row.run_id),
+        allowed,
+      );
+      return rows.filter((row) => visible.has(row.run_id)).map(toRun);
     }),
     waitFor: Effect.fn("Workflows.waitFor")(function* (runId, done) {
       // Subscribed before the first look, so a change in between is not missed.
@@ -1081,6 +1224,10 @@ const make = Effect.fn("WorkflowEngine.make")(function* (
       yield* keyValues.delete(key);
     }),
     watch,
+    runProjectIds: Effect.fn("Workflows.runProjectIds")(function* (runId) {
+      const byRun = yield* store.runProjectIds([runId]);
+      return byRun.get(runId) ?? new Set<string>();
+    }),
     sweep,
   });
 });

@@ -75,7 +75,7 @@ export type AccessActor = {
   readonly ownedProjectIds?: ReadonlySet<string>;
 };
 
-function canActor(
+export function canActor(
   actor: AccessActor,
   projectId: ProjectId | string,
   capability: ProjectCapability,
@@ -88,6 +88,23 @@ function canActor(
       ? boundProjectRole(actor.binding, projectId)
       : actor.roles.get(projectId);
   return role !== undefined && roleHasCapability(role, capability);
+}
+
+export function assertActorCan(
+  actor: AccessActor,
+  projectId: ProjectId | string,
+  capability: ProjectCapability,
+): Effect.Effect<void, ProjectForbiddenError> {
+  if (canActor(actor, projectId, capability)) {
+    return Effect.void;
+  }
+  return Effect.fail(
+    new ProjectForbiddenError({
+      message: `Missing required capability ${capability} on project ${projectId}.`,
+      projectId: ProjectId.make(projectId),
+      requiredPermission: capability,
+    }),
+  );
 }
 
 export function accessibleProjectIdsForActor(actor: AccessActor): ReadonlySet<string> | undefined {

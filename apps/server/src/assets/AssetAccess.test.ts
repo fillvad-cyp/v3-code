@@ -7,13 +7,18 @@ import {
   AssetAccessError,
   AssetCreateUrlInput,
   AssetPreviewTypeValidationError,
+  AuthSessionId,
+  PrincipalId,
+  ProjectId,
   SOURCE_CONTROL_MEDIA_ASSET,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import * as ProjectAccess from "../access/ProjectAccess.ts";
 import { PROJECT_FAVICON_FALLBACK_MARKER } from "@t3tools/shared/projectFavicon";
 import { MCP_APP_MAX_HTML_BYTES } from "@t3tools/shared/mcpApp";
 import { describe, expect, it } from "@effect/vitest";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -1982,9 +1987,141 @@ describe("AssetAccess", () => {
           resource: { _tag: SOURCE_CONTROL_MEDIA_ASSET, cwd: "/repo", url },
         }).pipe(Effect.flip);
         expect(error._tag).toBe("AssetGitHubMediaUrlValidationError");
+        if (error._tag === "project_forbidden") {
+          throw new Error("Unexpected project_forbidden error");
+        }
         const encoded = yield* encodeAssetAccessError(error);
         expect(encoded).not.toContain(url);
       }
     }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "embeds projectId in signed asset claims, enforces project:read, and shortens non-owner TTL to 15 minutes",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-asset-project-claims-",
+        });
+        yield* fileSystem.writeFileString(
+          path.join(workspaceRoot, "index.html"),
+          "<html><body>Hello</body></html>",
+        );
+        yield* fileSystem.writeFile(path.join(workspaceRoot, "favicon.png"), screenshotPng);
+
+        const projectAllowed = ProjectId.make("project-allowed");
+        const projectForeign = ProjectId.make("project-foreign");
+        const memberActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("member-asset"),
+          subject: "member",
+          scopes: [],
+          principalId: PrincipalId.make("principal-member"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectAllowed, "viewer"]]),
+        };
+        const ownerActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("owner-asset"),
+          subject: "owner",
+          scopes: [],
+          principalId: PrincipalId.make("owner"),
+          binding: { _tag: "environment" },
+          isOwner: true,
+          roles: new Map(),
+        };
+
+        const decodeTokenClaims = (relativeUrl: string) => {
+          const suffix = relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+          const token = suffix.slice(0, suffix.indexOf("/"));
+          const [payloadSegment] = token.split(".");
+          return JSON.parse(Buffer.from(payloadSegment!, "base64url").toString("utf8")) as Record<
+            string,
+            unknown
+          >;
+        };
+
+        const now = yield* Clock.currentTimeMillis;
+
+        // Non-owner on accessible project gets projectId in claims and 15-minute TTL.
+        const memberIssued = yield* issueAssetUrl({
+          resource: {
+            _tag: "workspace-file",
+            threadId: ThreadId.make("thread-1"),
+            path: "index.html",
+          },
+          workspaceRoot,
+          projectId: projectAllowed,
+          actor: memberActor,
+        });
+        expect(memberIssued.expiresAt - now).toBe(15 * 60 * 1000);
+        expect(decodeTokenClaims(memberIssued.relativeUrl)).toMatchObject({
+          kind: "workspace-file",
+          projectId: projectAllowed,
+        });
+
+        // Non-owner favicon also stays capped at 15-minute TTL (no 30-minute bucket extension).
+        const memberFavicon = yield* issueAssetUrl({
+          resource: { _tag: "project-favicon", cwd: workspaceRoot },
+          workspaceRoot,
+          projectId: projectAllowed,
+          actor: memberActor,
+        });
+        expect(memberFavicon.expiresAt - now).toBe(15 * 60 * 1000);
+        expect(decodeTokenClaims(memberFavicon.relativeUrl)).toMatchObject({
+          kind: "project-favicon",
+          projectId: projectAllowed,
+        });
+
+        // Owner keeps 60-minute TTL and still records projectId in claims when provided.
+        const ownerIssued = yield* issueAssetUrl({
+          resource: {
+            _tag: "workspace-file",
+            threadId: ThreadId.make("thread-1"),
+            path: "index.html",
+          },
+          workspaceRoot,
+          projectId: projectAllowed,
+          actor: ownerActor,
+        });
+        expect(ownerIssued.expiresAt - now).toBe(60 * 60 * 1000);
+        expect(decodeTokenClaims(ownerIssued.relativeUrl)).toMatchObject({
+          kind: "workspace-file",
+          projectId: projectAllowed,
+        });
+
+        // Non-owner requesting a foreign project is rejected with project_forbidden.
+        const foreignError = yield* issueAssetUrl({
+          resource: {
+            _tag: "workspace-file",
+            threadId: ThreadId.make("thread-1"),
+            path: "index.html",
+          },
+          workspaceRoot,
+          projectId: projectForeign,
+          actor: memberActor,
+        }).pipe(Effect.flip);
+        expect(foreignError).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: projectForeign,
+          requiredPermission: "project:read",
+        });
+
+        // Non-owner omitting projectId on a project-owned asset fails closed with project_forbidden.
+        const missingProjectError = yield* issueAssetUrl({
+          resource: {
+            _tag: "workspace-file",
+            threadId: ThreadId.make("thread-1"),
+            path: "index.html",
+          },
+          workspaceRoot,
+          actor: memberActor,
+        }).pipe(Effect.flip);
+        expect(missingProjectError).toMatchObject({
+          _tag: "project_forbidden",
+          requiredPermission: "project:read",
+        });
+      }).pipe(Effect.provide(layerTest)),
   );
 });

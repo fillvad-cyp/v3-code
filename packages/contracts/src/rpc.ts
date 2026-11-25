@@ -1028,7 +1028,7 @@ const WsServerUpdateSettingsRpc = Rpc.make(WS_METHODS.serverUpdateSettings, {
     providerInstanceMutation: Schema.optionalKey(ProviderInstanceMutation),
   }),
   success: ServerSettings,
-  error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError]),
+  error: Schema.Union([ServerSettingsError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsServerDiscoverSourceControlRpc = Rpc.make(WS_METHODS.serverDiscoverSourceControl, {
@@ -1212,6 +1212,7 @@ const PullRequestRpcError = Schema.Union([
   PullRequestUnavailableError,
   PullRequestOperationError,
   EnvironmentAuthorizationError,
+  ProjectForbiddenError,
 ]);
 
 const WsPullRequestsListRpc = Rpc.make(WS_METHODS.pullRequestsList, {
@@ -1437,6 +1438,7 @@ const IssueRpcError = Schema.Union([
   IssueUnavailableError,
   IssueOperationError,
   EnvironmentAuthorizationError,
+  ProjectForbiddenError,
 ]);
 
 const WsIssuesListRpc = Rpc.make(WS_METHODS.issuesList, {
@@ -1510,6 +1512,7 @@ const WsIssuesReactRpc = Rpc.make(WS_METHODS.issuesReact, {
 const IssueTrackerRpcError = Schema.Union([
   IssueTrackerConnectionError,
   EnvironmentAuthorizationError,
+  ProjectForbiddenError,
 ]);
 
 /** Every standalone tracker this server ships, each with its connection probed afresh. */
@@ -2415,17 +2418,17 @@ const WsWorkflowsGetRpc = Rpc.make(WS_METHODS.workflowsGet, {
 
 const WsWorkflowsAnswerRpc = Rpc.make(WS_METHODS.workflowsAnswer, {
   payload: WorkflowAnswerInput,
-  error: Schema.Union([WorkflowRequestError, EnvironmentAuthorizationError]),
+  error: Schema.Union([WorkflowRequestError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsWorkflowsResumeRpc = Rpc.make(WS_METHODS.workflowsResume, {
   payload: WorkflowRunResumeInput,
-  error: Schema.Union([WorkflowRequestError, EnvironmentAuthorizationError]),
+  error: Schema.Union([WorkflowRequestError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsWorkflowsCancelRpc = Rpc.make(WS_METHODS.workflowsCancel, {
   payload: WorkflowRunCancelInput,
-  error: Schema.Union([WorkflowRequestError, EnvironmentAuthorizationError]),
+  error: Schema.Union([WorkflowRequestError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsWorkflowsGetDefinitionRpc = Rpc.make(WS_METHODS.workflowsGetDefinition, {
@@ -2456,25 +2459,25 @@ const WsScheduledTasksSubscribeRpc = Rpc.make(WS_METHODS.scheduledTasksSubscribe
 const WsScheduledTasksUpsertRpc = Rpc.make(WS_METHODS.scheduledTasksUpsert, {
   payload: ScheduledTaskUpsertInput,
   success: ScheduledTaskMutationResult,
-  error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
+  error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsScheduledTasksSetEnabledRpc = Rpc.make(WS_METHODS.scheduledTasksSetEnabled, {
   payload: ScheduledTaskSetEnabledInput,
   success: ScheduledTaskMutationResult,
-  error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
+  error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsScheduledTasksDeleteRpc = Rpc.make(WS_METHODS.scheduledTasksDelete, {
   payload: ScheduledTaskDeleteInput,
   success: ScheduledTaskDeleteResult,
-  error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
+  error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsScheduledTasksRunNowRpc = Rpc.make(WS_METHODS.scheduledTasksRunNow, {
   payload: ScheduledTaskRunNowInput,
   success: ScheduledTaskRunNowResult,
-  error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
+  error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsScheduledTasksRotateWebhookTokenRpc = Rpc.make(
@@ -2482,7 +2485,7 @@ const WsScheduledTasksRotateWebhookTokenRpc = Rpc.make(
   {
     payload: ScheduledTaskRotateWebhookTokenInput,
     success: ScheduledTaskMutationResult,
-    error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
+    error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError, ProjectForbiddenError]),
   },
 );
 
@@ -2507,7 +2510,7 @@ const WsScheduledTasksListWebhookDeliveriesRpc = Rpc.make(
   {
     payload: ScheduledTaskListWebhookDeliveriesInput,
     success: ScheduledTaskListWebhookDeliveriesResult,
-    error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
+    error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError, ProjectForbiddenError]),
   },
 );
 
@@ -2516,7 +2519,7 @@ const WsScheduledTasksGetWebhookDeliveryRpc = Rpc.make(
   {
     payload: ScheduledTaskGetWebhookDeliveryInput,
     success: ScheduledTaskGetWebhookDeliveryResult,
-    error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError]),
+    error: Schema.Union([ScheduledTaskError, EnvironmentAuthorizationError, ProjectForbiddenError]),
   },
 );
 

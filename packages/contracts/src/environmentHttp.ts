@@ -490,6 +490,7 @@ const EnvironmentOrchestrationSnapshotErrors = [
   EnvironmentInternalError,
 ] as const;
 const EnvironmentOrchestrationThreadSnapshotErrors = [
+  EnvironmentAuthInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentResourceNotFoundError,
   EnvironmentInternalError,
@@ -918,6 +919,7 @@ export const EnvironmentOrchestrationThreadHistoryQuery = Schema.Struct({
 });
 
 const EnvironmentOrchestrationThreadHistoryErrors = [
+  EnvironmentAuthInvalidError,
   EnvironmentRequestInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentResourceNotFoundError,
@@ -994,6 +996,7 @@ class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").a
       PullRequestUnavailableError,
       PullRequestOperationError,
       EnvironmentAuthInvalidError,
+      EnvironmentHttpForbiddenError,
       EnvironmentScopeRequiredError,
       EnvironmentInternalError,
     ],

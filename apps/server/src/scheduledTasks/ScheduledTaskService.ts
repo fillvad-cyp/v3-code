@@ -269,8 +269,19 @@ interface WebhookDeliveryRow {
 export class ScheduledTaskService extends Context.Service<
   ScheduledTaskService,
   {
-    readonly list: () => Effect.Effect<ScheduledTaskListResult, ScheduledTaskError>;
-    readonly subscribeList: () => Stream.Stream<ScheduledTaskListResult, ScheduledTaskError>;
+    readonly list: (options?: {
+      readonly projectIds?: ReadonlyArray<ProjectId>;
+    }) => Effect.Effect<ScheduledTaskListResult, ScheduledTaskError>;
+    readonly subscribeList: (options?: {
+      readonly resolveProjectIds?: Effect.Effect<ReadonlyArray<ProjectId> | undefined>;
+    }) => Stream.Stream<ScheduledTaskListResult, ScheduledTaskError>;
+    /** Project ownership and webhook flag for a single task id, or null when missing. */
+    readonly findTaskProject: (
+      id: ScheduledTaskId,
+    ) => Effect.Effect<
+      { readonly projectId: ProjectId; readonly isWebhook: boolean } | null,
+      ScheduledTaskError
+    >;
     readonly upsert: (
       input: ScheduledTaskUpsertInput,
     ) => Effect.Effect<ScheduledTaskMutationResult, ScheduledTaskError>;
@@ -535,8 +546,10 @@ export const layer = Layer.effect(
       Effect.asVoid,
     );
 
-    const selectAllRows = () =>
-      sql<ScheduledTaskRow>`
+    const selectAllRows = (projectIds?: ReadonlyArray<ProjectId>) =>
+      projectIds !== undefined && projectIds.length === 0
+        ? Effect.succeed<ReadonlyArray<ScheduledTaskRow>>([])
+        : sql<ScheduledTaskRow>`
       SELECT
         task_id,
         title,
@@ -561,20 +574,70 @@ export const layer = Layer.effect(
         run_count,
         webhook_token,
         webhook_secret
-      FROM scheduled_tasks
+      FROM scheduled_tasks${
+        projectIds === undefined ? sql`` : sql` WHERE project_id IN ${sql.in(projectIds)}`
+      }
       -- Not updated_at: toggles, runs and edits rewrite it, and clients render
       -- this order as-is, so rows would move under the pointer.
       ORDER BY created_at DESC, task_id ASC
     `.pipe(NodeSqliteClient.readOnly);
 
-    const listRows = Effect.fn("ScheduledTaskService.listRows")(function* () {
-      const rows = yield* selectAllRows();
+    const listRows = Effect.fn("ScheduledTaskService.listRows")(function* (
+      projectIds?: ReadonlyArray<ProjectId>,
+    ) {
+      const rows = yield* selectAllRows(projectIds);
       const origin = yield* readWebhookOrigin;
       return yield* Effect.forEach(
         rows,
         (row) => decodeRow(row, origin).pipe(Effect.map(withPolicy)),
         { concurrency: 1 },
       );
+    });
+
+    const findTaskProject: ScheduledTaskService["Service"]["findTaskProject"] = Effect.fn(
+      "ScheduledTaskService.findTaskProject",
+    )(function* (id) {
+      const rows = yield* sql<{
+        readonly project_id: ProjectId;
+        readonly schedule_type: string | null;
+      }>`
+        SELECT project_id, json_extract(schedule_json, '$.type') AS schedule_type
+        FROM scheduled_tasks
+        WHERE task_id = ${id}
+        LIMIT 1
+      `.pipe(
+        NodeSqliteClient.readOnly,
+        Effect.mapError((cause) =>
+          taskError("Could not load schedule task.", { taskId: id, cause }),
+        ),
+      );
+      const row = rows[0];
+      if (row === undefined) return null;
+      return { projectId: row.project_id, isWebhook: row.schedule_type === "webhook" };
+    });
+
+    const webhookProjectState = Effect.fn("ScheduledTaskService.webhookProjectState")(function* (
+      projectId: ProjectId,
+      taskId: ScheduledTaskId,
+    ) {
+      const rows = yield* sql<{
+        readonly deleted_at: string | null;
+        readonly archived_at: string | null;
+      }>`
+        SELECT deleted_at, archived_at
+        FROM projection_projects
+        WHERE project_id = ${projectId}
+        LIMIT 1
+      `.pipe(
+        NodeSqliteClient.readOnly,
+        Effect.mapError((cause) =>
+          taskError("Could not verify schedule task project.", { taskId, cause }),
+        ),
+      );
+      const row = rows[0];
+      if (row === undefined || row.deleted_at !== null) return "missing" as const;
+      if (row.archived_at !== null) return "archived" as const;
+      return "active" as const;
     });
 
     const getRows = (id: ScheduledTaskId) =>
@@ -1040,18 +1103,23 @@ export const layer = Layer.effect(
             return { task: active, threadId: null, dispatchFailed: false };
           }
         }
-        // Reject queued deliveries after pause, same-id recreation or trigger changes.
+        // Reject queued deliveries after pause, same-id recreation, trigger changes, or project deletion/archive.
         if (webhook !== undefined) {
+          const projectState = yield* webhookProjectState(active.projectId, active.id);
           const reason =
-            active.createdAt !== task.createdAt
-              ? "The task was replaced before this delivery ran."
-              : active.schedule.type !== "webhook"
-                ? "The task's trigger changed before this delivery ran."
-                : webhookPolicyBlock !== undefined
-                  ? webhookPolicyBlock
-                  : !active.enabled
-                    ? "The task was paused before this delivery ran."
-                    : null;
+            projectState === "missing"
+              ? "The task's project no longer exists."
+              : projectState === "archived"
+                ? "The task's project is archived."
+                : active.createdAt !== task.createdAt
+                  ? "The task was replaced before this delivery ran."
+                  : active.schedule.type !== "webhook"
+                    ? "The task's trigger changed before this delivery ran."
+                    : webhookPolicyBlock !== undefined
+                      ? webhookPolicyBlock
+                      : !active.enabled
+                        ? "The task was paused before this delivery ran."
+                        : null;
           if (reason !== null) return yield* new WebhookDeliverySkipped({ reason });
         }
 
@@ -1416,8 +1484,8 @@ export const layer = Layer.effect(
 
     yield* scheduler.register("scheduled-tasks", runDueTasks());
 
-    const list: ScheduledTaskService["Service"]["list"] = () =>
-      listRows().pipe(
+    const list: ScheduledTaskService["Service"]["list"] = (options) =>
+      listRows(options?.projectIds).pipe(
         Effect.map((tasks) => ({
           tasks,
           timeZone: DateTime.zoneToString(DateTime.zoneMakeLocal()),
@@ -1425,14 +1493,20 @@ export const layer = Layer.effect(
         Effect.mapError((cause) => taskError("Could not list schedule tasks.", { cause })),
       );
 
-    const subscribeList: ScheduledTaskService["Service"]["subscribeList"] = () =>
+    const subscribeList: ScheduledTaskService["Service"]["subscribeList"] = (options) =>
       Stream.unwrap(
         Effect.gen(function* () {
+          const readCurrent = () =>
+            options?.resolveProjectIds === undefined
+              ? list()
+              : Effect.flatMap(options.resolveProjectIds, (projectIds) =>
+                  list(projectIds === undefined ? undefined : { projectIds }),
+                );
           // Subscribe before reading to buffer concurrent changes.
           const subscription = yield* PubSub.subscribe(changesPubSub);
           return Stream.concat(
-            Stream.fromEffect(list()),
-            Stream.fromSubscription(subscription).pipe(Stream.mapEffect(() => list())),
+            Stream.fromEffect(readCurrent()),
+            Stream.fromSubscription(subscription).pipe(Stream.mapEffect(() => readCurrent())),
           );
         }),
       );
@@ -2217,6 +2291,12 @@ export const layer = Layer.effect(
       yield* Effect.annotateCurrentSpan({ "scheduled_task.id": task.id });
       const schedule = task.schedule;
       if (schedule.type !== "webhook") return yield* notFound;
+      const projectState = yield* webhookProjectState(task.projectId, task.id);
+      if (projectState === "missing") return yield* notFound;
+      if (projectState === "archived") {
+        yield* observeDelivery(request, "disabled", undefined, undefined);
+        return { _tag: "disabled" as const };
+      }
 
       const now = yield* localNow;
       // Anyone can reach the tunnel directly and set the relay's header, so
@@ -2691,6 +2771,7 @@ export const layer = Layer.effect(
     return ScheduledTaskService.of({
       list,
       subscribeList,
+      findTaskProject,
       upsert,
       setEnabled,
       delete: deleteTask,

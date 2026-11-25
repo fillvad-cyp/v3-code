@@ -47,6 +47,8 @@ import {
   ProjectForbiddenError,
   ProjectId,
   ProviderDriverKind,
+  ScheduledTaskError,
+  type ScheduledTaskId,
   type ScheduledTaskListResult,
   WorkflowRequestError,
   AuthSessionId,
@@ -98,9 +100,11 @@ import {
   type ServerConfigStreamEvent,
   type ServerLifecycleStreamEvent,
   type ServerProvider,
+  type ServerSettings as ServerSettingsValue,
   serverProviderDeltas,
   type FilesystemBrowseFailure,
   FilesystemBrowseError,
+  AssetAttachmentNotFoundError,
   AssetWorkspaceContextNotFoundError,
   AssetWorkspaceContextResolutionError,
   SOURCE_CONTROL_MEDIA_ASSET,
@@ -225,6 +229,8 @@ import {
   attachmentRelativePath,
   chatAttachmentStableKey,
   createDeterministicAttachmentId,
+  parseThreadSegmentFromAttachmentId,
+  PENDING_ATTACHMENT_THREAD_SEGMENT,
 } from "./attachmentStore.ts";
 import { parseBase64DataUrl } from "./imageMime.ts";
 import { deletePendingAttachment, issueAttachmentUploadUrl } from "./assets/AttachmentUpload.ts";
@@ -1177,11 +1183,13 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const loadProjectMetadataSnapshot = Effect.fn("ws.orchestrationV2.loadProjectMetadataSnapshot")(
       function* (snapshotSequence: number) {
         const allowedProjectIds = yield* resolveAllowedProjectIds;
-        const allProjects = yield* projects.listShells();
-        const visibleProjects =
+        const allowedList =
           allowedProjectIds === undefined
-            ? allProjects
-            : allProjects.filter((project) => allowedProjectIds.has(project.id));
+            ? undefined
+            : Array.from(allowedProjectIds, (id) => ProjectId.make(id));
+        const visibleProjects = yield* projects.listShells(
+          allowedList === undefined ? undefined : { projectIds: allowedList },
+        );
         const enriched = yield* enrichProjectShells(visibleProjects);
         return {
           snapshot: {
@@ -1197,15 +1205,24 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     );
     const loadSnapshot = Effect.fn("ws.orchestrationV2.loadShellSnapshot")(function* () {
       const allowedProjectIds = yield* resolveAllowedProjectIds;
+      const allowedList =
+        allowedProjectIds === undefined
+          ? undefined
+          : Array.from(allowedProjectIds, (id) => ProjectId.make(id));
       const forSubscriber = yield* loadSubscriberShellSnapshot({
         sql,
-        listShellIndex: threadManagement.listActiveShellIndex(),
+        listShellIndex: threadManagement.listActiveShellIndex(
+          allowedList === undefined ? undefined : { projectIds: allowedList },
+        ),
         readThreads: (threadIds) =>
           threadManagement.readShellSnapshot({
             location: "active",
+            ...(allowedList === undefined ? {} : { projectIds: allowedList }),
             ...(threadIds === undefined ? {} : { threadIds }),
           }),
-        listProjects: projects.listShells(),
+        listProjects: projects.listShells(
+          allowedList === undefined ? undefined : { projectIds: allowedList },
+        ),
         latestSequence: applicationEvents.latestApplicationSequence,
         options: {
           omitIdleSubagents: input.omitIdleSubagents === true,
@@ -1352,11 +1369,13 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
             ]),
           );
           const snapshotSequence = yield* applicationEvents.latestApplicationSequence;
-          const allProjects = yield* projects.listShells();
-          const visibleProjects =
+          const allowedList =
             allowedProjectIds === undefined
-              ? allProjects
-              : allProjects.filter((project) => allowedProjectIds.has(project.id));
+              ? undefined
+              : Array.from(allowedProjectIds, (id) => ProjectId.make(id));
+          const visibleProjects = yield* projects.listShells(
+            allowedList === undefined ? undefined : { projectIds: allowedList },
+          );
           const changedProjects = visibleProjects.flatMap((project) =>
             identities.has(project.workspaceRoot)
               ? [{ ...project, repositoryIdentity: identities.get(project.workspaceRoot) ?? null }]
@@ -1772,14 +1791,103 @@ export const layerWsRpc = (
       const processResourceMonitor = yield* ProcessResourceMonitor.ProcessResourceMonitor;
       const resourceTelemetry = yield* ResourceTelemetry.ResourceTelemetry;
       const relayClient = yield* RelayClient.RelayClient;
-      // Webhook URLs start agents; expose them only to operate-scoped sessions while keeping tasks readable.
-      const withVisibleWebhookUrls = (result: ScheduledTaskListResult): ScheduledTaskListResult =>
-        currentSession.scopes.includes(AuthOrchestrationOperateScope)
-          ? result
-          : {
-              ...result,
-              tasks: result.tasks.map(({ webhook: _webhook, ...task }) => task),
-            };
+      // Webhook URLs start agents; expose them only to operate-scoped sessions with webhook capability.
+      const withVisibleWebhookUrls = (
+        result: ScheduledTaskListResult,
+        actor: ProjectAccess.AccessActor | undefined,
+      ): ScheduledTaskListResult => {
+        if (!currentSession.scopes.includes(AuthOrchestrationOperateScope)) {
+          return {
+            ...result,
+            tasks: result.tasks.map(({ webhook: _webhook, ...task }) => task),
+          };
+        }
+        if (actor === undefined || actor.isOwner || passesProjectChecks(actor.binding)) {
+          return result;
+        }
+        return {
+          ...result,
+          tasks: result.tasks.map((task) =>
+            ProjectAccess.canActor(actor, task.projectId, "project:webhooks")
+              ? task
+              : (({ webhook: _webhook, ...rest }) => rest)(task),
+          ),
+        };
+      };
+      const redactSettingsForActor = (
+        settings: ServerSettingsValue,
+        actor: ProjectAccess.AccessActor | undefined,
+      ) => {
+        const clientRedacted = ServerSettings.redactServerSettingsForClient(
+          settings,
+          settingsClient,
+        );
+        if (actor === undefined || actor.isOwner || passesProjectChecks(actor.binding)) {
+          return clientRedacted;
+        }
+        const allowed = ProjectAccess.accessibleProjectIdsForActor(actor) ?? new Set<string>();
+        return ServerSettings.redactServerSettingsForMember(clientRedacted, allowed);
+      };
+      const withPullRequestAccess = <A, E, R>(
+        effect: Effect.Effect<A, E, R>,
+      ): Effect.Effect<A, E, R> =>
+        Effect.flatMap(readAllowedProjectIds, (allowed) =>
+          PullRequestService.withAllowedProjectIds(allowed)(effect),
+        );
+      const withIssueAccess = <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+        Effect.flatMap(readAllowedProjectIds, (allowed) =>
+          IssueService.withAllowedProjectIds(allowed)(effect),
+        );
+      const requireOwnerActor = (reason: string) =>
+        Effect.flatMap(resolveCurrentActor, (actor) =>
+          actor.isOwner || passesProjectChecks(actor.binding)
+            ? Effect.void
+            : Effect.fail(
+                new EnvironmentAuthorizationError({
+                  message: reason,
+                  ...authScopeRequiredResponse(AuthEnvironmentMaintainScope),
+                }),
+              ),
+        );
+      const assertScheduledTaskAccess = Effect.fn("ws.scheduledTasks.assertAccess")(function* (
+        taskId: ScheduledTaskId,
+        mode: "operate" | "webhooks",
+      ) {
+        const actor = yield* resolveCurrentActor;
+        const allowed = ProjectAccess.accessibleProjectIdsForActor(actor);
+        if (allowed === undefined) return;
+        const meta = yield* scheduledTasks.findTaskProject(taskId);
+        if (meta === null) return;
+        if (!allowed.has(meta.projectId)) {
+          return yield* new ScheduledTaskError({
+            message: "Schedule task not found.",
+            taskId,
+          });
+        }
+        const capability: ProjectCapability =
+          mode === "webhooks" || meta.isWebhook ? "project:webhooks" : "project:thread.operate";
+        yield* ProjectAccess.assertActorCan(actor, meta.projectId, capability);
+      });
+      const assertWorkflowRunOperate = Effect.fn("ws.workflows.assertOperate")(function* (
+        runId: string,
+      ) {
+        const actor = yield* resolveCurrentActor;
+        const allowed = ProjectAccess.accessibleProjectIdsForActor(actor);
+        if (allowed === undefined) return allowed;
+        const runProjects = yield* workflows.runProjectIds(runId);
+        if (
+          runProjects.size === 0 ||
+          [...runProjects].some((projectId) => !allowed.has(projectId))
+        ) {
+          return yield* new WorkflowRequestError({
+            message: `Workflow run ${runId} was not found.`,
+          });
+        }
+        for (const projectId of runProjects) {
+          yield* ProjectAccess.assertActorCan(actor, projectId, "project:thread.operate");
+        }
+        return allowed;
+      });
       // A project's layout command is its owner's code: only a session that may already run
       // commands on the host has it run from a worktree request.
       const projectCommands =
@@ -2024,9 +2132,9 @@ export const layerWsRpc = (
               options.catalogDigests,
             )
           : commandProviders;
-        const settings = ServerSettings.redactServerSettingsForClient(
+        const settings = redactSettingsForActor(
           yield* serverSettings.getSettings,
-          settingsClient,
+          yield* readCurrentActor,
         );
         const environment = yield* serverEnvironment.getDescriptor;
         const auth = yield* serverAuth.getDescriptor();
@@ -2225,25 +2333,26 @@ export const layerWsRpc = (
 
       const getOrchestrationV2ArchivedShellSnapshot = Effect.gen(function* () {
         const allowedProjectIds = yield* readAllowedProjectIds;
+        const allowedList =
+          allowedProjectIds === undefined
+            ? undefined
+            : Array.from(allowedProjectIds, (id) => ProjectId.make(id));
         const { threads, projects, snapshotSequence } = yield* loadShellSnapshotParts({
           sql,
-          readThreads: threadManagement.readShellSnapshot({ location: "archive" }),
-          listProjects: projectStore.listShells(),
+          readThreads: threadManagement.readShellSnapshot({
+            location: "archive",
+            ...(allowedList === undefined ? {} : { projectIds: allowedList }),
+          }),
+          listProjects: projectStore.listShells(
+            allowedList === undefined ? undefined : { projectIds: allowedList },
+          ),
           latestSequence: applicationEvents.latestApplicationSequence,
         });
-        const visibleProjects =
-          allowedProjectIds === undefined
-            ? projects
-            : projects.filter((project) => allowedProjectIds.has(project.id));
-        const visibleThreads =
-          allowedProjectIds === undefined
-            ? threads.archivedThreads
-            : threads.archivedThreads.filter((thread) => allowedProjectIds.has(thread.projectId));
         return {
           schemaVersion: threads.schemaVersion,
           snapshotSequence,
-          projects: visibleProjects,
-          threads: visibleThreads,
+          projects,
+          threads: threads.archivedThreads,
         } as const;
       }).pipe(
         Effect.flatMap((snapshot) =>
@@ -2263,7 +2372,9 @@ export const layerWsRpc = (
       // Rows the shell can omit, read with the same snapshot sequence the shell uses.
       const readOmittableShellRows = Effect.fn("ws.orchestrationV2.readOmittableShellRows")(
         function* (
-          options: { readonly familyOf: ThreadId } | { readonly worktreePath: string },
+          options:
+            | { readonly familyOf: ThreadId; readonly projectIds?: ReadonlyArray<ProjectId> }
+            | { readonly worktreePath: string; readonly projectIds?: ReadonlyArray<ProjectId> },
           message: string,
         ) {
           const { threads, snapshotSequence } = yield* loadShellSnapshotParts({
@@ -2286,19 +2397,55 @@ export const layerWsRpc = (
       });
 
       const handlers = ServerWsRpcGroup.of({
-        [WS_METHODS.issuesList]: (input) => issues.list(input),
-        [WS_METHODS.issuesDetail]: (input) => issues.detail(input),
-        [WS_METHODS.issuesComments]: (input) => issues.comments(input),
-        [WS_METHODS.issuesTemplates]: (input) => issues.templates(input),
-        [WS_METHODS.issuesCandidates]: (input) => issues.candidates(input),
-        [WS_METHODS.issuesLinkedThreads]: (input) => threadIssues.linkedThreads(input),
-        [WS_METHODS.issuesCreate]: (input) => issues.create(input),
-        [WS_METHODS.issuesComment]: (input) => issues.comment(input),
-        [WS_METHODS.issuesUpdate]: (input) => issues.update(input),
-        [WS_METHODS.issuesSetState]: (input) => issues.setState(input),
-        [WS_METHODS.issuesReact]: (input) => issues.react(input),
-        [WS_METHODS.issueTrackersList]: () => issueTrackers.list,
-        [WS_METHODS.issueTrackersConnect]: (input) => issueTrackers.connect(input),
+        [WS_METHODS.issuesList]: (input) => withIssueAccess(issues.list(input)),
+        [WS_METHODS.issuesDetail]: (input) => withIssueAccess(issues.detail(input)),
+        [WS_METHODS.issuesComments]: (input) => withIssueAccess(issues.comments(input)),
+        [WS_METHODS.issuesTemplates]: (input) => withIssueAccess(issues.templates(input)),
+        [WS_METHODS.issuesCandidates]: (input) => withIssueAccess(issues.candidates(input)),
+        [WS_METHODS.issuesLinkedThreads]: (input) =>
+          Effect.flatMap(readAllowedProjectIds, (allowed) =>
+            threadIssues.linkedThreads(
+              input,
+              allowed === undefined
+                ? undefined
+                : { projectIds: Array.from(allowed, (id) => ProjectId.make(id)) },
+            ),
+          ),
+        [WS_METHODS.issuesCreate]: (input) => withIssueAccess(issues.create(input)),
+        [WS_METHODS.issuesComment]: (input) => withIssueAccess(issues.comment(input)),
+        [WS_METHODS.issuesUpdate]: (input) => withIssueAccess(issues.update(input)),
+        [WS_METHODS.issuesSetState]: (input) => withIssueAccess(issues.setState(input)),
+        [WS_METHODS.issuesReact]: (input) => withIssueAccess(issues.react(input)),
+        [WS_METHODS.issueTrackersList]: () =>
+          Effect.flatMap(readAllowedProjectIds, (allowed) =>
+            issueTrackers.list.pipe(
+              Effect.map((result) =>
+                allowed === undefined
+                  ? result
+                  : {
+                      ...result,
+                      bindings: Object.fromEntries(
+                        Object.entries(result.bindings).filter(([projectId]) =>
+                          allowed.has(projectId),
+                        ),
+                      ) as typeof result.bindings,
+                      ...(result.accountBindings === undefined
+                        ? {}
+                        : {
+                            accountBindings: Object.fromEntries(
+                              Object.entries(result.accountBindings).filter(([projectId]) =>
+                                allowed.has(projectId),
+                              ),
+                            ) as typeof result.accountBindings,
+                          }),
+                    },
+              ),
+            ),
+          ),
+        [WS_METHODS.issueTrackersConnect]: (input) =>
+          requireOwnerActor(
+            "Only the environment owner may manage issue tracker connections.",
+          ).pipe(Effect.andThen(issueTrackers.connect(input))),
         [WS_METHODS.issueTrackersBindProject]: (input) => issueTrackers.bindProject(input),
         [ORCHESTRATION_V2_WS_METHODS.dispatchCommand]: (command) =>
           Effect.annotateCurrentSpan({
@@ -2428,51 +2575,41 @@ export const layerWsRpc = (
           readOmittableShellRows({ familyOf: input.threadId }, "Failed to load the thread family"),
         [ORCHESTRATION_V2_WS_METHODS.getThreadLinkMetadata]: (input) =>
           Effect.flatMap(readAllowedProjectIds, (allowedProjectIds) =>
-            threadManagement.getThreadLinkMetadata(input.threadIds).pipe(
-              Effect.map((metadata) =>
+            threadManagement
+              .getThreadLinkMetadata(
+                input.threadIds,
                 allowedProjectIds === undefined
-                  ? metadata
-                  : Object.fromEntries(
-                      Object.entries(metadata).filter(
-                        ([, entry]) =>
-                          entry.projectId !== null && allowedProjectIds.has(entry.projectId),
-                      ),
-                    ),
+                  ? undefined
+                  : { projectIds: Array.from(allowedProjectIds, (id) => ProjectId.make(id)) },
+              )
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationV2GetShellSnapshotError({
+                      message: "Failed to load thread link metadata",
+                      cause,
+                    }),
+                ),
               ),
-              Effect.mapError(
-                (cause) =>
-                  new OrchestrationV2GetShellSnapshotError({
-                    message: "Failed to load thread link metadata",
-                    cause,
-                  }),
-              ),
-            ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.getThreadTitles]: (input) =>
           Effect.flatMap(readAllowedProjectIds, (allowedProjectIds) =>
-            (allowedProjectIds === undefined
-              ? threadManagement.getThreadTitles(input.threadIds)
-              : threadManagement.getThreadLinkMetadata(input.threadIds).pipe(
-                  Effect.map((metadata) =>
-                    Object.fromEntries(
-                      Object.entries(metadata)
-                        .filter(
-                          ([, entry]) =>
-                            entry.projectId !== null && allowedProjectIds.has(entry.projectId),
-                        )
-                        .map(([threadId, entry]) => [threadId, entry.title]),
-                    ),
-                  ),
-                )
-            ).pipe(
-              Effect.mapError(
-                (cause) =>
-                  new OrchestrationV2GetShellSnapshotError({
-                    message: "Failed to load thread titles",
-                    cause,
-                  }),
+            threadManagement
+              .getThreadTitles(
+                input.threadIds,
+                allowedProjectIds === undefined
+                  ? undefined
+                  : { projectIds: Array.from(allowedProjectIds, (id) => ProjectId.make(id)) },
+              )
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationV2GetShellSnapshotError({
+                      message: "Failed to load thread titles",
+                      cause,
+                    }),
+                ),
               ),
-            ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads]: (input) =>
           Effect.flatMap(readAllowedProjectIds, (allowedProjectIds) => {
@@ -2525,14 +2662,16 @@ export const layerWsRpc = (
         [ORCHESTRATION_V2_WS_METHODS.getWorktreeThreadIds]: (input) =>
           Effect.flatMap(readAllowedProjectIds, (allowedProjectIds) =>
             readOmittableShellRows(
-              { worktreePath: input.worktreePath },
+              {
+                worktreePath: input.worktreePath,
+                ...(allowedProjectIds === undefined
+                  ? {}
+                  : { projectIds: Array.from(allowedProjectIds, (id) => ProjectId.make(id)) }),
+              },
               "Failed to load the worktree's threads",
             ).pipe(
               Effect.map(({ threads }) => ({
-                threadIds: (allowedProjectIds === undefined
-                  ? threads
-                  : threads.filter((thread) => allowedProjectIds.has(thread.projectId))
-                ).map((thread) => thread.id),
+                threadIds: threads.map((thread) => thread.id),
               })),
             ),
           ),
@@ -2751,42 +2890,119 @@ export const layerWsRpc = (
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribePromptSuggestion]: (input) =>
           providerSessionManager.subscribePromptSuggestion(input.threadId),
-        [WS_METHODS.workflowsSubscribe]: (_input) => workflows.watch,
-        [WS_METHODS.workflowsCounts]: (_input) => workflows.counts,
+        [WS_METHODS.workflowsSubscribe]: (_input) =>
+          Workflows.withResolveAllowedProjectIds(
+            accessGate !== undefined
+              ? accessGate.refreshForStream().pipe(
+                  Effect.map(ProjectAccess.accessibleProjectIdsForActor),
+                  Effect.orElseSucceed(() => new Set<string>()),
+                )
+              : readAllowedProjectIds,
+          )(workflows.watch),
+        [WS_METHODS.workflowsCounts]: (_input) =>
+          Workflows.withResolveAllowedProjectIds(
+            accessGate !== undefined
+              ? accessGate.refreshForStream().pipe(
+                  Effect.map(ProjectAccess.accessibleProjectIdsForActor),
+                  Effect.orElseSucceed(() => new Set<string>()),
+                )
+              : readAllowedProjectIds,
+          )(workflows.counts),
         [WS_METHODS.workflowsGet]: (input) =>
-          workflows.get(input.runId).pipe(Effect.mapError(toWorkflowRequestError)),
+          Effect.flatMap(readAllowedProjectIds, (allowed) =>
+            Workflows.withAllowedProjectIds(allowed)(workflows.get(input.runId)),
+          ).pipe(Effect.mapError(toWorkflowRequestError)),
         [WS_METHODS.workflowsAnswer]: (input) =>
-          workflows
-            .answer(input.runId, input.name, {
-              choice: input.choice,
-              ...(input.reason === undefined ? {} : { reason: input.reason }),
-            })
-            .pipe(Effect.mapError(toWorkflowRequestError)),
+          assertWorkflowRunOperate(input.runId).pipe(
+            Effect.flatMap((allowed) =>
+              Workflows.withAllowedProjectIds(allowed)(
+                workflows
+                  .answer(input.runId, input.name, {
+                    choice: input.choice,
+                    ...(input.reason === undefined ? {} : { reason: input.reason }),
+                  })
+                  .pipe(Effect.mapError(toWorkflowRequestError)),
+              ),
+            ),
+          ),
         [WS_METHODS.workflowsResume]: (input) =>
-          workflows.resume(input.runId).pipe(Effect.mapError(toWorkflowRequestError)),
+          assertWorkflowRunOperate(input.runId).pipe(
+            Effect.flatMap((allowed) =>
+              Workflows.withAllowedProjectIds(allowed)(
+                workflows.resume(input.runId).pipe(Effect.mapError(toWorkflowRequestError)),
+              ),
+            ),
+          ),
         [WS_METHODS.workflowsCancel]: (input) =>
-          workflows.cancel(input.runId, input.reason).pipe(Effect.mapError(toWorkflowRequestError)),
-        [WS_METHODS.workflowsGetDefinition]: (_input) => workflowDefinitions.read,
+          assertWorkflowRunOperate(input.runId).pipe(
+            Effect.flatMap((allowed) =>
+              Workflows.withAllowedProjectIds(allowed)(
+                workflows
+                  .cancel(input.runId, input.reason)
+                  .pipe(Effect.mapError(toWorkflowRequestError)),
+              ),
+            ),
+          ),
+        [WS_METHODS.workflowsGetDefinition]: (_input) =>
+          requireOwnerActor("Only the environment owner may read workflow definition files.").pipe(
+            Effect.andThen(workflowDefinitions.read),
+          ),
         [WS_METHODS.workflowsSaveDefinition]: (input) =>
-          workflowDefinitions.save(input.name, input.source),
-        [WS_METHODS.workflowsDeleteDefinition]: (input) => workflowDefinitions.remove(input.name),
+          requireOwnerActor("Only the environment owner may edit workflow definition files.").pipe(
+            Effect.andThen(workflowDefinitions.save(input.name, input.source)),
+          ),
+        [WS_METHODS.workflowsDeleteDefinition]: (input) =>
+          requireOwnerActor(
+            "Only the environment owner may delete workflow definition files.",
+          ).pipe(Effect.andThen(workflowDefinitions.remove(input.name))),
         [WS_METHODS.scheduledTasksSubscribe]: (_input) =>
-          scheduledTasks.subscribeList().pipe(Stream.map(withVisibleWebhookUrls)),
-        [WS_METHODS.scheduledTasksUpsert]: (input) => scheduledTasks.upsert(input),
+          scheduledTasks
+            .subscribeList({
+              resolveProjectIds: (accessGate !== undefined
+                ? accessGate.refreshForStream().pipe(
+                    Effect.map(ProjectAccess.accessibleProjectIdsForActor),
+                    Effect.orElseSucceed(() => new Set<string>()),
+                  )
+                : readAllowedProjectIds
+              ).pipe(
+                Effect.map((allowed) =>
+                  allowed === undefined
+                    ? undefined
+                    : Array.from(allowed, (id) => ProjectId.make(id)),
+                ),
+              ),
+            })
+            .pipe(
+              Stream.mapEffect((result) =>
+                Effect.map(readCurrentActor, (actor) => withVisibleWebhookUrls(result, actor)),
+              ),
+            ),
+        [WS_METHODS.scheduledTasksUpsert]: (input) =>
+          (input.id === undefined
+            ? Effect.void
+            : assertScheduledTaskAccess(
+                input.id,
+                input.schedule.type === "webhook" ? "webhooks" : "operate",
+              )
+          ).pipe(Effect.andThen(scheduledTasks.upsert(input))),
         [WS_METHODS.scheduledTasksSetEnabled]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
+            Effect.andThen(assertScheduledTaskAccess(input.id, "operate")),
             Effect.andThen(scheduledTasks.setEnabled(input)),
           ),
         [WS_METHODS.scheduledTasksDelete]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
+            Effect.andThen(assertScheduledTaskAccess(input.id, "operate")),
             Effect.andThen(scheduledTasks.delete(input)),
           ),
         [WS_METHODS.scheduledTasksRunNow]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
+            Effect.andThen(assertScheduledTaskAccess(input.id, "operate")),
             Effect.andThen(scheduledTasks.runNow(input)),
           ),
         [WS_METHODS.scheduledTasksRotateWebhookToken]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
+            Effect.andThen(assertScheduledTaskAccess(input.id, "webhooks")),
             Effect.andThen(scheduledTasks.rotateWebhookToken(input)),
           ),
         [WS_METHODS.guestShareCreate]: (input) =>
@@ -2800,10 +3016,12 @@ export const layerWsRpc = (
         [WS_METHODS.agentFeedbackAnswerRequest]: (input) => feedbackStore.answer(input),
         [WS_METHODS.scheduledTasksListWebhookDeliveries]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
+            Effect.andThen(assertScheduledTaskAccess(input.id, "webhooks")),
             Effect.andThen(scheduledTasks.listWebhookDeliveries(input)),
           ),
         [WS_METHODS.scheduledTasksGetWebhookDelivery]: (input) =>
           Effect.annotateCurrentSpan({ "scheduled_task.id": input.id }).pipe(
+            Effect.andThen(assertScheduledTaskAccess(input.id, "webhooks")),
             Effect.andThen(scheduledTasks.getWebhookDelivery(input)),
           ),
         [WS_METHODS.serverProbe]: (_input) =>
@@ -3174,17 +3392,19 @@ export const layerWsRpc = (
             Effect.andThen(peerLinkRequests.answer(input)),
           ),
         [WS_METHODS.serverGetSettings]: (_input) =>
-          Effect.map(serverSettings.getSettings, (settings) =>
-            ServerSettings.redactServerSettingsForClient(settings, settingsClient),
+          Effect.all([serverSettings.getSettings, readCurrentActor]).pipe(
+            Effect.map(([settings, actor]) => redactSettingsForActor(settings, actor)),
           ),
         [WS_METHODS.serverUpdateSettings]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* ({ patch, providerInstanceMutation }) {
             const actor = yield* readCurrentActor;
-            if (patch.multiUser !== undefined && actor !== undefined && !actor.isOwner) {
-              return yield* new EnvironmentAuthorizationError({
-                message: "Only the environment owner may change multi-user mode.",
-                ...authScopeRequiredResponse(AuthEnvironmentMaintainScope),
+            if (actor !== undefined) {
+              yield* RpcAuthorization.assertServerSettingsUpdateAuthorized({
+                actor,
+                patch,
+                providerInstanceMutation,
+                assertProject: ProjectAccess.assertActorCan,
               });
             }
             const deviceHosts = patch.deviceHosts
@@ -3196,7 +3416,7 @@ export const layerWsRpc = (
             const settings = yield* providerInstanceMutation === undefined
               ? serverSettings.updateSettings(nextPatch)
               : serverSettings.updateProviderInstance(providerInstanceMutation, nextPatch);
-            return ServerSettings.redactServerSettingsForClient(settings, settingsClient);
+            return redactSettingsForActor(settings, actor);
           }),
         [WS_METHODS.serverDiscoverSourceControl]: (_input) => sourceControlDiscovery.discover,
         [WS_METHODS.serverCheckSecretSource]: (input) => secretCheck.check(input.source),
@@ -3258,49 +3478,65 @@ export const layerWsRpc = (
                 Effect.forkScoped,
               ),
           ),
-        [WS_METHODS.pullRequestsList]: (input) => pullRequests.list(input),
-        [WS_METHODS.pullRequestsListStats]: (input) => pullRequests.listStats(input),
-        [WS_METHODS.pullRequestsFilterOptions]: (input) => pullRequests.filterOptions(input),
-        [WS_METHODS.pullRequestsRoutingIdentity]: (input) => pullRequests.routingIdentity(input),
-        [WS_METHODS.pullRequestsRouting]: (input) => pullRequests.routing(input),
+        [WS_METHODS.pullRequestsList]: (input) => withPullRequestAccess(pullRequests.list(input)),
+        [WS_METHODS.pullRequestsListStats]: (input) =>
+          withPullRequestAccess(pullRequests.listStats(input)),
+        [WS_METHODS.pullRequestsFilterOptions]: (input) =>
+          withPullRequestAccess(pullRequests.filterOptions(input)),
+        [WS_METHODS.pullRequestsRoutingIdentity]: (input) =>
+          withPullRequestAccess(pullRequests.routingIdentity(input)),
+        [WS_METHODS.pullRequestsRouting]: (input) =>
+          withPullRequestAccess(pullRequests.routing(input)),
         [WS_METHODS.pullRequestsSummary]: (input) =>
-          withPullRequestViewer(input, pullRequests.summary(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.summary(input))),
         [WS_METHODS.pullRequestsStack]: (input) =>
-          withPullRequestViewer(input, pullRequests.stack(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.stack(input))),
         [WS_METHODS.pullRequestsLinkedThreads]: (input) =>
-          resolvePullRequestSyncKey(input).pipe(
-            Effect.flatMap((key) =>
-              key === null
-                ? Effect.succeed({ threads: [] })
-                : listLinkedPullRequestThreads(key).pipe(
-                    Effect.provideService(SqlClient.SqlClient, sql),
-                  ),
-            ),
-          ),
+          Effect.flatMap(readAllowedProjectIds, (allowed) => {
+            if (allowed !== undefined && !allowed.has(input.projectId)) {
+              return Effect.succeed({ threads: [] });
+            }
+            return resolvePullRequestSyncKey(input).pipe(
+              Effect.flatMap((key) =>
+                key === null
+                  ? Effect.succeed({ threads: [] })
+                  : listLinkedPullRequestThreads(
+                      key,
+                      allowed === undefined
+                        ? undefined
+                        : { projectIds: Array.from(allowed, (id) => ProjectId.make(id)) },
+                    ).pipe(Effect.provideService(SqlClient.SqlClient, sql)),
+              ),
+            );
+          }),
         [WS_METHODS.pullRequestsDetail]: (input) =>
-          withPullRequestViewer(input, openedPullRequestRead(pullRequests.detail(input))),
+          withPullRequestAccess(
+            withPullRequestViewer(input, openedPullRequestRead(pullRequests.detail(input))),
+          ),
         [WS_METHODS.pullRequestsPreview]: (input) =>
-          withPullRequestViewer(input, pullRequests.preview(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.preview(input))),
         [WS_METHODS.pullRequestsChecks]: (input) =>
-          withPullRequestViewer(input, pullRequests.checks(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.checks(input))),
         [WS_METHODS.pullRequestsActivity]: (input) =>
-          withPullRequestViewer(input, openedPullRequestRead(pullRequests.activity(input))),
+          withPullRequestAccess(
+            withPullRequestViewer(input, openedPullRequestRead(pullRequests.activity(input))),
+          ),
         [WS_METHODS.pullRequestsReviewGuide]: (input) =>
-          withPullRequestViewer(input, reviewGuides.get(input)),
+          withPullRequestAccess(withPullRequestViewer(input, reviewGuides.get(input))),
         [WS_METHODS.pullRequestsGenerateReviewGuide]: (input) =>
-          withPullRequestViewer(input, reviewGuides.generate(input)),
+          withPullRequestAccess(withPullRequestViewer(input, reviewGuides.generate(input))),
         [WS_METHODS.pullRequestsThreadComments]: (input) =>
-          withPullRequestViewer(input, pullRequests.threadComments(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.threadComments(input))),
         [WS_METHODS.pullRequestsDiffFileContents]: (input) =>
-          withPullRequestViewer(input, pullRequests.diffFileContents(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.diffFileContents(input))),
         [WS_METHODS.pullRequestsFilesViewed]: (input) =>
-          withPullRequestViewer(input, pullRequests.filesViewed(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.filesViewed(input))),
         [WS_METHODS.pullRequestsChangeBreakdown]: (input) =>
-          withPullRequestViewer(input, pullRequests.changeBreakdown(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.changeBreakdown(input))),
         [WS_METHODS.pullRequestsSetFilesViewed]: (input) =>
-          withPullRequestViewer(input, pullRequests.setFilesViewed(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.setFilesViewed(input))),
         [WS_METHODS.pullRequestsRunAction]: (input) =>
-          withPullRequestViewer(input, pullRequests.runAction(input)).pipe(
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.runAction(input))).pipe(
             Effect.tap(() =>
               resolvePullRequestSyncKey(input).pipe(
                 Effect.flatMap((key) =>
@@ -3310,45 +3546,48 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.pullRequestsUpdate]: (input) =>
-          withPullRequestViewer(input, pullRequests.update(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.update(input))),
         [WS_METHODS.pullRequestsComment]: (input) =>
-          withPullRequestViewer(input, pullRequests.comment(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.comment(input))),
         [WS_METHODS.pullRequestsUpdateComment]: (input) =>
-          withPullRequestViewer(input, pullRequests.updateComment(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.updateComment(input))),
         [WS_METHODS.pullRequestsSubmitReview]: (input) =>
-          withPullRequestViewer(input, pullRequests.submitReview(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.submitReview(input))),
         [WS_METHODS.pullRequestsReplyToThread]: (input) =>
-          withPullRequestViewer(input, pullRequests.replyToThread(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.replyToThread(input))),
         [WS_METHODS.pullRequestsSetThreadResolution]: (input) =>
-          withPullRequestViewer(input, pullRequests.setThreadResolution(input)),
+          withPullRequestAccess(
+            withPullRequestViewer(input, pullRequests.setThreadResolution(input)),
+          ),
         [WS_METHODS.pullRequestsSetReaction]: (input) =>
-          withPullRequestViewer(input, pullRequests.setReaction(input)),
-        [WS_METHODS.pullRequestsReportState]: (input) => pullRequests.reportState(input),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.setReaction(input))),
+        [WS_METHODS.pullRequestsReportState]: (input) =>
+          withPullRequestAccess(pullRequests.reportState(input)),
         [WS_METHODS.pullRequestsInvalidate]: (input) =>
-          pullRequests
-            .invalidate(input, { notifyReaders: true })
-            .pipe(
-              Effect.andThen(
-                input.reference === undefined || input.filesViewedOnly === true
-                  ? Effect.void
-                  : resolvePullRequestSyncKey(input.reference).pipe(
-                      Effect.flatMap((key) =>
-                        key === null ? Effect.void : pullRequestSync.requestSync(key),
-                      ),
+          withPullRequestAccess(pullRequests.invalidate(input, { notifyReaders: true })).pipe(
+            Effect.andThen(
+              input.reference === undefined || input.filesViewedOnly === true
+                ? Effect.void
+                : resolvePullRequestSyncKey(input.reference).pipe(
+                    Effect.flatMap((key) =>
+                      key === null ? Effect.void : pullRequestSync.requestSync(key),
                     ),
-              ),
+                  ),
             ),
+          ),
         [WS_METHODS.pullRequestsSubscribeRefreshes]: () => pullRequests.subscribeRefreshes,
         [WS_METHODS.pullRequestsSubscribeLinkedThreadRefreshes]: () =>
           pullRequests.subscribeLinkedThreadRefreshes,
         [WS_METHODS.pullRequestsReviewerCandidates]: (input) =>
-          withPullRequestViewer(input, pullRequests.reviewerCandidates(input)),
+          withPullRequestAccess(
+            withPullRequestViewer(input, pullRequests.reviewerCandidates(input)),
+          ),
         [WS_METHODS.pullRequestsRequestReviewers]: (input) =>
-          withPullRequestViewer(input, pullRequests.requestReviewers(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.requestReviewers(input))),
         [WS_METHODS.pullRequestsLabelCandidates]: (input) =>
-          withPullRequestViewer(input, pullRequests.labelCandidates(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.labelCandidates(input))),
         [WS_METHODS.pullRequestsSetLabels]: (input) =>
-          withPullRequestViewer(input, pullRequests.setLabels(input)),
+          withPullRequestAccess(withPullRequestViewer(input, pullRequests.setLabels(input))),
         [WS_METHODS.sourceControlLookupRepository]: (input) =>
           sourceControlRepositories.lookupRepository(input),
         [WS_METHODS.sourceControlCloneRepository]: (input) =>
@@ -3626,32 +3865,110 @@ export const layerWsRpc = (
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* (input) {
             const path = yield* Path.Path;
+            const actor = yield* resolveCurrentActor;
+            const isOwnerActor = actor.isOwner || passesProjectChecks(actor.binding);
             if (
-              input.resource._tag === "attachment" ||
               input.resource._tag === "native-app-icon" ||
-              input.resource._tag === "environment-theme-background" ||
-              input.resource._tag === "tool-output-image" ||
-              input.resource._tag === SOURCE_CONTROL_MEDIA_ASSET
+              input.resource._tag === "environment-theme-background"
             ) {
-              return yield* issueAssetUrl({ resource: input.resource });
+              return yield* issueAssetUrl({ resource: input.resource, actor });
+            }
+            if (input.resource._tag === "attachment") {
+              const threadSegment = parseThreadSegmentFromAttachmentId(input.resource.attachmentId);
+              let projectId: ProjectId | undefined;
+              if (threadSegment !== null && threadSegment !== PENDING_ATTACHMENT_THREAD_SEGMENT) {
+                const rows = yield* sql<{ readonly project_id: string }>`
+                  SELECT project_id
+                  FROM orchestration_v2_projection_threads
+                  WHERE lower(thread_id) = ${threadSegment}
+                  LIMIT 1
+                `.pipe(Effect.orElseSucceed(() => []));
+                if (rows[0] !== undefined) {
+                  projectId = ProjectId.make(rows[0].project_id);
+                } else if (!isOwnerActor) {
+                  return yield* new AssetAttachmentNotFoundError({ resource: input.resource });
+                }
+              }
+              return yield* issueAssetUrl({
+                resource: input.resource,
+                actor,
+                ...(projectId === undefined ? {} : { projectId }),
+              });
+            }
+            if (input.resource._tag === "tool-output-image") {
+              const thread = yield* threadManagement.getThreadShell(input.resource.threadId).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new AssetWorkspaceContextResolutionError({
+                      resource: input.resource,
+                      cause,
+                    }),
+                ),
+              );
+              const projectId = thread?.projectId;
+              if (projectId === undefined && !isOwnerActor) {
+                return yield* new AssetWorkspaceContextNotFoundError({
+                  resource: input.resource,
+                });
+              }
+              return yield* issueAssetUrl({
+                resource: input.resource,
+                actor,
+                ...(projectId === undefined ? {} : { projectId }),
+              });
+            }
+            if (input.resource._tag === SOURCE_CONTROL_MEDIA_ASSET) {
+              const access = yield* assertCwdAccess(input.resource.cwd, "project:read");
+              const project =
+                access.projectId === undefined
+                  ? yield* projectStore
+                      .findActiveByWorkspaceRoot(input.resource.cwd)
+                      .pipe(Effect.orElseSucceed(() => Option.none()))
+                  : Option.none();
+              const projectId = access.projectId ?? Option.getOrUndefined(project)?.projectId;
+              return yield* issueAssetUrl({
+                resource: input.resource,
+                actor,
+                ...(projectId === undefined ? {} : { projectId }),
+              });
             }
             if (
               input.resource._tag === "media-file" &&
               path.isAbsolute(input.resource.path) &&
               !isNetworkPath(input.resource.path)
             ) {
-              yield* assertPathAccess(input.resource.path, "project:read");
-              return yield* issueAssetUrl({ resource: input.resource });
+              const access = yield* assertPathAccess(input.resource.path, "project:read");
+              const thread =
+                access.projectId === undefined
+                  ? yield* threadManagement
+                      .getThreadShell(input.resource.threadId)
+                      .pipe(Effect.orElseSucceed(() => null))
+                  : null;
+              const projectId = access.projectId ?? thread?.projectId;
+              return yield* issueAssetUrl({
+                resource: input.resource,
+                actor,
+                ...(projectId === undefined ? {} : { projectId }),
+              });
             }
             if (input.resource._tag === "draft-workspace-file") {
-              yield* assertRelativeTargetAccess(
+              const access = yield* assertRelativeTargetAccess(
                 input.resource.cwd,
                 input.resource.path,
                 "project:read",
               );
+              const project =
+                access.projectId === undefined
+                  ? yield* projectStore
+                      .findActiveByWorkspaceRoot(input.resource.cwd)
+                      .pipe(Effect.orElseSucceed(() => Option.none()))
+                  : Option.none();
+              const projectId = access.projectId ?? Option.getOrUndefined(project)?.projectId;
               return yield* issueAssetUrl({
                 resource: input.resource,
                 workspaceRoot: input.resource.cwd,
+                actor,
+                ...(projectId === undefined ? {} : { projectId }),
               });
             }
             if (input.resource._tag === "project-favicon") {
@@ -3676,6 +3993,8 @@ export const layerWsRpc = (
               const clone = yield* projectCloneTracker.get(project.value.projectId);
               return yield* issueAssetUrl({
                 resource: input.resource,
+                actor,
+                projectId: project.value.projectId,
                 ...(project.value.faviconPath
                   ? { projectFaviconPath: project.value.faviconPath }
                   : {}),
@@ -3712,6 +4031,8 @@ export const layerWsRpc = (
             return yield* issueAssetUrl({
               resource: input.resource,
               workspaceRoot: thread.thread.worktreePath ?? project.value.workspaceRoot,
+              actor,
+              projectId: thread.thread.projectId,
             });
           }),
         [WS_METHODS.assetsPersistChatAttachments]: (input) =>
@@ -4150,8 +4471,8 @@ export const layerWsRpc = (
                     )
                   : Stream.empty;
               const settingsUpdates = settingsChanges.pipe(
-                Stream.map((settings) =>
-                  ServerSettings.redactServerSettingsForClient(settings, settingsClient),
+                Stream.mapEffect((settings) =>
+                  Effect.map(readCurrentActor, (actor) => redactSettingsForActor(settings, actor)),
                 ),
                 Stream.map((settings) => ({
                   version: 1 as const,

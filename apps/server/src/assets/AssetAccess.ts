@@ -13,11 +13,14 @@ import {
   AssetWorkspacePathValidationError,
   AssetWorkspaceResolutionError,
   AssetWorkspaceRootNormalizationError,
+  ProjectForbiddenError,
+  ProjectId,
   SOURCE_CONTROL_MEDIA_ASSET,
   ThreadId,
   NativeAppIconReference,
   TurnItemId,
   EnvironmentThemeId,
+  passesProjectChecks,
 } from "@t3tools/contracts";
 import {
   hostPreviewMimeTypeFromExtension,
@@ -49,6 +52,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import { base64UrlDecodeUtf8, base64UrlEncode } from "../auth/utils.ts";
+import * as ProjectAccess from "../access/ProjectAccess.ts";
 import * as AssetSigner from "./AssetSigner.ts";
 import { makeIsServerInternalPath } from "../auth/serverInternalPaths.ts";
 import { parseAttachmentFileExtension, resolveAttachmentPathById } from "../attachmentStore.ts";
@@ -75,6 +79,7 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 export const ASSET_ROUTE_PREFIX = "/api/assets";
 
 const ASSET_TOKEN_TTL_MS = 60 * 60 * 1000;
+const NON_OWNER_ASSET_TOKEN_TTL_MS = 15 * 60 * 1000;
 const PROJECT_FAVICON_TOKEN_BUCKET_MS = 30 * 60 * 1000;
 const HTML_ATTACHMENT_TOKEN_BUCKET_MS = 30 * 60 * 1000;
 const PROJECT_FAVICON_VERSION_PREFIX = "v";
@@ -137,6 +142,7 @@ const AssetClaimsSchema = Schema.Union([
     baseRelativePath: Schema.String,
     /** The opened page, which the files it requests are tracked under; absent on older URLs. */
     entryFileName: Schema.optionalKey(Schema.String),
+    projectId: Schema.optionalKey(ProjectId),
     expiresAt: Schema.Number,
   }),
   Schema.Struct({
@@ -144,6 +150,7 @@ const AssetClaimsSchema = Schema.Union([
     kind: Schema.Literal("workspace-file-exact"),
     workspaceRoot: Schema.String,
     relativePath: Schema.String,
+    projectId: Schema.optionalKey(ProjectId),
     expiresAt: Schema.Number,
   }),
   Schema.Struct({
@@ -153,6 +160,7 @@ const AssetClaimsSchema = Schema.Union([
     download: Schema.optionalKey(Schema.Boolean),
     device: Schema.String,
     inode: Schema.String,
+    projectId: Schema.optionalKey(ProjectId),
     expiresAt: Schema.Number,
   }),
   Schema.Struct({
@@ -163,6 +171,7 @@ const AssetClaimsSchema = Schema.Union([
     fileName: Schema.optionalKey(Schema.String),
     mimeType: Schema.optionalKey(Schema.String),
     renderIntent: Schema.optionalKey(Schema.Literal("mcp-app")),
+    projectId: Schema.optionalKey(ProjectId),
     expiresAt: Schema.Number,
   }),
   Schema.Struct({
@@ -170,12 +179,14 @@ const AssetClaimsSchema = Schema.Union([
     kind: Schema.Literal("project-favicon"),
     workspaceRoot: Schema.String,
     relativePath: Schema.NullOr(Schema.String),
+    projectId: Schema.optionalKey(ProjectId),
     expiresAt: Schema.Number,
   }),
   Schema.Struct({
     version: Schema.Literal(1),
     kind: Schema.Literal("project-favicon-external"),
     filePath: Schema.String,
+    projectId: Schema.optionalKey(ProjectId),
     expiresAt: Schema.Number,
   }),
   Schema.Struct({
@@ -196,6 +207,7 @@ const AssetClaimsSchema = Schema.Union([
     threadId: ThreadId,
     itemId: TurnItemId,
     index: Schema.Number,
+    projectId: Schema.optionalKey(ProjectId),
     expiresAt: Schema.Number,
   }),
   Schema.Struct({
@@ -205,6 +217,7 @@ const AssetClaimsSchema = Schema.Union([
     url: Schema.String,
     cwd: Schema.String,
     repository: Schema.optionalKey(Schema.String),
+    projectId: Schema.optionalKey(ProjectId),
     expiresAt: Schema.Number,
   }),
 ]);
@@ -604,17 +617,40 @@ const finalizeWorkspaceFileAsset = Effect.fn("AssetAccess.finalizeWorkspaceFileA
   },
 );
 
+const PROJECT_OWNED_ASSET_TAGS = new Set<AssetResource["_tag"]>([
+  "workspace-file",
+  "media-file",
+  "draft-workspace-file",
+  "project-favicon",
+  "tool-output-image",
+  SOURCE_CONTROL_MEDIA_ASSET,
+]);
+
 export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (input: {
   readonly resource: AssetResource;
   readonly workspaceRoot?: string;
   readonly projectFaviconPath?: string;
   /** Where a cloned project's checkout stands, while the clone tracker still knows it. */
   readonly projectCheckout?: "pending" | "cloned";
+  readonly projectId?: ProjectId;
+  readonly actor?: ProjectAccess.AccessActor;
 }) {
+  const isNonOwner =
+    input.actor !== undefined && !input.actor.isOwner && !passesProjectChecks(input.actor.binding);
+  if (input.actor !== undefined && input.projectId !== undefined) {
+    yield* ProjectAccess.assertActorCan(input.actor, input.projectId, "project:read");
+  } else if (isNonOwner && PROJECT_OWNED_ASSET_TAGS.has(input.resource._tag)) {
+    return yield* new ProjectForbiddenError({
+      message: "Missing project context for asset access.",
+      projectId: ProjectId.make("environment"),
+      requiredPermission: "project:read",
+    });
+  }
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
-  let expiresAt = (yield* Clock.currentTimeMillis) + ASSET_TOKEN_TTL_MS;
+  const issuedAt = yield* Clock.currentTimeMillis;
+  let expiresAt = issuedAt + (isNonOwner ? NON_OWNER_ASSET_TOKEN_TTL_MS : ASSET_TOKEN_TTL_MS);
   let claims: AssetClaims;
   let fileName: string;
   let sourcePath: string | undefined;
@@ -940,14 +976,24 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
     }
   }
 
-  if (claims.kind === "project-favicon" || claims.kind === "project-favicon-external") {
-    const issuedAt = yield* Clock.currentTimeMillis;
+  if (
+    input.projectId !== undefined &&
+    claims.kind !== "native-app-icon" &&
+    claims.kind !== "environment-theme-background"
+  ) {
+    claims = { ...claims, projectId: input.projectId };
+  }
+  if (
+    !isNonOwner &&
+    (claims.kind === "project-favicon" || claims.kind === "project-favicon-external")
+  ) {
+    const faviconIssuedAt = yield* Clock.currentTimeMillis;
     expiresAt =
-      (Math.floor(issuedAt / PROJECT_FAVICON_TOKEN_BUCKET_MS) + 2) *
+      (Math.floor(faviconIssuedAt / PROJECT_FAVICON_TOKEN_BUCKET_MS) + 2) *
       PROJECT_FAVICON_TOKEN_BUCKET_MS;
     claims = { ...claims, expiresAt };
   }
-  if (claims.kind === "attachment" && claims.mimeType === "text/html") {
+  if (!isNonOwner && claims.kind === "attachment" && claims.mimeType === "text/html") {
     // Stable URLs let immutable HTML reloads hit the cache; image retries need fresh URLs.
     expiresAt =
       Math.ceil(expiresAt / HTML_ATTACHMENT_TOKEN_BUCKET_MS) * HTML_ATTACHMENT_TOKEN_BUCKET_MS;

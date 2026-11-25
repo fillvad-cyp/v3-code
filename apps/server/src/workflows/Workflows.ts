@@ -72,6 +72,31 @@ export type WorkflowError =
   | WorkflowInputError
   | WorkflowHookBusyError;
 
+/** Non-owner project restriction; `undefined` means unrestricted (owner / environment binding). */
+export class AllowedProjectIds extends Context.Reference<ReadonlySet<string> | undefined>(
+  "v3code/workflows/Workflows/AllowedProjectIds",
+  { defaultValue: () => undefined },
+) {}
+
+/** Dynamic resolver for streaming workflow snapshots/counts so live revocations take effect. */
+export class ResolveAllowedProjectIds extends Context.Reference<
+  Effect.Effect<ReadonlySet<string> | undefined> | undefined
+>("v3code/workflows/Workflows/ResolveAllowedProjectIds", {
+  defaultValue: () => undefined,
+}) {}
+
+export const withAllowedProjectIds =
+  (allowedProjectIds: ReadonlySet<string> | undefined) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+    allowedProjectIds === undefined
+      ? effect
+      : Effect.provideService(effect, AllowedProjectIds, allowedProjectIds);
+
+export const withResolveAllowedProjectIds =
+  (resolve: Effect.Effect<ReadonlySet<string> | undefined>) =>
+  <A, E, R>(stream: Stream.Stream<A, E, R>): Stream.Stream<A, E, R> =>
+    Stream.provideService(stream, ResolveAllowedProjectIds, resolve);
+
 export class Workflows extends Context.Service<
   Workflows,
   {
@@ -157,6 +182,8 @@ export class Workflows extends Context.Service<
     readonly watch: Stream.Stream<WorkflowRunsSnapshot>;
     /** How much is going on, now and again whenever a count changes. */
     readonly counts: Stream.Stream<WorkflowCounts>;
+    /** The local project ids associated with one workflow run, or empty when unmapped. */
+    readonly runProjectIds: (runId: string) => Effect.Effect<ReadonlySet<string>>;
     /**
      * Deliver timeouts to waits past their deadline, drop expired mail, and resume paused runs
      * whose rest is over. Runs by itself every few seconds.
@@ -201,6 +228,9 @@ export const disabled = Workflows.of({
   storeDelete: refuse,
   watch: Stream.concat(Stream.make({ workflows: [], runs: [], questions: [] }), Stream.never),
   counts: Stream.concat(Stream.make({ needsYou: 0, active: 0, total: 0 }), Stream.never),
+  runProjectIds: Effect.fn("Workflows.runProjectIds")(() =>
+    Effect.succeed<ReadonlySet<string>>(new Set<string>()),
+  ),
   sweep: Effect.void,
 });
 export const layerDisabled = Layer.succeed(Workflows, disabled);

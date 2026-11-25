@@ -33,7 +33,7 @@ import {
   issueTrackerBindingScopes,
   type IssueUpdateInput,
   type OrchestrationProjectShell,
-  type ProjectId,
+  ProjectId,
 } from "@t3tools/contracts";
 import * as SourceControlRateLimit from "@t3tools/source-control-core/server/SourceControlRateLimit";
 import {
@@ -160,6 +160,19 @@ const readOnly = (operation: string) =>
 const unsupported = (operation: string, what: string) =>
   new IssueOperationError({ operation, detail: `This tracker does not support ${what}.` });
 
+/** Non-owner project restriction; `undefined` means unrestricted (owner / environment binding). */
+class AllowedProjectIds extends Context.Reference<ReadonlySet<string> | undefined>(
+  "v3code/issue/IssueService/AllowedProjectIds",
+  { defaultValue: () => undefined },
+) {}
+
+export const withAllowedProjectIds =
+  (allowedProjectIds: ReadonlySet<string> | undefined) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+    allowedProjectIds === undefined
+      ? effect
+      : Effect.provideService(effect, AllowedProjectIds, allowedProjectIds);
+
 export class IssueService extends Context.Service<
   IssueService,
   {
@@ -250,10 +263,57 @@ const make = Effect.gen(function* () {
     /** The link's `host:port`, for a host whose binding keeps its port. */
     readonly authority?: string | undefined;
   }) =>
-    (filter.projectId === undefined
-      ? projects.listShells()
-      : projects.getShell(filter.projectId).pipe(Effect.map(Option.toArray))
-    ).pipe(
+    Effect.flatMap(AllowedProjectIds, (allowed) => {
+      if (allowed !== undefined) {
+        if (filter.projectId !== undefined && !allowed.has(filter.projectId)) {
+          return Effect.succeed({
+            supported: [] as SupportedProject[],
+            unimplemented: new Map<
+              string,
+              { tracker: IssueTrackerKind; projectIds: Set<ProjectId> }
+            >(),
+          });
+        }
+        if (filter.projectId === undefined) {
+          const allowedIds = Array.from(allowed, (id) => ProjectId.make(id)).filter(
+            (id) => !filter.excludeProjectIds?.includes(id),
+          );
+          if (allowedIds.length === 0) {
+            return Effect.succeed({
+              supported: [] as SupportedProject[],
+              unimplemented: new Map<
+                string,
+                { tracker: IssueTrackerKind; projectIds: Set<ProjectId> }
+              >(),
+            });
+          }
+          return listProjectsForShells(
+            projects.listShells({ projectIds: allowedIds }),
+            filter,
+            allowed,
+          );
+        }
+      }
+      return listProjectsForShells(
+        filter.projectId === undefined
+          ? projects.listShells()
+          : projects.getShell(filter.projectId).pipe(Effect.map(Option.toArray)),
+        filter,
+        allowed,
+      );
+    });
+
+  const listProjectsForShells = <E>(
+    loadShells: Effect.Effect<ReadonlyArray<OrchestrationProjectShell>, E>,
+    filter: {
+      readonly projectId?: IssueListInput["projectId"];
+      readonly excludeProjectIds?: IssueListInput["excludeProjectIds"];
+      readonly host?: string | undefined;
+      readonly authority?: string | undefined;
+    },
+    allowed?: ReadonlySet<string>,
+  ) =>
+    loadShells.pipe(
       Effect.mapError(
         (cause) =>
           new IssueOperationError({
@@ -265,7 +325,9 @@ const make = Effect.gen(function* () {
       Effect.flatMap(
         Effect.fnUntraced(function* (allShells) {
           const shells = allShells.filter(
-            (project) => !filter.excludeProjectIds?.includes(project.id),
+            (project) =>
+              (allowed === undefined || allowed.has(project.id)) &&
+              !filter.excludeProjectIds?.includes(project.id),
           );
           if (shells.length === 0) return [];
           // One read per listing, not per project, and never cached so Settings changes apply.
@@ -328,24 +390,49 @@ const make = Effect.gen(function* () {
   const requireProject = (
     ref: IssueScopeRef,
   ): Effect.Effect<SupportedProject & { readonly writable: boolean }, IssueError> =>
-    listProjects({ projectId: ref.projectId }).pipe(
-      Effect.flatMap(({ supported }) => {
-        const host = ref.host?.trim().toLowerCase();
-        const onHost = supported.filter(
-          (candidate) =>
-            candidate.tracker === ref.tracker && (host === undefined || candidate.host === host),
-        );
-        const scope = ref.scope.trim();
-        const own = onHost.find(
-          (candidate) => candidate.scope.toLowerCase() === scope.toLowerCase(),
-        );
-        const served = own ?? onHost[0];
-        if (served === undefined) {
-          return Effect.fail(new IssueUnavailableError({ reason: "tracker-unsupported" }));
-        }
-        return Effect.succeed({ ...served, scope, writable: own !== undefined });
-      }),
-    );
+    Effect.flatMap(AllowedProjectIds, (allowed) => {
+      if (allowed !== undefined && !allowed.has(ref.projectId)) {
+        return Effect.fail(new IssueUnavailableError({ reason: "tracker-unsupported" }));
+      }
+      return listProjects({ projectId: ref.projectId }).pipe(
+        Effect.flatMap(({ supported }) => {
+          const host = ref.host?.trim().toLowerCase();
+          const onHost = supported.filter(
+            (candidate) =>
+              candidate.tracker === ref.tracker && (host === undefined || candidate.host === host),
+          );
+          const scope = ref.scope.trim();
+          const own = onHost.find(
+            (candidate) => candidate.scope.toLowerCase() === scope.toLowerCase(),
+          );
+          if (allowed !== undefined) {
+            if (own !== undefined) {
+              return Effect.succeed({ ...own, scope, writable: true });
+            }
+            // Non-owners may only read scopes owned by one of their accessible projects; unknown mappings stay owner-only.
+            return listProjects({ host }).pipe(
+              Effect.flatMap(({ supported: accessible }) => {
+                const matched = accessible.find(
+                  (candidate) =>
+                    candidate.tracker === ref.tracker &&
+                    (host === undefined || candidate.host === host) &&
+                    candidate.scope.toLowerCase() === scope.toLowerCase(),
+                );
+                if (matched === undefined) {
+                  return Effect.fail(new IssueUnavailableError({ reason: "tracker-unsupported" }));
+                }
+                return Effect.succeed({ ...matched, scope, writable: false });
+              }),
+            );
+          }
+          const served = own ?? onHost[0];
+          if (served === undefined) {
+            return Effect.fail(new IssueUnavailableError({ reason: "tracker-unsupported" }));
+          }
+          return Effect.succeed({ ...served, scope, writable: own !== undefined });
+        }),
+      );
+    });
 
   const requireWritable = (ref: IssueScopeRef, operation: string) =>
     requireProject(ref).pipe(

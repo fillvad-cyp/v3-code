@@ -36,6 +36,7 @@ import {
   WS_METHODS,
   WsRpcGroup,
   intersectScopes,
+  passesProjectChecks,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Ref from "effect/Ref";
@@ -364,6 +365,61 @@ const requiredScopesForRpcCall = (
     : scopes;
 };
 
+const NON_OWNER_WRITABLE_SETTINGS_KEYS = new Set<string>([
+  "projectSettingsOverrides",
+  "projectScriptOverrides",
+]);
+
+/**
+ * Non-owners may only update `projectSettingsOverrides` and `projectScriptOverrides` for projects
+ * where they hold `project:settings`; all other settings remain owner-only.
+ */
+export const assertServerSettingsUpdateAuthorized = Effect.fnUntraced(function* (input: {
+  readonly actor: ProjectAccess.AccessActor;
+  readonly patch: ServerSettingsPatch;
+  readonly providerInstanceMutation: ProviderInstanceMutation | undefined;
+  readonly assertProject: ProjectAccess.ProjectAccess["Service"]["assert"];
+}) {
+  const { actor, patch, providerInstanceMutation, assertProject } = input;
+  if (actor.isOwner || passesProjectChecks(actor.binding)) {
+    return;
+  }
+  if (patch.multiUser !== undefined) {
+    return yield* new EnvironmentAuthorizationError({
+      message: "Only the environment owner may change multi-user mode.",
+      ...authScopeRequiredResponse(AuthEnvironmentMaintainScope),
+    });
+  }
+  if (providerInstanceMutation !== undefined) {
+    return yield* new EnvironmentAuthorizationError({
+      message: "Only the environment owner may modify provider instances.",
+      ...authScopeRequiredResponse(AuthProvidersManageScope),
+    });
+  }
+  for (const [key, value] of Object.entries(patch)) {
+    if (value === undefined) continue;
+    if (!NON_OWNER_WRITABLE_SETTINGS_KEYS.has(key)) {
+      return yield* new EnvironmentAuthorizationError({
+        message: `Only the environment owner may update setting "${key}". Non-owners may only update projectSettingsOverrides and projectScriptOverrides for projects they administer.`,
+        ...authScopeRequiredResponse(AuthEnvironmentMaintainScope),
+      });
+    }
+  }
+  if (containsSecretReference(patch)) {
+    return yield* new EnvironmentAuthorizationError({
+      message: "Only the environment owner may configure secret references.",
+      ...authScopeRequiredResponse(AuthProvidersManageScope),
+    });
+  }
+  const projectIds = new Set<string>([
+    ...Object.keys(patch.projectSettingsOverrides ?? {}),
+    ...Object.keys(patch.projectScriptOverrides ?? {}),
+  ]);
+  for (const projectId of projectIds) {
+    yield* assertProject(actor, projectId, "project:settings");
+  }
+});
+
 export const WS_CLOSE_CODE_UNAUTHORIZED = 4401;
 const WS_CLOSE_CODE_FORBIDDEN = 4403;
 export type RevocationCloseCode =
@@ -506,14 +562,14 @@ export function makeAccessGate(
     actorOverride?: ProjectAccess.AccessActor,
   ) {
     const actor = actorOverride ?? (yield* getActor);
-    if (method === WS_METHODS.serverUpdateSettings && !actor.isOwner) {
-      const { patch } = decodeSettingsUpdate(payload);
-      if (patch.multiUser !== undefined) {
-        return yield* new EnvironmentAuthorizationError({
-          message: "Only the environment owner may change multi-user mode.",
-          ...authScopeRequiredResponse(AuthEnvironmentMaintainScope),
-        });
-      }
+    if (method === WS_METHODS.serverUpdateSettings) {
+      const { patch, providerInstanceMutation } = decodeSettingsUpdate(payload);
+      yield* assertServerSettingsUpdateAuthorized({
+        actor,
+        patch,
+        providerInstanceMutation,
+        assertProject: input.access.assert,
+      });
     }
     const capability = input.resolver.capabilityForRpcCall(method, payload);
     if (capability === undefined) return;
