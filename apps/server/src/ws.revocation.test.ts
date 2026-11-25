@@ -54,6 +54,7 @@ import * as RpcTest from "effect/rpc/RpcTest";
 import * as Stream from "effect/Stream";
 
 import * as ProjectAccess from "./access/ProjectAccess.ts";
+import * as ProjectPaths from "./access/ProjectPaths.ts";
 import * as ResourceResolver from "./access/ResourceResolver.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as AssetSigner from "./assets/AssetSigner.ts";
@@ -345,6 +346,11 @@ const makeOwnerActor = (): ProjectAccess.AccessActor => ({
 });
 
 const layerUnusedWsServices = Layer.mergeAll(
+  Layer.mock(ProjectPaths.ProjectPaths)({
+    assertPath: (_actor, targetPath) =>
+      Effect.succeed({ realPath: targetPath, projectId: undefined }),
+    assertCwd: (_actor, cwd) => Effect.succeed({ realPath: cwd, projectId: undefined }),
+  }),
   Layer.mock(DocumentText.DocumentText)({}),
   Layer.mock(SecretCheck.SecretCheck)({}),
   Layer.mock(WorkspacePaths.WorkspacePaths)({}),

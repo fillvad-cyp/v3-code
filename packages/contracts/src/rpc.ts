@@ -1621,43 +1621,67 @@ const WsSubscribeProjectClonesRpc = Rpc.make(WS_METHODS.subscribeProjectClones, 
 const WsSourceControlPublishRepositoryRpc = Rpc.make(WS_METHODS.sourceControlPublishRepository, {
   payload: SourceControlPublishRepositoryInput,
   success: SourceControlPublishRepositoryResult,
-  error: Schema.Union([SourceControlRepositoryError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    SourceControlRepositoryError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsProjectsSearchEntriesRpc = Rpc.make(WS_METHODS.projectsSearchEntries, {
   payload: ProjectSearchEntriesInput,
   success: ProjectSearchEntriesResult,
-  error: Schema.Union([ProjectSearchEntriesError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    ProjectSearchEntriesError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsProjectsSearchContentsRpc = Rpc.make(WS_METHODS.projectsSearchContents, {
   payload: ProjectSearchContentsInput,
   success: ProjectSearchContentsResult,
-  error: Schema.Union([ProjectSearchContentsError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    ProjectSearchContentsError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsProjectsListEntriesRpc = Rpc.make(WS_METHODS.projectsListEntries, {
   payload: ProjectListEntriesInput,
   success: ProjectListEntriesResult,
-  error: Schema.Union([ProjectListEntriesError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    ProjectListEntriesError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsProjectsListIgnoredFilesRpc = Rpc.make(WS_METHODS.projectsListIgnoredFiles, {
   payload: ProjectListIgnoredFilesInput,
   success: ProjectListIgnoredFilesResult,
-  error: Schema.Union([ProjectListEntriesError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    ProjectListEntriesError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsProjectsReadFileRpc = Rpc.make(WS_METHODS.projectsReadFile, {
   payload: ProjectReadFileInput,
   success: ProjectReadFileResult,
-  error: Schema.Union([ProjectReadFileError, EnvironmentAuthorizationError]),
+  error: Schema.Union([ProjectReadFileError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
   payload: ProjectWriteFileInput,
   success: ProjectWriteFileResult,
-  error: Schema.Union([ProjectWriteFileError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    ProjectWriteFileError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsProjectsMutateRpc = Rpc.make(WS_METHODS.projectsMutate, {
@@ -1686,37 +1710,53 @@ const WsProjectsCreateFromThreadRpc = Rpc.make(WS_METHODS.projectsCreateFromThre
 
 const WsShellOpenInEditorRpc = Rpc.make(WS_METHODS.shellOpenInEditor, {
   payload: LaunchEditorInput,
-  error: Schema.Union([ExternalLauncherError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    ExternalLauncherError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsFilesystemGetMetadataRpc = Rpc.make(WS_METHODS.filesystemGetMetadata, {
   payload: FilesystemGetMetadataInput,
   success: FilesystemGetMetadataResult,
-  error: EnvironmentAuthorizationError,
+  error: Schema.Union([EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
   payload: FilesystemBrowseInput,
   success: FilesystemBrowseResult,
-  error: Schema.Union([FilesystemBrowseError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    FilesystemBrowseError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsWorkspaceListFoldersRpc = Rpc.make(WS_METHODS.workspaceListFolders, {
   payload: WorkspaceListFoldersInput,
   success: WorkspaceListFoldersResult,
-  error: Schema.Union([WorkspaceFoldersError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    WorkspaceFoldersError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsWorkspaceScanFoldersRpc = Rpc.make(WS_METHODS.workspaceScanFolders, {
   payload: WorkspaceScanFoldersInput,
   success: WorkspaceScanFoldersResult,
-  error: Schema.Union([WorkspaceFoldersError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    WorkspaceFoldersError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsWorkspaceTaskFolderRpc = Rpc.make(WS_METHODS.workspaceTaskFolder, {
   payload: WorkspaceTaskFolderInput,
   success: WorkspaceTaskFolderResult,
-  error: Schema.Union([TaskFolderError, EnvironmentAuthorizationError]),
+  error: Schema.Union([TaskFolderError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsWorkspaceAddTaskFolderRepositoryRpc = Rpc.make(
@@ -1724,7 +1764,7 @@ const WsWorkspaceAddTaskFolderRepositoryRpc = Rpc.make(
   {
     payload: WorkspaceAddTaskFolderRepositoryInput,
     success: TaskFolder,
-    error: Schema.Union([TaskFolderError, EnvironmentAuthorizationError]),
+    error: Schema.Union([TaskFolderError, EnvironmentAuthorizationError, ProjectForbiddenError]),
   },
 );
 
@@ -1748,7 +1788,7 @@ const WsAgentSessionsImportRpc = Rpc.make(WS_METHODS.agentSessionsImport, {
 const WsAssetsCreateUrlRpc = Rpc.make(WS_METHODS.assetsCreateUrl, {
   payload: AssetCreateUrlInput,
   success: AssetCreateUrlResult,
-  error: Schema.Union([AssetAccessError, EnvironmentAuthorizationError]),
+  error: Schema.Union([AssetAccessError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsAssetsPersistChatAttachmentsRpc = Rpc.make(WS_METHODS.assetsPersistChatAttachments, {
@@ -1812,27 +1852,39 @@ const WsProviderMcpSignInCompleteRpc = Rpc.make(WS_METHODS.providerMcpSignInComp
 const WsSubscribeVcsBranchRpc = Rpc.make(WS_METHODS.subscribeVcsBranch, {
   payload: VcsStatusInput,
   success: VcsBranchStatus,
-  error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    GitManagerServiceError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
   stream: true,
 });
 
 const WsVcsRefreshBranchRpc = Rpc.make(WS_METHODS.vcsRefreshBranch, {
   payload: VcsStatusInput,
   success: Schema.Void,
-  error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    GitManagerServiceError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
   payload: VcsStatusSubscriptionInput,
   success: VcsStatusStreamEvent,
-  error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    GitManagerServiceError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
   stream: true,
 });
 
 const WsVcsPullRpc = Rpc.make(WS_METHODS.vcsPull, {
   payload: VcsPullInput,
   success: VcsPullResult,
-  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
@@ -1841,7 +1893,11 @@ const WsVcsRefreshStatusRpc = Rpc.make(WS_METHODS.vcsRefreshStatus, {
     localOnly: Schema.optional(Schema.Boolean),
   }),
   success: VcsRefreshStatusResult,
-  error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    GitManagerServiceError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsSubscribeWorktreeSetupRpc = Rpc.make(WS_METHODS.subscribeWorktreeSetup, {
@@ -1860,85 +1916,109 @@ const WsWorktreeSetupCancelRpc = Rpc.make(WS_METHODS.worktreeSetupCancel, {
 const WsGitRunStackedActionRpc = Rpc.make(WS_METHODS.gitRunStackedAction, {
   payload: GitRunStackedActionInput,
   success: GitActionProgressEvent,
-  error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    GitManagerServiceError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
   stream: true,
 });
 
 const WsGitResolvePullRequestRpc = Rpc.make(WS_METHODS.gitResolvePullRequest, {
   payload: GitPullRequestRefInput,
   success: GitResolvePullRequestResult,
-  error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    GitManagerServiceError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsGitPreparePullRequestThreadRpc = Rpc.make(WS_METHODS.gitPreparePullRequestThread, {
   payload: GitPreparePullRequestThreadInput,
   success: GitPreparePullRequestThreadResult,
-  error: Schema.Union([GitManagerServiceError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    GitManagerServiceError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsVcsListRefsRpc = Rpc.make(WS_METHODS.vcsListRefs, {
   payload: VcsListRefsInput,
   success: VcsListRefsResult,
-  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
   // Worktrees use the managed folder; required null path preserves compatibility with older servers.
   payload: Schema.Struct({ ...VcsCreateWorktreeInput.fields, path: Schema.Null }),
   success: VcsCreateWorktreeResult,
-  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsVcsRemoveWorktreeRpc = Rpc.make(WS_METHODS.vcsRemoveWorktree, {
   payload: VcsRemoveWorktreeInput,
-  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsVcsCreateRefRpc = Rpc.make(WS_METHODS.vcsCreateRef, {
   payload: VcsCreateRefInput,
   success: VcsCreateRefResult,
-  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsVcsSwitchRefRpc = Rpc.make(WS_METHODS.vcsSwitchRef, {
   payload: VcsSwitchRefInput,
   success: VcsSwitchRefResult,
-  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
+  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsVcsInitRpc = Rpc.make(WS_METHODS.vcsInit, {
   payload: VcsInitInput,
-  error: Schema.Union([VcsError, EnvironmentAuthorizationError]),
+  error: Schema.Union([VcsError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsReviewGetBranchCommitsRpc = Rpc.make(WS_METHODS.reviewGetBranchCommits, {
   payload: ReviewBranchCommitsInput,
   success: ReviewBranchCommitsResult,
-  error: Schema.Union([ReviewDiffPreviewError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    ReviewDiffPreviewError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsReviewGetDiffPreviewRpc = Rpc.make(WS_METHODS.reviewGetDiffPreview, {
   payload: ReviewDiffPreviewInput,
   success: ReviewDiffPreviewResult,
-  error: Schema.Union([ReviewDiffPreviewError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    ReviewDiffPreviewError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsReviewGetDiffFileContentsRpc = Rpc.make(WS_METHODS.reviewGetDiffFileContents, {
   payload: ReviewDiffFileContentsInput,
   success: ReviewDiffFileContentsResult,
-  error: Schema.Union([ReviewDiffPreviewError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    ReviewDiffPreviewError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+  ]),
 });
 
 const WsTerminalOpenRpc = Rpc.make(WS_METHODS.terminalOpen, {
   payload: TerminalOpenInput,
   success: TerminalSessionSnapshot,
-  error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+  error: Schema.Union([TerminalError, EnvironmentAuthorizationError, ProjectForbiddenError]),
 });
 
 const WsTerminalAttachRpc = Rpc.make(WS_METHODS.terminalAttach, {
   payload: TerminalAttachInput,
   success: TerminalAttachStreamEvent,
-  error: Schema.Union([TerminalError, EnvironmentAuthorizationError]),
+  error: Schema.Union([TerminalError, EnvironmentAuthorizationError, ProjectForbiddenError]),
   stream: true,
 });
 

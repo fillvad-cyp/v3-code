@@ -3,6 +3,7 @@ import { GitCommandError, OrchestrationDispatchCommandError } from "@t3tools/con
 import * as NodeCrypto from "node:crypto";
 import * as FeatureFlags from "@t3tools/shared/FeatureFlags";
 import * as HostProcess from "@t3tools/shared/HostProcess";
+import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as Context from "effect/Context";
 import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -36,12 +37,14 @@ import {
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
   AuthEnvironmentMaintainScope,
-  AuthFilesystemReadScope,
   AuthOrchestrationOperateScope,
   AuthTerminalOperateScope,
   AuthProvidersManageScope,
   type AuthEnvironmentScope,
   boundProjectIds,
+  passesProjectChecks,
+  type ProjectCapability,
+  ProjectForbiddenError,
   ProjectId,
   ProviderDriverKind,
   type ScheduledTaskListResult,
@@ -230,7 +233,6 @@ import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFolders from "./workspace/WorkspaceFolders.ts";
 import * as TaskFolders from "./workspace/TaskFolders.ts";
 import * as KnownWorkspaces from "./workspace/KnownWorkspaces.ts";
-import { isWithinRoot } from "./workspace/KnownWorkspaces.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import { readWorkflowScript } from "./orchestration-v2/workflowScriptQuery.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
@@ -258,6 +260,7 @@ import * as EventLoopMonitor from "./observability/EventLoopMonitor.ts";
 import * as BackgroundPolicy from "./background/BackgroundPolicy.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProjectAccess from "./access/ProjectAccess.ts";
+import * as ProjectPaths from "./access/ProjectPaths.ts";
 import * as ResourceResolver from "./access/ResourceResolver.ts";
 import { requiredScopeForDeviceList, rpcAuthorizationError } from "./auth/RpcAuthorization.ts";
 import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
@@ -1578,8 +1581,26 @@ export const layerWsRpc = (
           ),
         );
       };
-      const fileSystem = yield* FileSystem.FileSystem;
+      const fallbackActor: ProjectAccess.AccessActor = {
+        sessionId: currentSession.sessionId,
+        subject: currentSession.subject,
+        scopes: currentSession.scopes,
+        ...(currentSession.principalId === undefined
+          ? {}
+          : { principalId: currentSession.principalId }),
+        ...(currentSession.binding === undefined ? {} : { binding: currentSession.binding }),
+        isOwner: passesProjectChecks(currentSession.binding),
+        roles:
+          currentSession.binding?._tag === "projects"
+            ? new Map(currentSession.binding.projects.map((entry) => [entry.projectId, entry.role]))
+            : new Map(),
+      };
+      const resolveCurrentActor: Effect.Effect<ProjectAccess.AccessActor> = Effect.map(
+        readCurrentActor,
+        (actor) => actor ?? fallbackActor,
+      );
       const path = yield* Path.Path;
+      const projectPaths = yield* ProjectPaths.ProjectPaths;
       const sql = yield* SqlClient.SqlClient;
       const threadManagement = yield* ThreadManagementService.ThreadManagementService;
       const intakeContext = yield* Effect.context<
@@ -2094,51 +2115,112 @@ export const layerWsRpc = (
           .refreshStatus(cwd)
           .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
-      const assertAccessibleCwd = Effect.fn("ws.access.assertAccessibleCwd")(function* (
-        cwd: string,
+      const resolveTargetAgainstCwd = Effect.fnUntraced(function* (
+        cwd: string | undefined,
+        targetPath: string,
       ) {
-        const allowedProjectIds = yield* readAllowedProjectIds;
-        if (allowedProjectIds === undefined) return;
-        const resolveCandidate = (value: string) => {
-          const lexical = path.resolve(value);
-          return fileSystem.realPath(lexical).pipe(Effect.orElseSucceed(() => lexical));
-        };
-        const resolvedCwd = yield* resolveCandidate(cwd);
-        const allProjects = yield* projectStore.listShells().pipe(Effect.orElseSucceed(() => []));
-        const accessibleProjects = allProjects.filter((project) =>
-          allowedProjectIds.has(project.id),
-        );
-        for (const project of accessibleProjects) {
-          if (isWithinRoot(path, resolvedCwd, yield* resolveCandidate(project.workspaceRoot))) {
-            return;
+        const trimmed = targetPath.trim();
+        if (trimmed === "~" || trimmed.startsWith("~/") || trimmed.startsWith("~\\")) {
+          return expandHomePath(trimmed, yield* HostProcess.HomeDirectory);
+        }
+        if (path.isAbsolute(trimmed) || cwd === undefined) {
+          return trimmed;
+        }
+        return path.resolve(cwd, trimmed);
+      });
+
+      const assertCwdAccess = Effect.fn("ws.access.assertCwdAccess")(function* (
+        cwd: string,
+        capability: ProjectCapability,
+      ) {
+        const actor = yield* resolveCurrentActor;
+        return yield* projectPaths.assertCwd(actor, cwd, capability);
+      });
+
+      const assertPathAccess = Effect.fn("ws.access.assertPathAccess")(function* (
+        targetPath: string,
+        capability: ProjectCapability,
+      ) {
+        const actor = yield* resolveCurrentActor;
+        return yield* projectPaths.assertPath(actor, targetPath, capability);
+      });
+
+      const assertRelativeTargetAccess = Effect.fn("ws.access.assertRelativeTargetAccess")(
+        function* (cwd: string, relativePath: string, capability: ProjectCapability) {
+          const actor = yield* resolveCurrentActor;
+          yield* projectPaths.assertCwd(actor, cwd, capability);
+          const target = yield* resolveTargetAgainstCwd(cwd, relativePath);
+          return yield* projectPaths.assertPath(actor, target, capability);
+        },
+      );
+
+      const guardTerminalLaunch = Effect.fn("ws.access.guardTerminalLaunch")(function* <
+        Input extends {
+          readonly threadId: string;
+          readonly cwd?: string | undefined;
+          readonly worktreePath?: string | null | undefined;
+          readonly env?: Record<string, string> | undefined;
+        },
+      >(input: Input) {
+        const actor = yield* resolveCurrentActor;
+        const thread = yield* threadManagement
+          .getThreadShell(ThreadId.make(input.threadId))
+          .pipe(Effect.orElseSucceed(() => null));
+        const threadProjectId = thread?.projectId;
+        const isOwnerActor = actor.isOwner || passesProjectChecks(actor.binding);
+
+        if (!isOwnerActor) {
+          if (threadProjectId === undefined) {
+            return yield* new ProjectForbiddenError({
+              message: "Terminal thread does not belong to an accessible project.",
+              projectId: ProjectId.make("environment"),
+              requiredPermission: "project:terminal.operate",
+            });
           }
-          for (const folder of project.trackedFolders ?? []) {
-            if (isWithinRoot(path, resolvedCwd, yield* resolveCandidate(folder.path))) {
-              return;
+          if (input.cwd !== undefined) {
+            const matchedCwd = yield* projectPaths.assertCwd(
+              actor,
+              input.cwd,
+              "project:terminal.operate",
+            );
+            if (matchedCwd.projectId !== threadProjectId) {
+              return yield* new ProjectForbiddenError({
+                message: `Terminal cwd does not belong to project ${threadProjectId}.`,
+                projectId: threadProjectId,
+                requiredPermission: "project:terminal.operate",
+              });
+            }
+          }
+          if (typeof input.worktreePath === "string") {
+            const matchedWorktree = yield* projectPaths.assertCwd(
+              actor,
+              input.worktreePath,
+              "project:terminal.operate",
+            );
+            if (matchedWorktree.projectId !== threadProjectId) {
+              return yield* new ProjectForbiddenError({
+                message: `Terminal worktree does not belong to project ${threadProjectId}.`,
+                projectId: threadProjectId,
+                requiredPermission: "project:terminal.operate",
+              });
             }
           }
         }
-        if (allowedProjectIds.size > 0) {
-          const worktrees = yield* sql<{ readonly worktreePath: string }>`
-            SELECT DISTINCT json_extract(payload_json, '$.worktreePath') AS "worktreePath"
-            FROM orchestration_v2_projection_threads
-            WHERE deleted_at IS NULL
-              AND project_id IN ${sql.in(Array.from(allowedProjectIds))}
-              AND json_extract(payload_json, '$.worktreePath') IS NOT NULL
-          `.pipe(
-            Effect.orElseSucceed(() => [] as ReadonlyArray<{ readonly worktreePath: string }>),
-          );
-          for (const row of worktrees) {
-            if (isWithinRoot(path, resolvedCwd, yield* resolveCandidate(row.worktreePath))) {
-              return;
-            }
-          }
+
+        if (threadProjectId === undefined && actor.principalId === undefined) {
+          return input;
         }
-        return yield* new EnvironmentAuthorizationError({
-          message: "The authenticated session does not have access to this project workspace.",
-          requiredScope: AuthFilesystemReadScope,
-          requiredPermission: "project:read",
-        });
+
+        const nextEnv: Record<string, string> = { ...input.env };
+        delete nextEnv.T3_PROJECT_ID;
+        delete nextEnv.T3_MEMBER_ID;
+        if (threadProjectId !== undefined) {
+          nextEnv.T3_PROJECT_ID = threadProjectId;
+        }
+        if (actor.principalId !== undefined) {
+          nextEnv.T3_MEMBER_ID = actor.principalId;
+        }
+        return { ...input, env: nextEnv };
       });
 
       const getOrchestrationV2ArchivedShellSnapshot = Effect.gen(function* () {
@@ -3366,19 +3448,23 @@ export const layerWsRpc = (
                   ),
                 ),
         [WS_METHODS.sourceControlPublishRepository]: (input) =>
-          sourceControlRepositories.publishRepository(input).pipe(
-            // A failed push still leaves the new remote added.
-            Effect.ensuring(
-              repositoryIdentityResolver
-                .resolve(input.cwd, { refresh: true })
-                .pipe(Effect.andThen(refreshGitStatus(input.cwd))),
+          assertCwdAccess(input.cwd, "project:source.write").pipe(
+            Effect.andThen(
+              sourceControlRepositories.publishRepository(input).pipe(
+                // A failed push still leaves the new remote added.
+                Effect.ensuring(
+                  repositoryIdentityResolver
+                    .resolve(input.cwd, { refresh: true })
+                    .pipe(Effect.andThen(refreshGitStatus(input.cwd))),
+                ),
+              ),
             ),
           ),
         [WS_METHODS.projectsSearchEntries]: (input) =>
-          assertAccessibleCwd(input.cwd).pipe(
+          assertCwdAccess(input.cwd, "project:read").pipe(
             Effect.andThen(workspaceEntries.search(input)),
             Effect.mapError((cause) =>
-              cause._tag === "EnvironmentAuthorizationError"
+              cause._tag === "project_forbidden"
                 ? cause
                 : new ProjectSearchEntriesError({
                     cwd: input.cwd,
@@ -3390,10 +3476,10 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.projectsSearchContents]: (input) =>
-          assertAccessibleCwd(input.cwd).pipe(
+          assertCwdAccess(input.cwd, "project:read").pipe(
             Effect.andThen(workspaceEntries.searchContents(input)),
             Effect.mapError((cause) =>
-              cause._tag === "EnvironmentAuthorizationError"
+              cause._tag === "project_forbidden"
                 ? cause
                 : new ProjectSearchContentsError({
                     cwd: input.cwd,
@@ -3405,10 +3491,13 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.projectsListEntries]: (input) =>
-          assertAccessibleCwd(input.cwd).pipe(
+          (input.directoryPath !== undefined && input.directoryPath.trim().length > 0
+            ? assertRelativeTargetAccess(input.cwd, input.directoryPath, "project:read")
+            : assertCwdAccess(input.cwd, "project:read")
+          ).pipe(
             Effect.andThen(workspaceEntries.list(input)),
             Effect.mapError((cause) =>
-              cause._tag === "EnvironmentAuthorizationError"
+              cause._tag === "project_forbidden"
                 ? cause
                 : new ProjectListEntriesError({
                     ...input,
@@ -3418,10 +3507,10 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.projectsListIgnoredFiles]: (input) =>
-          assertAccessibleCwd(input.cwd).pipe(
+          assertCwdAccess(input.cwd, "project:read").pipe(
             Effect.andThen(workspaceEntries.listIgnoredFiles(input)),
             Effect.mapError((cause) =>
-              cause._tag === "EnvironmentAuthorizationError"
+              cause._tag === "project_forbidden"
                 ? cause
                 : new ProjectListEntriesError({
                     ...input,
@@ -3431,10 +3520,10 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.projectsReadFile]: (input) =>
-          assertAccessibleCwd(input.cwd).pipe(
+          assertRelativeTargetAccess(input.cwd, input.relativePath, "project:read").pipe(
             Effect.andThen(workspaceFileSystem.readFile(input)),
             Effect.mapError((cause) =>
-              cause._tag === "EnvironmentAuthorizationError"
+              cause._tag === "project_forbidden"
                 ? cause
                 : new ProjectReadFileError({
                     ...input,
@@ -3444,10 +3533,10 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.projectsWriteFile]: (input) =>
-          assertAccessibleCwd(input.cwd).pipe(
+          assertRelativeTargetAccess(input.cwd, input.relativePath, "project:file.write").pipe(
             Effect.andThen(workspaceFileSystem.writeFile(input)),
             Effect.mapError((cause) =>
-              cause._tag === "EnvironmentAuthorizationError"
+              cause._tag === "project_forbidden"
                 ? cause
                 : new ProjectWriteFileError({
                     cwd: input.cwd,
@@ -3473,24 +3562,61 @@ export const layerWsRpc = (
                 }),
             ),
           ),
-        [WS_METHODS.shellOpenInEditor]: (input) => externalLauncher.launchEditor(input),
-        [WS_METHODS.filesystemGetMetadata]: (input) => workspaceFileSystem.getMetadata(input),
-        [WS_METHODS.filesystemBrowse]: (input) =>
-          workspaceEntries.browse(input).pipe(
-            Effect.mapError(
-              (cause) =>
-                new FilesystemBrowseError({
-                  ...input,
-                  ...filesystemBrowseFailureContext(cause),
-                  cause,
-                }),
+        [WS_METHODS.shellOpenInEditor]: (input) =>
+          assertPathAccess(input.cwd, "project:read").pipe(
+            Effect.andThen(
+              input.projectRoot === undefined
+                ? Effect.void
+                : assertCwdAccess(input.projectRoot, "project:read"),
             ),
+            Effect.andThen(externalLauncher.launchEditor(input)),
+          ),
+        [WS_METHODS.filesystemGetMetadata]: (input) =>
+          Effect.forEach(
+            input.paths,
+            (targetPath) => assertPathAccess(targetPath, "project:read"),
+            {
+              discard: true,
+            },
+          ).pipe(Effect.andThen(workspaceFileSystem.getMetadata(input))),
+        [WS_METHODS.filesystemBrowse]:
+          /* Request instrumentation already owns the span; keep this handler in that context. */
+          Effect.fnUntraced(
+            function* (input) {
+              if (input.cwd !== undefined) {
+                yield* assertCwdAccess(input.cwd, "project:read");
+              }
+              const browseTarget = yield* resolveTargetAgainstCwd(input.cwd, input.partialPath);
+              yield* assertPathAccess(browseTarget, "project:read");
+              return yield* workspaceEntries.browse(input);
+            },
+            (effect, input) =>
+              effect.pipe(
+                Effect.mapError((cause) =>
+                  cause._tag === "project_forbidden"
+                    ? cause
+                    : new FilesystemBrowseError({
+                        ...input,
+                        ...filesystemBrowseFailureContext(cause),
+                        cause,
+                      }),
+                ),
+              ),
           ),
         [WS_METHODS.workspaceListFolders]: (input) => workspaceFolders.list(input),
-        [WS_METHODS.workspaceScanFolders]: (input) => workspaceFolders.scan(input),
+        [WS_METHODS.workspaceScanFolders]: (input) =>
+          assertCwdAccess(input.workspaceRoot, "project:read").pipe(
+            Effect.andThen(workspaceFolders.scan(input)),
+          ),
         [WS_METHODS.workspaceTaskFolder]: (input) =>
-          taskFolders.find(input.worktreePath).pipe(Effect.map((taskFolder) => ({ taskFolder }))),
-        [WS_METHODS.workspaceAddTaskFolderRepository]: (input) => taskFolders.addRepository(input),
+          assertCwdAccess(input.worktreePath, "project:read").pipe(
+            Effect.andThen(taskFolders.find(input.worktreePath)),
+            Effect.map((taskFolder) => ({ taskFolder })),
+          ),
+        [WS_METHODS.workspaceAddTaskFolderRepository]: (input) =>
+          assertCwdAccess(input.repositoryPath, "project:source.write").pipe(
+            Effect.andThen(taskFolders.addRepository(input)),
+          ),
         [WS_METHODS.attachmentsCreateUploadUrl]: (input) => issueAttachmentUploadUrl(input),
         [WS_METHODS.attachmentsDelete]: (input) => deletePendingAttachment(input.attachmentId),
         [WS_METHODS.agentSessionsScan]: () => agentSessionScanner.scan,
@@ -3505,21 +3631,31 @@ export const layerWsRpc = (
               input.resource._tag === "native-app-icon" ||
               input.resource._tag === "environment-theme-background" ||
               input.resource._tag === "tool-output-image" ||
-              input.resource._tag === SOURCE_CONTROL_MEDIA_ASSET ||
-              // A network path is served only from the thread's project, looked up below.
-              (input.resource._tag === "media-file" &&
-                path.isAbsolute(input.resource.path) &&
-                !isNetworkPath(input.resource.path))
+              input.resource._tag === SOURCE_CONTROL_MEDIA_ASSET
             ) {
               return yield* issueAssetUrl({ resource: input.resource });
             }
+            if (
+              input.resource._tag === "media-file" &&
+              path.isAbsolute(input.resource.path) &&
+              !isNetworkPath(input.resource.path)
+            ) {
+              yield* assertPathAccess(input.resource.path, "project:read");
+              return yield* issueAssetUrl({ resource: input.resource });
+            }
             if (input.resource._tag === "draft-workspace-file") {
+              yield* assertRelativeTargetAccess(
+                input.resource.cwd,
+                input.resource.path,
+                "project:read",
+              );
               return yield* issueAssetUrl({
                 resource: input.resource,
                 workspaceRoot: input.resource.cwd,
               });
             }
             if (input.resource._tag === "project-favicon") {
+              yield* assertCwdAccess(input.resource.cwd, "project:read");
               const project = yield* projectStore
                 .findActiveByWorkspaceRoot(input.resource.cwd)
                 .pipe(
@@ -3580,131 +3716,197 @@ export const layerWsRpc = (
           }),
         [WS_METHODS.assetsPersistChatAttachments]: (input) =>
           persistChatAttachments(input).pipe(Effect.map((attachments) => ({ attachments }))),
-        [WS_METHODS.subscribeVcsBranch]: (input) => vcsStatusBroadcaster.streamBranchStatus(input),
+        [WS_METHODS.subscribeVcsBranch]: (input) =>
+          Stream.unwrap(
+            assertCwdAccess(input.cwd, "project:read").pipe(
+              Effect.as(vcsStatusBroadcaster.streamBranchStatus(input)),
+            ),
+          ),
         [WS_METHODS.vcsRefreshBranch]: (input) =>
-          vcsStatusBroadcaster.refreshBranchStatus(input).pipe(Effect.asVoid),
-        [WS_METHODS.subscribeVcsStatus]: (input) => vcsStatusBroadcaster.streamStatus(input),
+          assertCwdAccess(input.cwd, "project:read").pipe(
+            Effect.andThen(vcsStatusBroadcaster.refreshBranchStatus(input)),
+            Effect.asVoid,
+          ),
+        [WS_METHODS.subscribeVcsStatus]: (input) =>
+          Stream.unwrap(
+            assertCwdAccess(input.cwd, "project:read").pipe(
+              Effect.as(vcsStatusBroadcaster.streamStatus(input)),
+            ),
+          ),
         [WS_METHODS.subscribeWorktreeSetup]: (input) => worktreeSetupTracker.stream(input.threadId),
         [WS_METHODS.worktreeSetupCancel]: (input) =>
           worktreeSetupTracker
             .cancel(input.threadId)
             .pipe(Effect.map((cancelled) => ({ cancelled }))),
         [WS_METHODS.vcsRefreshStatus]: (input) =>
-          vcsStatusBroadcaster.refreshStatus(input.cwd, { localOnly: input.localOnly ?? false }),
-        [WS_METHODS.vcsPull]: (input) =>
-          gitWorkflow.pullCurrentBranch(input.cwd).pipe(
-            Effect.matchCauseEffect({
-              onFailure: (cause) => Effect.failCause(cause),
-              onSuccess: (result) =>
-                refreshGitStatus(input.cwd).pipe(Effect.ignore({ log: true }), Effect.as(result)),
-            }),
+          assertCwdAccess(input.cwd, "project:read").pipe(
+            Effect.andThen(
+              vcsStatusBroadcaster.refreshStatus(input.cwd, {
+                localOnly: input.localOnly ?? false,
+              }),
+            ),
           ),
-        [WS_METHODS.gitRunStackedAction]: (input) =>
-          Stream.callback<GitActionProgressEvent, GitManagerServiceError>((queue) =>
-            gitWorkflow
-              .runStackedAction(input, {
-                actionId: input.actionId,
-                progressReporter: {
-                  publish: (event) => Queue.offer(queue, event).pipe(Effect.asVoid),
-                },
-              })
-              .pipe(
+        [WS_METHODS.vcsPull]: (input) =>
+          assertCwdAccess(input.cwd, "project:source.write").pipe(
+            Effect.andThen(
+              gitWorkflow.pullCurrentBranch(input.cwd).pipe(
                 Effect.matchCauseEffect({
-                  // Earlier steps (branch, commit) may have landed before the failing one.
-                  onFailure: (cause) =>
-                    refreshGitStatus(input.cwd).pipe(Effect.andThen(Queue.failCause(queue, cause))),
+                  onFailure: (cause) => Effect.failCause(cause),
                   onSuccess: (result) =>
-                    (input.threadId === undefined
-                      ? Effect.void
-                      : linkCreatedPullRequest({
-                          threadId: input.threadId,
-                          cwd: input.cwd,
-                          result,
-                          commandId: serverCommandId("pr-created-link"),
-                        }).pipe(
-                          Effect.provideService(Orchestrator.OrchestratorV2, orchestrationEngine),
-                          Effect.provideService(ProjectService.ProjectService, projectService),
-                          Effect.provideService(
-                            RepositoryIdentityResolver.RepositoryIdentityResolver,
-                            repositoryIdentityResolver,
-                          ),
-                        )
-                    ).pipe(
-                      Effect.andThen(
-                        refreshPushedPullRequests(input, result).pipe(
-                          Effect.provideService(Orchestrator.OrchestratorV2, orchestrationEngine),
-                          Effect.provideService(ProjectStore.ProjectStoreV2, projectStore),
-                          Effect.provideService(
-                            PullRequestService.PullRequestService,
-                            pullRequests,
-                          ),
-                        ),
-                      ),
-                      Effect.andThen(refreshGitStatus(input.cwd)),
-                      Effect.andThen(Queue.end(queue).pipe(Effect.asVoid)),
+                    refreshGitStatus(input.cwd).pipe(
+                      Effect.ignore({ log: true }),
+                      Effect.as(result),
                     ),
                 }),
               ),
+            ),
           ),
-        [WS_METHODS.gitResolvePullRequest]: (input) => gitWorkflow.resolvePullRequest(input),
+        [WS_METHODS.gitRunStackedAction]: (input) =>
+          Stream.unwrap(
+            assertCwdAccess(input.cwd, "project:source.write").pipe(
+              Effect.as(
+                Stream.callback<GitActionProgressEvent, GitManagerServiceError>((queue) =>
+                  gitWorkflow
+                    .runStackedAction(input, {
+                      actionId: input.actionId,
+                      progressReporter: {
+                        publish: (event) => Queue.offer(queue, event).pipe(Effect.asVoid),
+                      },
+                    })
+                    .pipe(
+                      Effect.matchCauseEffect({
+                        // Earlier steps (branch, commit) may have landed before the failing one.
+                        onFailure: (cause) =>
+                          refreshGitStatus(input.cwd).pipe(
+                            Effect.andThen(Queue.failCause(queue, cause)),
+                          ),
+                        onSuccess: (result) =>
+                          (input.threadId === undefined
+                            ? Effect.void
+                            : linkCreatedPullRequest({
+                                threadId: input.threadId,
+                                cwd: input.cwd,
+                                result,
+                                commandId: serverCommandId("pr-created-link"),
+                              }).pipe(
+                                Effect.provideService(
+                                  Orchestrator.OrchestratorV2,
+                                  orchestrationEngine,
+                                ),
+                                Effect.provideService(
+                                  ProjectService.ProjectService,
+                                  projectService,
+                                ),
+                                Effect.provideService(
+                                  RepositoryIdentityResolver.RepositoryIdentityResolver,
+                                  repositoryIdentityResolver,
+                                ),
+                              )
+                          ).pipe(
+                            Effect.andThen(
+                              refreshPushedPullRequests(input, result).pipe(
+                                Effect.provideService(
+                                  Orchestrator.OrchestratorV2,
+                                  orchestrationEngine,
+                                ),
+                                Effect.provideService(ProjectStore.ProjectStoreV2, projectStore),
+                                Effect.provideService(
+                                  PullRequestService.PullRequestService,
+                                  pullRequests,
+                                ),
+                              ),
+                            ),
+                            Effect.andThen(refreshGitStatus(input.cwd)),
+                            Effect.andThen(Queue.end(queue).pipe(Effect.asVoid)),
+                          ),
+                      }),
+                    ),
+                ),
+              ),
+            ),
+          ),
+        [WS_METHODS.gitResolvePullRequest]: (input) =>
+          assertCwdAccess(input.cwd, "project:read").pipe(
+            Effect.andThen(gitWorkflow.resolvePullRequest(input)),
+          ),
         [WS_METHODS.gitPreparePullRequestThread]: (input) =>
-          (input.mode === "local"
-            ? assertCheckoutIdle("GitWorkflowService.preparePullRequestThread", input.cwd)
-            : Effect.void
-          ).pipe(
+          assertCwdAccess(input.cwd, "project:source.write").pipe(
+            Effect.andThen(
+              input.mode === "local"
+                ? assertCheckoutIdle("GitWorkflowService.preparePullRequestThread", input.cwd)
+                : Effect.void,
+            ),
             Effect.andThen(gitWorkflow.preparePullRequestThread(input)),
             Effect.tap(() => refreshGitStatus(input.cwd)),
           ),
-        [WS_METHODS.vcsListRefs]: (input) => gitWorkflow.listRefs(input),
+        [WS_METHODS.vcsListRefs]: (input) =>
+          assertCwdAccess(input.cwd, "project:read").pipe(
+            Effect.andThen(gitWorkflow.listRefs(input)),
+          ),
         [WS_METHODS.vcsCreateWorktree]: (input) =>
-          // A project that tracks repositories gets a task folder, as its new worktree threads do.
-          taskFolders.createForProjectFolder(input, { projectCommands }).pipe(
-            Effect.mapError(
-              (cause) =>
-                new GitCommandError({
-                  operation: "TaskFolders.create",
-                  command: "git worktree add",
-                  cwd: input.cwd,
-                  detail: cause.detail,
-                }),
+          assertCwdAccess(input.cwd, "project:source.write").pipe(
+            Effect.andThen(
+              // A project that tracks repositories gets a task folder, as its new worktree threads do.
+              taskFolders.createForProjectFolder(input, { projectCommands }).pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new GitCommandError({
+                      operation: "TaskFolders.create",
+                      command: "git worktree add",
+                      cwd: input.cwd,
+                      detail: cause.detail,
+                    }),
+                ),
+                Effect.filterOrElse(
+                  (created) => created !== null,
+                  () => gitWorkflow.createWorktree(input),
+                ),
+                Effect.tap(() => refreshGitStatus(input.cwd)),
+              ),
             ),
-            Effect.filterOrElse(
-              (created) => created !== null,
-              () => gitWorkflow.createWorktree(input),
-            ),
-            Effect.tap(() => refreshGitStatus(input.cwd)),
           ),
         [WS_METHODS.vcsRemoveWorktree]: (input) =>
-          // A thread's worktree may be a task folder: its repositories' worktrees go with it.
-          taskFolders
-            .removeIfTaskFolder({ path: input.path, force: input.force === true, projectCommands })
-            .pipe(
-              Effect.mapError(
-                (cause) =>
-                  new GitCommandError({
-                    operation: "TaskFolders.remove",
-                    command: "git worktree remove",
-                    cwd: input.cwd,
-                    detail: cause.detail,
-                  }),
-              ),
-              Effect.flatMap((removed) =>
-                removed ? Effect.void : gitWorkflow.removeWorktree(input),
-              ),
-              // No project-root refresh here: the client awaits vcs.refreshStatus right after, and a
-              // second refresh would queue behind this one and reread an unchanged repository.
-              // Subscribers of the removed checkout learn it is no longer a repository.
-              Effect.tap(() =>
-                vcsStatusBroadcaster
-                  .refreshLocalStatus(input.path)
-                  .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid),
-              ),
+          assertCwdAccess(input.cwd, "project:source.write").pipe(
+            Effect.andThen(assertPathAccess(input.path, "project:source.write")),
+            Effect.andThen(
+              // A thread's worktree may be a task folder: its repositories' worktrees go with it.
+              taskFolders
+                .removeIfTaskFolder({
+                  path: input.path,
+                  force: input.force === true,
+                  projectCommands,
+                })
+                .pipe(
+                  Effect.mapError(
+                    (cause) =>
+                      new GitCommandError({
+                        operation: "TaskFolders.remove",
+                        command: "git worktree remove",
+                        cwd: input.cwd,
+                        detail: cause.detail,
+                      }),
+                  ),
+                  Effect.flatMap((removed) =>
+                    removed ? Effect.void : gitWorkflow.removeWorktree(input),
+                  ),
+                  // No project-root refresh here: the client awaits vcs.refreshStatus right after, and a
+                  // second refresh would queue behind this one and reread an unchanged repository.
+                  // Subscribers of the removed checkout learn it is no longer a repository.
+                  Effect.tap(() =>
+                    vcsStatusBroadcaster
+                      .refreshLocalStatus(input.path)
+                      .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid),
+                  ),
+                ),
             ),
+          ),
         [WS_METHODS.vcsCreateRef]: (input) =>
-          (input.switchRef
-            ? assertCheckoutIdle("GitWorkflowService.createRef", input.cwd)
-            : Effect.void
-          ).pipe(
+          assertCwdAccess(input.cwd, "project:source.write").pipe(
+            Effect.andThen(
+              input.switchRef
+                ? assertCheckoutIdle("GitWorkflowService.createRef", input.cwd)
+                : Effect.void,
+            ),
             Effect.andThen(gitWorkflow.createRef(input)),
             Effect.tap(() =>
               input.switchRef
@@ -3713,17 +3915,31 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.vcsSwitchRef]: (input) =>
-          assertCheckoutIdle("GitWorkflowService.switchRef", input.cwd).pipe(
+          assertCwdAccess(input.cwd, "project:source.write").pipe(
+            Effect.andThen(assertCheckoutIdle("GitWorkflowService.switchRef", input.cwd)),
             Effect.andThen(gitWorkflow.switchRef(input)),
             Effect.tap(() => vcsStatusBroadcaster.refreshAfterCheckout(input.cwd)),
           ),
         [WS_METHODS.vcsInit]: (input) =>
-          vcsProvisioning.initRepository(input).pipe(Effect.tap(() => refreshGitStatus(input.cwd))),
-        [WS_METHODS.reviewGetBranchCommits]: (input) => review.getBranchCommits(input),
-        [WS_METHODS.reviewGetDiffPreview]: (input) => review.getDiffPreview(input),
-        [WS_METHODS.reviewGetDiffFileContents]: (input) => review.getDiffFileContents(input),
+          assertCwdAccess(input.cwd, "project:source.write").pipe(
+            Effect.andThen(vcsProvisioning.initRepository(input)),
+            Effect.tap(() => refreshGitStatus(input.cwd)),
+          ),
+        [WS_METHODS.reviewGetBranchCommits]: (input) =>
+          assertCwdAccess(input.cwd, "project:read").pipe(
+            Effect.andThen(review.getBranchCommits(input)),
+          ),
+        [WS_METHODS.reviewGetDiffPreview]: (input) =>
+          assertCwdAccess(input.cwd, "project:read").pipe(
+            Effect.andThen(review.getDiffPreview(input)),
+          ),
+        [WS_METHODS.reviewGetDiffFileContents]: (input) =>
+          assertCwdAccess(input.cwd, "project:read").pipe(
+            Effect.andThen(review.getDiffFileContents(input)),
+          ),
         [WS_METHODS.terminalOpen]: (input) =>
-          prepareTerminalLaunch(input).pipe(
+          guardTerminalLaunch(input).pipe(
+            Effect.flatMap((guardedInput) => prepareTerminalLaunch(guardedInput)),
             Effect.flatMap((launch) =>
               terminalManager
                 .open(launch.input)
@@ -3732,7 +3948,8 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.terminalAttach]: (input, metadata) =>
           Stream.unwrap(
-            prepareTerminalLaunch(input).pipe(
+            guardTerminalLaunch(input).pipe(
+              Effect.flatMap((guardedInput) => prepareTerminalLaunch(guardedInput)),
               Effect.map((launch) =>
                 terminalManager
                   .attachOutputStream(launch.input, terminalViewerId(metadata))

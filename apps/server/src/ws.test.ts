@@ -96,6 +96,7 @@ import * as DocumentText from "./provider/DocumentText.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProjectAccess from "./access/ProjectAccess.ts";
+import * as ProjectPaths from "./access/ProjectPaths.ts";
 import * as ResourceResolver from "./access/ResourceResolver.ts";
 import * as Principals from "./persistence/Principals.ts";
 import * as Memberships from "./persistence/Memberships.ts";
@@ -923,6 +924,11 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
   Layer.mock(TaskFolders.TaskFolders)({}),
   Layer.mock(WorkspaceFileSystem.WorkspaceFileSystem)({}),
   Layer.mock(WorktreeSetupTracker.WorktreeSetupTracker)({}),
+  Layer.mock(ProjectPaths.ProjectPaths)({
+    assertPath: (_actor, targetPath) =>
+      Effect.succeed({ realPath: targetPath, projectId: undefined }),
+    assertCwd: (_actor, cwd) => Effect.succeed({ realPath: cwd, projectId: undefined }),
+  }),
   FeatureFlags.layerTest(),
 );
 

@@ -6,6 +6,7 @@ import {
   AuthFilesystemReadScope,
   AuthOrchestrationReadScope,
   AuthSessionId,
+  AuthTerminalOperateScope,
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
   EnvironmentHttpApi,
@@ -44,6 +45,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
 import * as ProjectAccess from "./access/ProjectAccess.ts";
+import * as ProjectPaths from "./access/ProjectPaths.ts";
 import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
 import * as EventSink from "./orchestration-v2/EventSink.ts";
 import * as EventStore from "./orchestration-v2/EventStore.ts";
@@ -860,6 +862,8 @@ describe("Projects list and search filtering", () => {
 
         const tested = [
           WS_METHODS.projectsListEntries,
+          WS_METHODS.projectsReadFile,
+          WS_METHODS.terminalOpen,
           ORCHESTRATION_V2_WS_METHODS.searchThreads,
         ] as const;
         const group = WsRpcGroup.omit(
@@ -875,14 +879,46 @@ describe("Projects list and search filtering", () => {
         const scopes: ReadonlyArray<AuthEnvironmentScope> = [
           AuthOrchestrationReadScope,
           AuthFilesystemReadScope,
+          AuthTerminalOperateScope,
         ];
         const listedCwds: Array<string> = [];
+        const readRequests: Array<{ readonly cwd: string; readonly relativePath: string }> = [];
+        const openedTerminals: Array<{
+          readonly threadId: string;
+          readonly cwd: string;
+          readonly env: Record<string, string> | undefined;
+        }> = [];
 
         const threadSearch = yield* ThreadSearch.ThreadSearch;
+        const serverConfigLayer = ServerConfig.layerTest(process.cwd(), {
+          prefix: "t3-shell-filter-",
+        }).pipe(Layer.provide(NodeServices.layer));
+        const accessLayer = ProjectAccess.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Principals.layer,
+              Memberships.layer,
+              Layer.succeed(ProjectStore.ProjectStoreV2, projects),
+            ),
+          ),
+          Layer.provide(Layer.succeed(SqlClient.SqlClient, sql)),
+        );
+        const projectPathsLayer = ProjectPaths.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              accessLayer,
+              Layer.succeed(ProjectStore.ProjectStoreV2, projects),
+              serverConfigLayer,
+              Layer.succeed(SqlClient.SqlClient, sql),
+              NodeServices.layer,
+            ),
+          ),
+        );
         const unusedServices = Layer.mergeAll(
           Layer.succeed(SqlClient.SqlClient, sql),
           Layer.succeed(ProjectStore.ProjectStoreV2, projects),
           Layer.succeed(ThreadSearch.ThreadSearch, threadSearch),
+          projectPathsLayer,
           Layer.mock(WorkspaceEntries.WorkspaceEntries)({
             list: (input) =>
               Effect.sync(() => {
@@ -890,7 +926,16 @@ describe("Projects list and search filtering", () => {
                 return { entries: [], truncated: false };
               }),
           }),
-          Layer.mock(ThreadManagement.ThreadManagementService)({}),
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (threadId) =>
+              Effect.succeed(
+                threadId === THREAD_ALLOWED
+                  ? makeThreadShell(THREAD_ALLOWED, PROJECT_ALLOWED)
+                  : threadId === THREAD_FOREIGN
+                    ? makeThreadShell(THREAD_FOREIGN, PROJECT_FOREIGN)
+                    : null,
+              ),
+          }),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
           Layer.mock(OrchestrationEventStore.OrchestrationEventStore)({
             latestApplicationSequence: Effect.succeed(10),
@@ -938,7 +983,29 @@ describe("Projects list and search filtering", () => {
           Layer.mock(ReviewService.ReviewService)({}),
           Layer.mock(VcsProvisioningService.VcsProvisioningService)({}),
           Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
-          Layer.mock(TerminalManager.TerminalManager)({}),
+          Layer.mock(TerminalManager.TerminalManager)({
+            open: (input) =>
+              Effect.sync(() => {
+                openedTerminals.push({
+                  threadId: input.threadId,
+                  cwd: input.cwd,
+                  env: input.env,
+                });
+                return {
+                  threadId: input.threadId,
+                  terminalId: input.terminalId,
+                  cwd: input.cwd,
+                  worktreePath: input.worktreePath ?? null,
+                  status: "running",
+                  pid: 1234,
+                  history: "",
+                  exitCode: null,
+                  exitSignal: null,
+                  label: "shell",
+                  updatedAt: NOW_ISO,
+                };
+              }),
+          }),
           Layer.mock(PreviewManager.PreviewManager)({}),
           Layer.mock(PortScanner.PortDiscovery)({ trackAgent: () => () => undefined }),
           Layer.mock(ProviderRegistry.ProviderRegistry)({}),
@@ -951,9 +1018,7 @@ describe("Projects list and search filtering", () => {
           Layer.mock(ProviderInstallation.ProviderInstallation)({}),
           Layer.mock(ServerSelfUpdate.ServerSelfUpdate)({}),
           Layer.mock(NpmRelease.NpmRelease)({}),
-          ServerConfig.layerTest(process.cwd(), { prefix: "t3-shell-filter-" }).pipe(
-            Layer.provide(NodeServices.layer),
-          ),
+          serverConfigLayer,
           Layer.mock(ServerLifecycleEvents.ServerLifecycleEvents)({}),
           Layer.mock(StorageCleanup.StorageCleanup)({}),
           Layer.mock(DatabaseStorage.DatabaseStorage)({}),
@@ -966,7 +1031,18 @@ describe("Projects list and search filtering", () => {
           Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({}),
           Layer.mock(WorkspaceFolders.WorkspaceFolders)({}),
           Layer.mock(TaskFolders.TaskFolders)({}),
-          Layer.mock(WorkspaceFileSystem.WorkspaceFileSystem)({}),
+          Layer.mock(WorkspaceFileSystem.WorkspaceFileSystem)({
+            readFile: (input) =>
+              Effect.sync(() => {
+                readRequests.push({ cwd: input.cwd, relativePath: input.relativePath });
+                return {
+                  relativePath: input.relativePath,
+                  contents: "ok",
+                  byteLength: 2,
+                  truncated: false,
+                };
+              }),
+          }),
           Layer.mock(ServerEnvironment.ServerEnvironment)({}),
           Layer.mock(BackgroundPolicy.BackgroundPolicy)({}),
           Layer.mock(EnvironmentAuth.EnvironmentAuth)({}),
@@ -1007,39 +1083,126 @@ describe("Projects list and search filtering", () => {
           isOwner: false,
           roles: new Map([[PROJECT_ALLOWED, "viewer"]]),
         };
+        const devActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("dev-rpc"),
+          subject: "dev",
+          scopes,
+          principalId: PrincipalId.make("principal-dev"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[PROJECT_ALLOWED, "developer"]]),
+        };
 
-        const narrowedClient = yield* RpcTest.makeClient(group).pipe(
-          Effect.provide(
-            layerWsRpc(
-              {
-                sessionId: viewerActor.sessionId,
-                subject: viewerActor.subject,
-                method: "browser-session-cookie",
-                scopes,
-                ...(viewerActor.principalId === undefined
-                  ? {}
-                  : { principalId: viewerActor.principalId }),
-                ...(viewerActor.binding === undefined ? {} : { binding: viewerActor.binding }),
-              },
-              {},
-              {} as ServerBrowser.ServerBrowser["Service"],
-              () => Effect.void,
-              { secretReferences: false },
-              viewerActor,
-            ).pipe(Layer.provide(unusedServices), Layer.merge(RpcAuthorization.layer(scopes))),
-          ),
-        );
+        const makeActorClient = (actor?: ProjectAccess.AccessActor) =>
+          RpcTest.makeClient(group).pipe(
+            Effect.provide(
+              layerWsRpc(
+                {
+                  sessionId: actor?.sessionId ?? AuthSessionId.make("owner-rpc"),
+                  subject: actor?.subject ?? "owner",
+                  method: "browser-session-cookie",
+                  scopes,
+                  ...(actor?.principalId === undefined ? {} : { principalId: actor.principalId }),
+                  ...(actor?.binding === undefined ? {} : { binding: actor.binding }),
+                },
+                {},
+                {} as ServerBrowser.ServerBrowser["Service"],
+                () => Effect.void,
+                { secretReferences: false },
+                actor,
+              ).pipe(Layer.provide(unusedServices), Layer.merge(RpcAuthorization.layer(scopes))),
+            ),
+          );
 
-        // Accessible cwd passes; foreign cwd is denied.
+        const narrowedClient = yield* makeActorClient(viewerActor);
+        const devClient = yield* makeActorClient(devActor);
+
+        // Accessible cwd passes; foreign cwd is denied with project_forbidden.
         yield* narrowedClient[WS_METHODS.projectsListEntries]({ cwd: projectA.workspaceRoot });
         const deniedEntries = yield* narrowedClient[WS_METHODS.projectsListEntries]({
           cwd: projectB.workspaceRoot,
         }).pipe(Effect.flip);
         expect(deniedEntries).toMatchObject({
-          _tag: "EnvironmentAuthorizationError",
+          _tag: "project_forbidden",
+          projectId: PROJECT_FOREIGN,
           requiredPermission: "project:read",
         });
         expect(listedCwds).toEqual([projectA.workspaceRoot]);
+
+        // projectsReadFile allows own project files and refuses foreign cwd, absolute foreign path, and '..' escape.
+        yield* narrowedClient[WS_METHODS.projectsReadFile]({
+          cwd: projectA.workspaceRoot,
+          relativePath: "README.md",
+        });
+        const deniedReadCwd = yield* narrowedClient[WS_METHODS.projectsReadFile]({
+          cwd: projectB.workspaceRoot,
+          relativePath: "secret.txt",
+        }).pipe(Effect.flip);
+        expect(deniedReadCwd).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: PROJECT_FOREIGN,
+          requiredPermission: "project:read",
+        });
+        const deniedReadAbsolute = yield* narrowedClient[WS_METHODS.projectsReadFile]({
+          cwd: projectA.workspaceRoot,
+          relativePath: `${projectB.workspaceRoot}/secret.txt`,
+        }).pipe(Effect.flip);
+        expect(deniedReadAbsolute).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: PROJECT_FOREIGN,
+          requiredPermission: "project:read",
+        });
+        const deniedReadTraversal = yield* narrowedClient[WS_METHODS.projectsReadFile]({
+          cwd: projectA.workspaceRoot,
+          relativePath: "../foreign/secret.txt",
+        }).pipe(Effect.flip);
+        expect(deniedReadTraversal).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: PROJECT_FOREIGN,
+          requiredPermission: "project:read",
+        });
+        expect(readRequests).toEqual([{ cwd: projectA.workspaceRoot, relativePath: "README.md" }]);
+
+        // terminalOpen enforces thread project cwd and injects T3_PROJECT_ID / T3_MEMBER_ID.
+        yield* devClient[WS_METHODS.terminalOpen]({
+          threadId: THREAD_ALLOWED,
+          terminalId: "term-1",
+          cwd: projectA.workspaceRoot,
+          env: { T3_PROJECT_ID: "spoofed", T3_MEMBER_ID: "spoofed", CUSTOM: "yes" },
+        });
+        expect(openedTerminals).toEqual([
+          {
+            threadId: THREAD_ALLOWED,
+            cwd: projectA.workspaceRoot,
+            env: {
+              CUSTOM: "yes",
+              T3_PROJECT_ID: PROJECT_ALLOWED,
+              T3_MEMBER_ID: devActor.principalId,
+            },
+          },
+        ]);
+
+        const deniedTerminalForeignCwd = yield* devClient[WS_METHODS.terminalOpen]({
+          threadId: THREAD_ALLOWED,
+          terminalId: "term-2",
+          cwd: projectB.workspaceRoot,
+        }).pipe(Effect.flip);
+        expect(deniedTerminalForeignCwd).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: PROJECT_FOREIGN,
+          requiredPermission: "project:terminal.operate",
+        });
+
+        const deniedViewerTerminal = yield* narrowedClient[WS_METHODS.terminalOpen]({
+          threadId: THREAD_ALLOWED,
+          terminalId: "term-3",
+          cwd: projectA.workspaceRoot,
+        }).pipe(Effect.flip);
+        expect(deniedViewerTerminal).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: PROJECT_ALLOWED,
+          requiredPermission: "project:terminal.operate",
+        });
 
         // searchThreads without explicit projectIds is narrowed to PROJECT_ALLOWED.
         const narrowedSearch = yield* narrowedClient[ORCHESTRATION_V2_WS_METHODS.searchThreads]({
@@ -1047,23 +1210,14 @@ describe("Projects list and search filtering", () => {
         });
         expect(narrowedSearch.matches.map((m) => m.projectId)).toEqual([PROJECT_ALLOWED]);
 
-        // Owner / legacy actor sees both projects in searchThreads.
-        const ownerClient = yield* RpcTest.makeClient(group).pipe(
-          Effect.provide(
-            layerWsRpc(
-              {
-                sessionId: AuthSessionId.make("owner-rpc"),
-                subject: "owner",
-                method: "browser-session-cookie",
-                scopes,
-              },
-              {},
-              {} as ServerBrowser.ServerBrowser["Service"],
-              () => Effect.void,
-              { secretReferences: false },
-            ).pipe(Layer.provide(unusedServices), Layer.merge(RpcAuthorization.layer(scopes))),
-          ),
-        );
+        // Owner / legacy actor sees both projects and keeps arbitrary terminal cwd behavior.
+        const ownerClient = yield* makeActorClient();
+        yield* ownerClient[WS_METHODS.terminalOpen]({
+          threadId: THREAD_ALLOWED,
+          terminalId: "term-owner",
+          cwd: "/tmp/arbitrary-owner-cwd",
+        });
+        expect(openedTerminals.at(-1)?.cwd).toBe("/tmp/arbitrary-owner-cwd");
         const ownerSearch = yield* ownerClient[ORCHESTRATION_V2_WS_METHODS.searchThreads]({
           query: "sharedneedle",
         });

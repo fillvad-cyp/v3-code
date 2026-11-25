@@ -185,6 +185,7 @@ import {
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as EnvironmentAuthPolicy from "./auth/EnvironmentAuthPolicy.ts";
 import * as ProjectAccess from "./access/ProjectAccess.ts";
+import * as ProjectPaths from "./access/ProjectPaths.ts";
 import * as ResourceResolver from "./access/ResourceResolver.ts";
 import * as InvitationService from "./identity/InvitationService.ts";
 import * as MembershipService from "./identity/MembershipService.ts";
@@ -601,9 +602,16 @@ const layerAuth = EnvironmentAuth.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
 );
 
-const layerAccess = Layer.merge(
-  ProjectAccess.layer.pipe(
-    Layer.provide(layerIdentityRepositories),
+const layerProjectAccess = ProjectAccess.layer.pipe(
+  Layer.provide(layerIdentityRepositories),
+  Layer.provide(ProjectStore.layer),
+  Layer.provide(layerPersistence),
+);
+
+const layerAccess = Layer.mergeAll(
+  layerProjectAccess,
+  ProjectPaths.layer.pipe(
+    Layer.provide(layerProjectAccess),
     Layer.provide(ProjectStore.layer),
     Layer.provide(layerPersistence),
   ),

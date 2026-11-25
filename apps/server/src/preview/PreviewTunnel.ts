@@ -15,6 +15,7 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import type * as Socket from "effect/socket/Socket";
 
 import { authenticateMediaRequest } from "../auth/http.ts";
+import * as ProjectAccess from "../access/ProjectAccess.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import { requestUrl } from "../requestUrl.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
@@ -167,6 +168,29 @@ const handler = Effect.gen(function* () {
     return HttpServerResponse.text("Bad Request", { status: 400 });
   }
   const session = yield* authenticateMediaRequest(AuthTerminalOperateScope);
+  const rawProjectId = Option.getOrUndefined(url)?.searchParams.get("projectId")?.trim();
+  if (rawProjectId !== undefined && rawProjectId.length > 0) {
+    const projectAccess = yield* ProjectAccess.ProjectAccess;
+    const authorization = yield* projectAccess.resolve(session).pipe(
+      Effect.flatMap((actor) =>
+        projectAccess.assert(actor, rawProjectId, "project:preview.operate"),
+      ),
+      Effect.as<HttpServerResponse.HttpServerResponse | undefined>(undefined),
+      Effect.catchTags({
+        AccessResolveError: (error) =>
+          Effect.succeed(
+            error.reason === "repository_error"
+              ? HttpServerResponse.text("Internal Server Error", { status: 500 })
+              : HttpServerResponse.text(error.message, { status: 401 }),
+          ),
+        project_forbidden: (error) =>
+          Effect.succeed(HttpServerResponse.text(error.message, { status: 403 })),
+      }),
+    );
+    if (authorization !== undefined) {
+      return authorization;
+    }
+  }
   const sessions = yield* SessionStore.SessionStore;
   const tunnel = yield* PreviewTunnel;
   const connection = NodeHttpServerRequest.toIncomingMessage(request).socket;
