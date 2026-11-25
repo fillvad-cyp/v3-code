@@ -30,14 +30,18 @@ import {
   AuthTerminalReadScope,
   type AuthEnvironmentScope,
   EnvironmentAuthorizationError,
+  type ProjectForbiddenError,
   RpcScopeAuthorization,
   WS_METHODS,
   WsRpcGroup,
+  intersectScopes,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
+import type * as ProjectAccess from "../access/ProjectAccess.ts";
+import type * as ResourceResolver from "../access/ResourceResolver.ts";
 import { isProviderSignOutPrompt } from "../orchestration-v2/CommandPolicy.ts";
 
 type WsRpcMethod = RpcGroup.Rpcs<typeof WsRpcGroup>["_tag"];
@@ -358,6 +362,56 @@ const requiredScopesForRpcCall = (
     : scopes;
 };
 
+export interface RpcAccessGate {
+  readonly actor: ProjectAccess.AccessActor;
+  readonly check: (
+    method: string,
+    payload: unknown,
+  ) => Effect.Effect<void, ProjectForbiddenError | EnvironmentAuthorizationError>;
+}
+
+/**
+ * Resolves the target project(s) and capability for an RPC call and asserts
+ * project access. Owner and environment-binding actors pass without lookups;
+ * missing threads pass through so snapshot handlers answer 404.
+ */
+export function makeAccessGate(input: {
+  readonly actor: ProjectAccess.AccessActor;
+  readonly access: Pick<ProjectAccess.ProjectAccess["Service"], "accessibleProjectIds" | "assert">;
+  readonly resolver: Pick<
+    ResourceResolver.ResourceResolver["Service"],
+    "capabilityForRpcCall" | "resourcesForRpcCall" | "resolveThreadProject"
+  >;
+}): RpcAccessGate {
+  const check = Effect.fnUntraced(function* (method: string, payload: unknown) {
+    const capability = input.resolver.capabilityForRpcCall(method, payload);
+    if (capability === undefined) return;
+    if (input.access.accessibleProjectIds(input.actor) === undefined) return;
+    const resources = input.resolver.resourcesForRpcCall(method, payload);
+    if (resources === undefined) return;
+
+    if (resources.projectId !== undefined) {
+      yield* input.access.assert(input.actor, resources.projectId, capability);
+    }
+    if (resources.projectIds !== undefined) {
+      for (const projectId of resources.projectIds) {
+        yield* input.access.assert(input.actor, projectId, capability);
+      }
+    }
+    if (resources.threadId !== undefined) {
+      const threadProjectId = yield* input.resolver.resolveThreadProject(resources.threadId);
+      if (threadProjectId !== undefined && threadProjectId !== resources.projectId) {
+        yield* input.access.assert(input.actor, threadProjectId, capability);
+      }
+    }
+  });
+
+  return {
+    actor: input.actor,
+    check,
+  };
+}
+
 /**
  * `onAuthorized` runs once after an authorized request succeeds; for a stream
  * RPC, that is when the stream completes. Every RPC passes through here, so it
@@ -366,14 +420,21 @@ const requiredScopesForRpcCall = (
 export const layer = (
   scopes: ReadonlyArray<AuthEnvironmentScope>,
   onAuthorized?: (method: string, payload: unknown) => Effect.Effect<void>,
+  access?: RpcAccessGate,
 ) =>
   Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {
+    const effectiveScopes =
+      access === undefined || access.actor.isOwner || access.actor.ceiling === undefined
+        ? scopes
+        : intersectScopes(scopes, access.actor.ceiling);
     const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);
-    const requiredScope = requiredScopes.find((scope) => !scopes.includes(scope));
+    const requiredScope = requiredScopes.find((scope) => !effectiveScopes.includes(scope));
     if (requiredScope !== undefined) return Effect.fail(rpcAuthorizationError(requiredScope));
+    const authorized =
+      access === undefined ? effect : Effect.andThen(access.check(rpc._tag, payload), effect);
     return onAuthorized === undefined
-      ? effect
-      : Effect.tap(effect, () => onAuthorized(rpc._tag, payload));
+      ? authorized
+      : Effect.tap(authorized, () => onAuthorized(rpc._tag, payload));
   });
 
 /** Retrying can install or restart tools even though ordinary listing is readable. */

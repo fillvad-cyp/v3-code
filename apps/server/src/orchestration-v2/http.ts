@@ -14,11 +14,13 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import {
   annotateEnvironmentRequest,
+  failEnvironmentAuthInvalid,
   failEnvironmentInternal,
   failEnvironmentInvalidRequest,
   failEnvironmentNotFound,
   requireEnvironmentScope,
 } from "../auth/http.ts";
+import * as ProjectAccess from "../access/ProjectAccess.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
@@ -66,6 +68,7 @@ export const layer = HttpApiBuilder.group(
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+    const projectAccess = yield* ProjectAccess.ProjectAccess;
 
     const enrichProjectShells = Effect.fn("http.orchestration.enrichProjectShells")(
       (projects: ReadonlyArray<OrchestrationProjectShell>) =>
@@ -87,6 +90,7 @@ export const layer = HttpApiBuilder.group(
       function* (options: {
         readonly omitIdleSubagents: boolean;
         readonly omitOlderSettled: boolean;
+        readonly allowedProjectIds?: ReadonlySet<string> | undefined;
       }) {
         const { snapshot } = yield* loadSubscriberShellSnapshot({
           sql,
@@ -99,6 +103,7 @@ export const layer = HttpApiBuilder.group(
           listProjects: projectStore.listShells(),
           latestSequence: applicationEvents.latestApplicationSequence,
           options,
+          allowedProjectIds: options.allowedProjectIds,
         });
         const projects = yield* enrichProjectShells(snapshot.projects);
         return { ...snapshot, projects, projectIdentities: projectIdentitiesDigest(projects) };
@@ -106,11 +111,14 @@ export const layer = HttpApiBuilder.group(
     );
 
     // A client that holds rows names their cursor; a small answer tells it to keep them.
-    const answerShellSnapshot = Effect.fn("http.orchestration.answerShellSnapshot")((query: {
-      readonly omitIdleSubagents?: string;
-      readonly omitOlderSettled?: string;
-      readonly resumeFrom?: string;
-    }) => {
+    const answerShellSnapshot = Effect.fn("http.orchestration.answerShellSnapshot")((
+      query: {
+        readonly omitIdleSubagents?: string;
+        readonly omitOlderSettled?: string;
+        readonly resumeFrom?: string;
+      },
+      allowedProjectIds: ReadonlySet<string> | undefined,
+    ) => {
       const resumeFrom = query.resumeFrom === undefined ? Number.NaN : Number(query.resumeFrom);
       return loadShellUnlessResumable({
         events: applicationEvents,
@@ -118,6 +126,7 @@ export const layer = HttpApiBuilder.group(
         loadSnapshot: loadShellSnapshot({
           omitIdleSubagents: query.omitIdleSubagents === "1",
           omitOlderSettled: query.omitOlderSettled === "1",
+          allowedProjectIds,
         }),
       });
     });
@@ -189,8 +198,27 @@ export const layer = HttpApiBuilder.group(
         "shellSnapshot",
         Effect.fn("environment.orchestration.shellSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          return yield* answerShellSnapshot(args.query).pipe(
+          const session = yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const actor = yield* projectAccess
+            .resolve({
+              sessionId: session.sessionId,
+              subject: session.subject,
+              scopes: Array.from(session.scopes),
+              principalId: session.principalId,
+              binding: session.binding,
+            })
+            .pipe(
+              Effect.catchTags({
+                AccessResolveError: (error) =>
+                  error.reason === "repository_error"
+                    ? failEnvironmentInternal("orchestration_snapshot_failed", error)
+                    : failEnvironmentAuthInvalid("invalid_credential"),
+              }),
+            );
+          return yield* answerShellSnapshot(
+            args.query,
+            projectAccess.accessibleProjectIds(actor),
+          ).pipe(
             traceLocalHandlerWork,
             Effect.catch((cause) =>
               failEnvironmentInternal("orchestration_snapshot_failed", cause),

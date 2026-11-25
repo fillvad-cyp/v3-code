@@ -87,7 +87,7 @@ function canActor(
   return role !== undefined && roleHasCapability(role, capability);
 }
 
-function accessibleProjectIdsForActor(actor: AccessActor): ReadonlySet<string> | undefined {
+export function accessibleProjectIdsForActor(actor: AccessActor): ReadonlySet<string> | undefined {
   if (actor.isOwner || passesProjectChecks(actor.binding)) {
     return undefined;
   }

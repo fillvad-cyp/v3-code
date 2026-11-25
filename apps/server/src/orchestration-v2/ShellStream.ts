@@ -1,6 +1,7 @@
 import type {
   ApplicationStoredEvent,
   OrchestrationProjectShell,
+  OrchestrationV2DomainEvent,
   OrchestrationV2OlderSettledCount,
   OrchestrationV2OlderSettledThreads,
   OrchestrationV2ShellSnapshot,
@@ -420,32 +421,56 @@ export const loadSubscriberShellSnapshot = Effect.fn("ShellStream.loadSubscriber
     readonly listProjects: Effect.Effect<ReadonlyArray<OrchestrationProjectShell>, E4>;
     readonly latestSequence: Effect.Effect<number, E5>;
     readonly options: ShellSubscriberOptions;
+    readonly allowedProjectIds?: ReadonlySet<string> | undefined;
   }) {
+    const allowed = input.allowedProjectIds;
     const trims = input.options.omitIdleSubagents || input.options.omitOlderSettled;
     const read = yield* input.sql
       .withTransaction(
         Effect.gen(function* () {
-          const index = trims ? yield* input.listShellIndex : null;
+          const rawIndex = trims ? yield* input.listShellIndex : null;
+          const index =
+            rawIndex === null || allowed === undefined
+              ? rawIndex
+              : rawIndex.filter((entry) => allowed.has(entry.projectId));
+          const allProjects = yield* input.listProjects;
           return {
             index,
             decodeThreads: yield* input.readThreads(
               index === null ? undefined : shellSubscriberThreadIds(index, input.options),
             ),
-            projects: yield* input.listProjects,
+            projects:
+              allowed === undefined
+                ? allProjects
+                : allProjects.filter((project) => allowed.has(project.id)),
             snapshotSequence: yield* input.latestSequence,
           };
         }),
       )
       .pipe(NodeSqliteClient.readOnly);
+    const decodedThreads = yield* read.decodeThreads;
+    const filteredThreads =
+      allowed === undefined
+        ? decodedThreads
+        : {
+            ...decodedThreads,
+            threads: decodedThreads.threads.filter((thread) => allowed.has(thread.projectId)),
+            archivedThreads: decodedThreads.archivedThreads.filter((thread) =>
+              allowed.has(thread.projectId),
+            ),
+          };
     const base = buildActiveShellSnapshot({
       projects: read.projects,
-      threads: yield* read.decodeThreads,
+      threads: filteredThreads,
       snapshotSequence: read.snapshotSequence,
     });
-    const facts = shellTrimFacts(read.index ?? base.threads);
+    const factRows = read.index ?? base.threads;
+    const facts = shellTrimFacts(factRows);
+    const accessibleThreadIds = new Set<string>(factRows.map((row) => row.id));
     return {
       snapshot: trimShellSnapshot(base, facts, { ...input.options, now: yield* DateTime.now }),
       subagentThreadIds: facts.subagentThreadIds,
+      accessibleThreadIds,
     };
   },
 );
@@ -818,4 +843,183 @@ export function shellStreamItemFromThreadShell(input: {
     location: "active",
     threadId: input.stored.event.threadId,
   };
+}
+
+/**
+ * Extracts the direct project id carried by a domain event payload, if any.
+ * Exhaustive over every `OrchestrationV2DomainEvent` variant so new events cannot
+ * bypass project filtering silently.
+ */
+export function domainEventProjectId(event: OrchestrationV2DomainEvent): ProjectId | undefined {
+  switch (event.type) {
+    case "thread.created":
+    case "thread.archived":
+    case "thread.unarchived":
+    case "thread.deleted":
+    case "thread.settled":
+    case "thread.unsettled":
+    case "thread.snoozed":
+    case "thread.unsnoozed":
+    case "thread.pinned":
+    case "thread.auto-settle-set":
+    case "thread.unpinned":
+    case "thread.pin-reordered":
+    case "thread.active-reordered":
+    case "thread.tags-updated":
+    case "thread.visited":
+    case "thread.marked-unread":
+    case "thread.metadata-updated":
+    case "thread.pull-request-synced":
+    case "thread.issue-synced":
+    case "thread.runtime-mode-updated":
+    case "thread.interaction-mode-updated":
+    case "thread.model-selection-updated":
+    case "thread.provider-switched":
+    case "thread.guest-share-updated":
+      return event.payload.projectId;
+    case "thread.pull-request-link-updated":
+    case "thread.visit-recorded":
+    case "run.created":
+    case "run.updated":
+    case "run.background-work-cancelled":
+    case "run.output-submitted":
+    case "run-attempt.created":
+    case "run-attempt.updated":
+    case "node.updated":
+    case "subagent.updated":
+    case "provider-session.attached":
+    case "provider-session.updated":
+    case "provider-session.detached":
+    case "provider-thread.updated":
+    case "provider-turn.updated":
+    case "runtime-request.updated":
+    case "message.updated":
+    case "turn-item.updated":
+    case "plan.updated":
+    case "checkpoint-scope.created":
+    case "checkpoint.captured":
+    case "checkpoint.rollback-requested":
+    case "context-handoff.updated":
+    case "context-transfer.created":
+    case "context-transfer.updated":
+      return undefined;
+    default: {
+      const _exhaustive: never = event;
+      return _exhaustive;
+    }
+  }
+}
+
+export function shouldPublishShellApplicationEventForProjects(
+  stored: ApplicationStoredEvent,
+  allowedProjectIds: ReadonlySet<string> | undefined,
+  knownThreadProjects?: ReadonlyMap<string, string>,
+  unknownThreadPolicy: "allow" | "deny" = "deny",
+): boolean {
+  if (allowedProjectIds === undefined) return true;
+  if ("aggregateKind" in stored) {
+    switch (stored.type) {
+      case "project.created":
+      case "project.meta-updated":
+      case "project.deleted":
+        return allowedProjectIds.has(stored.aggregateId);
+      default: {
+        const _exhaustive: never = stored;
+        return _exhaustive;
+      }
+    }
+  }
+  const directProjectId = domainEventProjectId(stored.event);
+  if (directProjectId !== undefined) {
+    return allowedProjectIds.has(directProjectId);
+  }
+  const knownProjectId = knownThreadProjects?.get(stored.event.threadId);
+  if (knownProjectId !== undefined) {
+    return allowedProjectIds.has(knownProjectId);
+  }
+  return unknownThreadPolicy === "allow";
+}
+
+export function filterShellSnapshot(
+  snapshot: OrchestrationV2ShellSnapshot,
+  allowedProjectIds: ReadonlySet<string> | undefined,
+): OrchestrationV2ShellSnapshot {
+  if (allowedProjectIds === undefined) return snapshot;
+  const projects = snapshot.projects.filter((project) => allowedProjectIds.has(project.id));
+  const threads = snapshot.threads.filter((thread) => allowedProjectIds.has(thread.projectId));
+  const archivedThreads = snapshot.archivedThreads.filter((thread) =>
+    allowedProjectIds.has(thread.projectId),
+  );
+  if (snapshot.olderSettled === undefined) {
+    return { ...snapshot, projects, threads, archivedThreads };
+  }
+  return {
+    ...snapshot,
+    projects,
+    threads,
+    archivedThreads,
+    olderSettled: {
+      ...snapshot.olderSettled,
+      counts: snapshot.olderSettled.counts.filter((entry) =>
+        allowedProjectIds.has(entry.projectId),
+      ),
+    },
+  };
+}
+
+export function filterShellStreamItem(
+  item: OrchestrationV2ShellStreamItem,
+  allowedProjectIds: ReadonlySet<string> | undefined,
+  accessibleThreadIds?: ReadonlySet<string>,
+): OrchestrationV2ShellStreamItem | null {
+  if (allowedProjectIds === undefined) return item;
+  switch (item.kind) {
+    case "synchronized":
+    case "snapshot-required":
+      return item;
+    case "snapshot": {
+      const snapshot = filterShellSnapshot(item.snapshot, allowedProjectIds);
+      if (item.resolvedRepositoryIdentityRoots === undefined) {
+        return { ...item, snapshot };
+      }
+      const allowedRoots = new Set(snapshot.projects.map((project) => project.workspaceRoot));
+      const resolvedRepositoryIdentityRoots = item.resolvedRepositoryIdentityRoots.filter((root) =>
+        allowedRoots.has(root),
+      );
+      if (
+        resolvedRepositoryIdentityRoots.length === 0 &&
+        snapshot.threads.length === 0 &&
+        snapshot.archivedThreads.length === 0
+      ) {
+        return null;
+      }
+      return { ...item, snapshot, resolvedRepositoryIdentityRoots };
+    }
+    case "project.updated":
+      return allowedProjectIds.has(item.project.id) ? item : null;
+    case "project.removed":
+      return allowedProjectIds.has(item.projectId) ? item : null;
+    case "thread.updated":
+      return allowedProjectIds.has(item.thread.projectId) ? item : null;
+    case "thread.removed":
+      return accessibleThreadIds?.has(item.threadId) === true ? item : null;
+    default: {
+      const _exhaustive: never = item;
+      return _exhaustive;
+    }
+  }
+}
+
+export function filterShellStream<E, R>(
+  stream: Stream.Stream<OrchestrationV2ShellStreamItem, E, R>,
+  allowedProjectIds: ReadonlySet<string> | undefined,
+  accessibleThreadIds?: ReadonlySet<string>,
+): Stream.Stream<OrchestrationV2ShellStreamItem, E, R> {
+  if (allowedProjectIds === undefined) return stream;
+  return stream.pipe(
+    Stream.flatMap((item) => {
+      const filtered = filterShellStreamItem(item, allowedProjectIds, accessibleThreadIds);
+      return Stream.fromIterable(filtered === null ? [] : [filtered]);
+    }),
+  );
 }

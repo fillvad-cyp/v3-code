@@ -184,6 +184,10 @@ import {
 } from "./cloud/config.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as EnvironmentAuthPolicy from "./auth/EnvironmentAuthPolicy.ts";
+import * as ProjectAccess from "./access/ProjectAccess.ts";
+import * as ResourceResolver from "./access/ResourceResolver.ts";
+import * as Principals from "./persistence/Principals.ts";
+import * as Memberships from "./persistence/Memberships.ts";
 import * as CloudHttp from "./cloud/http.ts";
 import * as GuestHttp from "./guest/http.ts";
 import * as PrivacyHttp from "./privacy/http.ts";
@@ -578,6 +582,17 @@ const layerAuth = EnvironmentAuth.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
 );
 
+const layerAccess = Layer.merge(
+  ProjectAccess.layer.pipe(
+    Layer.provide(Layer.merge(Principals.layer, Memberships.layer)),
+    Layer.provide(layerPersistence),
+  ),
+  ResourceResolver.layer.pipe(
+    Layer.provide(ProjectionStoreV2.layer),
+    Layer.provide(layerPersistence),
+  ),
+);
+
 const layerCloudManagedEndpointRuntime = Layer.mergeAll(
   layerRelayClient,
   CloudManagedEndpointRuntime.layer.pipe(
@@ -834,6 +849,7 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   Layer.provideMerge(CodexManagedTokenBroker.layer),
   Layer.provideMerge(layerServerEnvironment),
   Layer.provideMerge(layerAuth),
+  Layer.provideMerge(layerAccess),
   Layer.provideMerge(
     Layer.mergeAll(AssetSigner.layer, EnvironmentKeys.layer, WorkspacePreviewRevisions.layer),
   ),

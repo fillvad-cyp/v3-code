@@ -95,6 +95,10 @@ import * as DeviceService from "./device/DeviceService.ts";
 import * as DocumentText from "./provider/DocumentText.ts";
 import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
+import * as ProjectAccess from "./access/ProjectAccess.ts";
+import * as ResourceResolver from "./access/ResourceResolver.ts";
+import * as Principals from "./persistence/Principals.ts";
+import * as Memberships from "./persistence/Memberships.ts";
 import * as EnvironmentTheme from "./environmentTheme.ts";
 import * as GitWorkflowService from "./git/GitWorkflowService.ts";
 import * as HostResources from "./resourceTelemetry/HostResources.ts";
@@ -993,6 +997,8 @@ it.live.each([
         }),
         ProviderInstallationGate.layer,
         FetchHttpClient.layer,
+        ProjectAccess.layer.pipe(Layer.provide(Layer.merge(Principals.layer, Memberships.layer))),
+        ResourceResolver.layer.pipe(Layer.provide(ProjectionStore.layer)),
       );
       const context = yield* Layer.build(
         HttpRouter.serve(Ws.layer, { disableListenLog: true }).pipe(

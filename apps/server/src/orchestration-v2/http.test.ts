@@ -36,6 +36,9 @@ import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
+import * as ProjectAccess from "../access/ProjectAccess.ts";
 import { ProjectEnrichmentService } from "../project/ProjectEnrichmentService.ts";
 import * as OrchestrationHttp from "./http.ts";
 import { OrchestratorProjectionError } from "./Orchestrator.ts";
@@ -140,6 +143,7 @@ const serveOrchestrationHttp = (
         ),
         OrchestrationEventStore.layer,
         ProjectStore.layer,
+        ProjectAccess.layer.pipe(Layer.provide(Layer.merge(Principals.layer, Memberships.layer))),
       ).pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
     );
     const eventSink = Context.get(services, EventSinkV2);

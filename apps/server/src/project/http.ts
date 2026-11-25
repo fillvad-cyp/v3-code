@@ -8,10 +8,12 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import {
   annotateEnvironmentRequest,
+  failEnvironmentAuthInvalid,
   failEnvironmentInternal,
   failEnvironmentInvalidRequest,
   requireEnvironmentScope,
 } from "../auth/http.ts";
+import * as ProjectAccess from "../access/ProjectAccess.ts";
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
@@ -37,6 +39,7 @@ export const layer = HttpApiBuilder.group(
   "projects",
   Effect.fnUntraced(function* (handlers) {
     const projects = yield* ProjectService.ProjectService;
+    const projectAccess = yield* ProjectAccess.ProjectAccess;
     const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
     const projectClones = yield* ProjectCloneTracker.ProjectCloneTracker;
 
@@ -45,8 +48,35 @@ export const layer = HttpApiBuilder.group(
         "snapshot",
         Effect.fn("environment.projects.snapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const session = yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          const actor = yield* projectAccess
+            .resolve({
+              sessionId: session.sessionId,
+              subject: session.subject,
+              scopes: Array.from(session.scopes),
+              principalId: session.principalId,
+              binding: session.binding,
+            })
+            .pipe(
+              Effect.catchTags({
+                AccessResolveError: (error) =>
+                  error.reason === "repository_error"
+                    ? failEnvironmentInternal("project_snapshot_failed", error)
+                    : failEnvironmentAuthInvalid("invalid_credential"),
+              }),
+            );
+          const allowedProjectIds = projectAccess.accessibleProjectIds(actor);
           return yield* projects.snapshot.pipe(
+            Effect.map((snapshot) =>
+              allowedProjectIds === undefined
+                ? snapshot
+                : {
+                    ...snapshot,
+                    projects: snapshot.projects.filter((project) =>
+                      allowedProjectIds.has(project.id),
+                    ),
+                  },
+            ),
             traceLocalHandlerWork,
             Effect.catch((cause) => failEnvironmentInternal("project_snapshot_failed", cause)),
           );

@@ -416,10 +416,12 @@ const EnvironmentSessionRevokeErrors = [
   EnvironmentInternalError,
 ] as const;
 const EnvironmentProjectSnapshotErrors = [
+  EnvironmentAuthInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentInternalError,
 ] as const;
 const EnvironmentOrchestrationSnapshotErrors = [
+  EnvironmentAuthInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentInternalError,
 ] as const;

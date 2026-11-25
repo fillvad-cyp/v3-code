@@ -5,8 +5,10 @@ import {
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
   AuthAccessWriteScope,
+  AuthSessionId,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  PrincipalId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProjectId,
@@ -25,6 +27,7 @@ import {
   RunId,
   WS_METHODS,
   WsRpcGroup,
+  type OrchestrationV2AppThread,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -32,6 +35,11 @@ import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as RpcTest from "effect/rpc/RpcTest";
 
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ResourceResolver from "../access/ResourceResolver.ts";
 import {
   RPC_REQUIRED_SCOPES,
   requiredScopeForRpcMethod,
@@ -1029,3 +1037,325 @@ it.effect("requires provider management to send /logout through chat", () =>
     ]);
   }).pipe(Effect.scoped),
 );
+
+describe("RPC project access gate", () => {
+  const accessTags = [
+    ORCHESTRATION_V2_WS_METHODS.launchThread,
+    ORCHESTRATION_V2_WS_METHODS.getThreadProjection,
+    ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+    ORCHESTRATION_V2_WS_METHODS.searchThreads,
+  ] as const;
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof accessTags)[number]> =>
+        !(accessTags as ReadonlyArray<string>).includes(tag),
+    ),
+  );
+
+  const projectA = ProjectId.make("project-a");
+  const projectB = ProjectId.make("project-b");
+  const threadA = ThreadId.make("thread-a");
+  const threadB = ThreadId.make("thread-b");
+  const threadMissing = ThreadId.make("thread-missing");
+  const baseScopes = [AuthOrchestrationReadScope, AuthOrchestrationOperateScope] as const;
+
+  const launchPayload = (projectId: ProjectId) => ({
+    commandId: CommandId.make(`launch:${projectId}`),
+    projectId,
+    title: "Test",
+    modelSelection: {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5.4",
+    },
+    runtimeMode: "auto" as const,
+    interactionMode: "default" as const,
+    workspaceStrategy: { type: "root" as const },
+  });
+
+  const makeGateServices = (
+    threads: ReadonlyMap<string, ProjectId>,
+    onThreadLookup?: (threadId: ThreadId) => void,
+  ) =>
+    Layer.mergeAll(
+      ProjectAccess.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(Principals.PrincipalRepository, {
+              get: () => Effect.succeedNone,
+            } as unknown as Principals.PrincipalRepository["Service"]),
+            Layer.succeed(Memberships.MembershipRepository, {
+              listForPrincipal: () => Effect.succeed([]),
+            } as unknown as Memberships.MembershipRepository["Service"]),
+          ),
+        ),
+      ),
+      ResourceResolver.layer.pipe(
+        Layer.provide(
+          Layer.succeed(ProjectionStore.ProjectionStoreV2, {
+            findThread: (threadId: ThreadId) => {
+              onThreadLookup?.(threadId);
+              const projectId = threads.get(threadId);
+              return Effect.succeed(
+                projectId === undefined
+                  ? null
+                  : ({ id: threadId, projectId } as unknown as OrchestrationV2AppThread),
+              );
+            },
+          } as unknown as ProjectionStore.ProjectionStoreV2["Service"]),
+        ),
+      ),
+    );
+
+  const makeHandlers = (handled: Array<string>) =>
+    Layer.mergeAll(
+      group.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.launchThread, ({ projectId }) =>
+        Effect.sync(() => {
+          handled.push(`launch:${projectId}`);
+          return {
+            threadId: threadA,
+            resumed: false,
+            sequence: 1,
+            projection: {} as never,
+          };
+        }),
+      ),
+      group.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, ({ threadId }) =>
+        Effect.sync(() => {
+          handled.push(`get:${threadId}`);
+          return {} as never;
+        }),
+      ),
+      group.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, ({ commandId }) =>
+        Effect.sync(() => {
+          handled.push(`dispatch:${commandId}`);
+          return { sequence: 1 };
+        }),
+      ),
+      group.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.searchThreads, ({ projectIds }) =>
+        Effect.sync(() => {
+          handled.push(`search:${(projectIds ?? []).join(",")}`);
+          return { matches: [] };
+        }),
+      ),
+    );
+
+  it.effect("lets owner and legacy environment-binding actors pass without thread lookups", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const lookups: Array<string> = [];
+      const access = yield* ProjectAccess.ProjectAccess;
+      const resolver = yield* ResourceResolver.ResourceResolver;
+      const legacyActor = yield* access.resolve({
+        sessionId: AuthSessionId.make("legacy"),
+        subject: "legacy-cli",
+        scopes: baseScopes,
+      });
+      const gate = RpcAuthorization.makeAccessGate({ actor: legacyActor, access, resolver });
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(makeHandlers(handled), RpcAuthorization.layer(baseScopes, undefined, gate)),
+        ),
+      );
+
+      yield* client[ORCHESTRATION_V2_WS_METHODS.launchThread](launchPayload(projectB));
+      yield* client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({ threadId: threadB });
+      yield* client[ORCHESTRATION_V2_WS_METHODS.searchThreads]({
+        query: "hello",
+        projectIds: [projectA, projectB],
+      });
+
+      expect(handled).toEqual([
+        `launch:${projectB}`,
+        `get:${threadB}`,
+        `search:${projectA},${projectB}`,
+      ]);
+      expect(lookups).toEqual([]);
+    }).pipe(
+      Effect.provide(
+        makeGateServices(
+          new Map([
+            [threadA, projectA],
+            [threadB, projectB],
+          ]),
+          () => {
+            throw new Error("owner/legacy actor must not trigger thread lookups");
+          },
+        ),
+      ),
+      Effect.scoped,
+    ),
+  );
+
+  it.effect(
+    "blocks a viewer on launchThread of a foreign project or its own project with project_forbidden",
+    () =>
+      Effect.gen(function* () {
+        const handled: Array<string> = [];
+        const access = yield* ProjectAccess.ProjectAccess;
+        const resolver = yield* ResourceResolver.ResourceResolver;
+        const viewerActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("viewer-session"),
+          subject: "viewer",
+          scopes: baseScopes,
+          principalId: PrincipalId.make("principal-viewer"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "viewer"]]),
+        };
+        const gate = RpcAuthorization.makeAccessGate({ actor: viewerActor, access, resolver });
+        const client = yield* RpcTest.makeClient(group).pipe(
+          Effect.provide(
+            Layer.merge(makeHandlers(handled), RpcAuthorization.layer(baseScopes, undefined, gate)),
+          ),
+        );
+
+        const foreignFailure = yield* client[ORCHESTRATION_V2_WS_METHODS.launchThread](
+          launchPayload(projectB),
+        ).pipe(Effect.flip);
+        expect(foreignFailure).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: projectB,
+          requiredPermission: "project:thread.operate",
+        });
+
+        const ownProjectFailure = yield* client[ORCHESTRATION_V2_WS_METHODS.launchThread](
+          launchPayload(projectA),
+        ).pipe(Effect.flip);
+        expect(ownProjectFailure).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: projectA,
+          requiredPermission: "project:thread.operate",
+        });
+
+        expect(handled).toEqual([]);
+      }).pipe(Effect.provide(makeGateServices(new Map())), Effect.scoped),
+  );
+
+  it.effect("resolves threadId to its project and passes missing threads through to handlers", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const access = yield* ProjectAccess.ProjectAccess;
+      const resolver = yield* ResourceResolver.ResourceResolver;
+      const devActor: ProjectAccess.AccessActor = {
+        sessionId: AuthSessionId.make("dev-session"),
+        subject: "developer",
+        scopes: baseScopes,
+        principalId: PrincipalId.make("principal-dev"),
+        binding: { _tag: "principal" },
+        isOwner: false,
+        roles: new Map([[projectA, "developer"]]),
+      };
+      const gate = RpcAuthorization.makeAccessGate({ actor: devActor, access, resolver });
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(makeHandlers(handled), RpcAuthorization.layer(baseScopes, undefined, gate)),
+        ),
+      );
+
+      yield* client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({ threadId: threadA });
+      yield* client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({ threadId: threadMissing });
+      const foreignRead = yield* client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({
+        threadId: threadB,
+      }).pipe(Effect.flip);
+      expect(foreignRead).toMatchObject({
+        _tag: "project_forbidden",
+        projectId: projectB,
+        requiredPermission: "project:read",
+      });
+
+      const foreignArchive = yield* client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand]({
+        type: "thread.archive",
+        commandId: CommandId.make("archive-b"),
+        threadId: threadB,
+      }).pipe(Effect.flip);
+      expect(foreignArchive).toMatchObject({
+        _tag: "project_forbidden",
+        projectId: projectB,
+        requiredPermission: "project:thread.manage",
+      });
+
+      expect(handled).toEqual([`get:${threadA}`, `get:${threadMissing}`]);
+    }).pipe(
+      Effect.provide(
+        makeGateServices(
+          new Map([
+            [threadA, projectA],
+            [threadB, projectB],
+          ]),
+        ),
+      ),
+      Effect.scoped,
+    ),
+  );
+
+  it.effect("requires every projectId in projectIds to pass access checks", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const access = yield* ProjectAccess.ProjectAccess;
+      const resolver = yield* ResourceResolver.ResourceResolver;
+      const viewerActor: ProjectAccess.AccessActor = {
+        sessionId: AuthSessionId.make("viewer-multi"),
+        subject: "viewer",
+        scopes: baseScopes,
+        principalId: PrincipalId.make("principal-viewer"),
+        binding: { _tag: "principal" },
+        isOwner: false,
+        roles: new Map([[projectA, "viewer"]]),
+      };
+      const gate = RpcAuthorization.makeAccessGate({ actor: viewerActor, access, resolver });
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(makeHandlers(handled), RpcAuthorization.layer(baseScopes, undefined, gate)),
+        ),
+      );
+
+      yield* client[ORCHESTRATION_V2_WS_METHODS.searchThreads]({
+        query: "hello",
+        projectIds: [projectA],
+      });
+      const mixedFailure = yield* client[ORCHESTRATION_V2_WS_METHODS.searchThreads]({
+        query: "hello",
+        projectIds: [projectA, projectB],
+      }).pipe(Effect.flip);
+      expect(mixedFailure).toMatchObject({
+        _tag: "project_forbidden",
+        projectId: projectB,
+        requiredPermission: "project:read",
+      });
+      expect(handled).toEqual([`search:${projectA}`]);
+    }).pipe(Effect.provide(makeGateServices(new Map())), Effect.scoped),
+  );
+
+  it.effect("enforces the principal ceiling before checking project roles", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const access = yield* ProjectAccess.ProjectAccess;
+      const resolver = yield* ResourceResolver.ResourceResolver;
+      const ceilingActor: ProjectAccess.AccessActor = {
+        sessionId: AuthSessionId.make("ceiling-session"),
+        subject: "capped-dev",
+        scopes: baseScopes,
+        principalId: PrincipalId.make("principal-capped"),
+        binding: { _tag: "principal" },
+        isOwner: false,
+        ceiling: [AuthOrchestrationReadScope],
+        roles: new Map([[projectA, "developer"]]),
+      };
+      const gate = RpcAuthorization.makeAccessGate({ actor: ceilingActor, access, resolver });
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(makeHandlers(handled), RpcAuthorization.layer(baseScopes, undefined, gate)),
+        ),
+      );
+
+      const refused = yield* client[ORCHESTRATION_V2_WS_METHODS.launchThread](
+        launchPayload(projectA),
+      ).pipe(Effect.flip);
+      expect(refused).toMatchObject({
+        _tag: "EnvironmentAuthorizationError",
+        requiredPermission: AuthOrchestrationOperateScope,
+      });
+      expect(handled).toEqual([]);
+    }).pipe(Effect.provide(makeGateServices(new Map())), Effect.scoped),
+  );
+});

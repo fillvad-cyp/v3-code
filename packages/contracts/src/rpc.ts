@@ -6,6 +6,7 @@ import {
   OrchestrationV2SearchThreadsResult,
 } from "./orchestrationV2.ts";
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
+import { ProjectForbiddenError } from "./membership.ts";
 import {
   McpAppCallToolInput,
   McpAppCallToolResult,
@@ -2455,7 +2456,7 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
 
 export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthorization>()(
   "t3/contracts/RpcScopeAuthorization",
-  { error: EnvironmentAuthorizationError },
+  { error: Schema.Union([EnvironmentAuthorizationError, ProjectForbiddenError]) },
 ) {}
 
 export const WsRpcGroup = RpcGroup.make(
