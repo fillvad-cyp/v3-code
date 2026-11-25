@@ -403,11 +403,15 @@ export const layerServerEnvironmentHttpApi = HttpApiBuilder.group(
   "metadata",
   Effect.fnUntraced(function* (handlers) {
     const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+    const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
     return handlers.handle(
       "descriptor",
       Effect.fn("environment.metadata.descriptor")(function* (args) {
         yield* annotateEnvironmentRequest(args.endpoint.name);
-        return yield* serverEnvironment.getDescriptor;
+        const environment = yield* serverEnvironment.getDescriptor;
+        const { authMode } = yield* serverAuth.getDescriptor();
+        // The client probes the descriptor before it has a session, so the auth mode belongs here too.
+        return authMode === undefined ? environment : { ...environment, authMode };
       }, traceRelayRequest),
     );
   }),

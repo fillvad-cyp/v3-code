@@ -241,6 +241,8 @@ export const ExecutionEnvironmentDescriptor = Schema.Struct({
   orchestrationProtocolVersion: Schema.optionalKey(Schema.Int),
   /** Highest migration this server's database holds; absent on older servers. */
   databaseMigration: Schema.optionalKey(Schema.Int),
+  /** `multi-user` when the owner enabled member logins; absent on single-owner servers. */
+  authMode: Schema.optionalKey(Schema.Literals(["single-owner", "multi-user"])),
   capabilities: ExecutionEnvironmentCapabilities,
 });
 export type ExecutionEnvironmentDescriptor = typeof ExecutionEnvironmentDescriptor.Type;
