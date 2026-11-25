@@ -254,6 +254,13 @@ export function lockPrivacyScreen(): void {
   usePrivacyShieldStore.setState({ locked: true, curtainVisible: false });
 }
 
+export async function lockAndHideAllWindows(): Promise<void> {
+  lockPrivacyScreen();
+  if (isElectron && typeof window.desktopBridge?.hideAllWindows === "function") {
+    await window.desktopBridge.hideAllWindows().catch(() => undefined);
+  }
+}
+
 export type UnlockPrivacyResult =
   | { readonly ok: true }
   | {
@@ -324,7 +331,7 @@ function isSameOriginBrowserPrimary(): boolean {
   }
 }
 
-async function buildPrimaryPrivacyFetchInit(init: {
+export async function buildPrimaryPrivacyFetchInit(init: {
   readonly method: "GET" | "POST";
   readonly headers?: Record<string, string>;
   readonly body?: string;

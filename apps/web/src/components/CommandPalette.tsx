@@ -112,7 +112,8 @@ import { useOpenPanelPullRequestUrl } from "../hooks/useOpenPanelPullRequestUrl"
 import { copyThreadReference } from "../lib/copyThreadReference";
 import { isElectron } from "../env";
 import { isStandaloneDisplayMode, openPwaInstallPrompt } from "../lib/pwaInstall";
-import { executePanicWipe, lockPrivacyScreen } from "../lib/privacyShield";
+import { executePanicWipe, lockAndHideAllWindows, lockPrivacyScreen } from "../lib/privacyShield";
+import { createBurnerVaultCompartment, toggleWindowAlwaysOnTop } from "../lib/privacyVaultClient";
 import { openThreadInPopoutWindow } from "../lib/threadPopout";
 import { ensureLocalApi } from "../localApi";
 import {
@@ -1454,6 +1455,63 @@ function OpenCommandPaletteDialog(props: {
       },
     });
   }
+
+  if (isElectron && typeof window.desktopBridge?.setWindowAlwaysOnTop === "function") {
+    actionItems.push({
+      kind: "action",
+      value: "toggle-window-always-on-top",
+      title: gt("Toggle window Always on Top (PiP)"),
+      searchTerms: ["pin", "pip", "always on top", "floating", "overlay", "window"],
+      icon: <PinIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        const next = await toggleWindowAlwaysOnTop();
+        if (next === null) return;
+        toastManager.add({
+          type: "info",
+          title: next ? gt("Window pinned on top") : gt("Window unpinned from top"),
+        });
+      },
+    });
+  }
+
+  actionItems.push(
+    {
+      kind: "action",
+      value: "privacy-vault-open",
+      title: gt("Open Privacy Vault (Proxies, Servers, Compartments, DLP)"),
+      searchTerms: ["proxy", "server", "ssh", "compartment", "burner", "dlp", "egress", "vault"],
+      icon: <ShieldAlertIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        await navigate({ to: "/settings/general", hash: "privacy-vault" });
+      },
+    },
+    {
+      kind: "action",
+      value: "privacy-vault-create-burner",
+      title: gt("Create Burner RAM Compartment"),
+      searchTerms: ["burner", "ram", "compartment", "profile", "anonymous", "antidetect"],
+      icon: <LockIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        const res = await createBurnerVaultCompartment();
+        toastManager.add({
+          type: res.ok ? "success" : "error",
+          title: res.ok
+            ? gt("Burner RAM compartment activated")
+            : (res.error ?? gt("Could not create burner compartment")),
+        });
+      },
+    },
+    {
+      kind: "action",
+      value: "privacy-boss-key-lock-hide",
+      title: gt("Boss Key: Lock & hide all windows"),
+      searchTerms: ["boss", "hide", "lock", "panic", "minimize", "stealth"],
+      icon: <LockIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        await lockAndHideAllWindows();
+      },
+    },
+  );
 
   if (activeThreadPreviewOpen && previewBridge) {
     actionItems.push({

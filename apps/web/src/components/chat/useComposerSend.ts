@@ -64,6 +64,7 @@ import {
 } from "../../composer-logic";
 import { type ChatMessage, DEFAULT_INTERACTION_MODE } from "../../types";
 import { recordPromptSent } from "../GitHubStarPrompt";
+import { evaluateComposerDlp } from "../../lib/privacyVaultClient";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { writeTextToClipboard } from "~/hooks/useCopyToClipboard";
 import { newMessageId, newThreadId } from "~/lib/utils";
@@ -1056,6 +1057,50 @@ export function useComposerSend(input: ComposerSendInput) {
     const outgoingMessageContext = buildOutgoingMessageContext(
       composerAttachmentsSnapshot.map((attachment) => attachment.id),
     );
+    let dlpSafeMessageText = messageTextForSend;
+    const dlpDecision = evaluateComposerDlp(messageTextForSend);
+    if (dlpDecision.action === "block") {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: m(msg("Blocked by Outbound DLP Guard")),
+          description: m(
+            msg("Detected sensitive data: {categories}", {
+              categories: dlpDecision.scan.categories.join(", "),
+            }),
+          ),
+        }),
+      );
+      return;
+    }
+    if (dlpDecision.action === "warn") {
+      toastManager.add(
+        stackedThreadToast({
+          type: "warning",
+          title: m(msg("Sensitive data detected before sending")),
+          description: m(
+            msg("Detected {categories}. Press Send again within 15s to send anyway.", {
+              categories: dlpDecision.scan.categories.join(", "),
+            }),
+          ),
+        }),
+      );
+      return;
+    }
+    if (dlpDecision.redactedCount > 0) {
+      dlpSafeMessageText = dlpDecision.text;
+      toastManager.add(
+        stackedThreadToast({
+          type: "info",
+          title: m(
+            msg("Redacted {count} sensitive item(s) before sending", {
+              count: dlpDecision.redactedCount,
+            }),
+          ),
+        }),
+      );
+    }
+
     const messageIdForSend = newMessageId();
     const messageCreatedAt = new Date().toISOString();
     const outgoingMessageText = formatOutgoingPrompt({
@@ -1063,7 +1108,7 @@ export function useComposerSend(input: ComposerSendInput) {
       model: ctxSelectedModel,
       models: ctxSelectedProviderModels,
       effort: ctxSelectedPromptEffort,
-      text: messageTextForSend || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
+      text: dlpSafeMessageText || ATTACHMENT_ONLY_BOOTSTRAP_PROMPT,
     });
     if (
       isCurrentRouteThread() &&
@@ -1079,7 +1124,7 @@ export function useComposerSend(input: ComposerSendInput) {
     for (const resolved of resolveMultipleModelTargets({
       selections: multipleModelSelections ?? [],
       providerInstanceEntries,
-      messageText: messageTextForSend,
+      messageText: dlpSafeMessageText,
     })) {
       if ("error" in resolved) {
         setThreadError(threadIdForSend, resolved.error);
@@ -1273,7 +1318,7 @@ export function useComposerSend(input: ComposerSendInput) {
         }
         const sent = await sendApprovalFeedback(
           approvalFeedbackTarget,
-          messageTextForSend,
+          dlpSafeMessageText,
           onRespondToApprovalStable,
         ).catch(() => false);
         sendInFlightRef.current = false;
@@ -1362,7 +1407,7 @@ export function useComposerSend(input: ComposerSendInput) {
         branch: activeThreadBranch!,
         selections: multipleModelSelections,
         targets: multipleTargets,
-        sendSnapshot,
+        sendSnapshot: { ...sendSnapshot, messageText: dlpSafeMessageText },
         createdAt: messageCreatedAt,
         attachmentsPromise: turnAttachmentsPromise,
         usesAttachmentUploads: turnUsesAttachmentUploads,
@@ -1432,7 +1477,7 @@ export function useComposerSend(input: ComposerSendInput) {
 
     const title = deriveThreadTitleSeed(
       {
-        text: messageTextForSend,
+        text: dlpSafeMessageText,
         attachments: composerAttachmentsSnapshot,
         fallbackLabels: sendTitleFallbackLabels(sendSnapshot),
       },

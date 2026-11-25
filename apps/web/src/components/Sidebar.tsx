@@ -172,6 +172,11 @@ import {
   resolveThreadRouteTarget,
 } from "../threadRoutes";
 import type { SidebarThreadSummary } from "../types";
+import {
+  clearVaultBurnThread,
+  getBurnPolicyForThread,
+  setVaultBurnThread,
+} from "../lib/privacyVaultClient";
 import { openThreadInPopoutWindow, shouldPopoutOnThreadClick } from "../lib/threadPopout";
 import { cn } from "~/lib/utils";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
@@ -2757,6 +2762,7 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
               autoSettleEnabled: thread.autoSettleDisabledAt == null,
               isSnoozed,
               canSnoozeNow: canSnooze(thread, { now: new Date().toISOString() }),
+              burnPreset: getBurnPolicyForThread(thread.id)?.preset ?? null,
               isRegeneratingTitle,
               isRunning: !threadRuntimeCanArchive(thread.runtime),
               hasCompletedRun: thread.latestRun?.completedAt != null,
@@ -2791,6 +2797,37 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
                   thread.environmentId,
                 );
           if (preset) attemptSnooze(threadRef, preset);
+          return;
+        }
+        if (clicked.value?.startsWith("burn:")) {
+          const preset = clicked.value.slice("burn:".length);
+          if (preset === "clear") {
+            const res = await clearVaultBurnThread(thread.id);
+            toastManager.add(
+              stackedThreadToast({
+                type: res.ok ? "info" : "error",
+                title: res.ok
+                  ? gt("Auto-burn timer cancelled")
+                  : (res.error ?? gt("Could not update auto-burn timer")),
+              }),
+            );
+          } else if (
+            preset === "15m" ||
+            preset === "1h" ||
+            preset === "6h" ||
+            preset === "24h" ||
+            preset === "on-exit"
+          ) {
+            const res = await setVaultBurnThread(thread.id, preset);
+            toastManager.add(
+              stackedThreadToast({
+                type: res.ok ? "warning" : "error",
+                title: res.ok
+                  ? gt("Thread scheduled to auto-burn ({preset})", { preset })
+                  : (res.error ?? gt("Could not schedule auto-burn")),
+              }),
+            );
+          }
           return;
         }
         switch (clicked.value) {

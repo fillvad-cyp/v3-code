@@ -2,8 +2,10 @@ import {
   ContextMenuItemSchema,
   ContextMenuSource,
   DesktopAppBrandingSchema,
+  DesktopEgressPolicySchema,
   DesktopEnvironmentBootstrapSchema,
   DesktopMediaReadSchema,
+  DesktopPrivacyNetworkStateSchema,
   DesktopThemeSchema,
   DesktopThreadPopoutInputSchema,
   EDITORS,
@@ -41,6 +43,7 @@ import * as ElectronMenu from "../../electron/ElectronMenu.ts";
 import * as ElectronShell from "../../electron/ElectronShell.ts";
 import * as ElectronTheme from "../../electron/ElectronTheme.ts";
 import * as ElectronWindow from "../../electron/ElectronWindow.ts";
+import * as DesktopNetworkShield from "../../privacy/DesktopNetworkShield.ts";
 import * as DesktopWindow from "../../window/DesktopWindow.ts";
 import * as Electron from "electron";
 import { msg } from "gt-i18n";
@@ -386,6 +389,90 @@ export const openThreadPopout = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.window.openThreadPopout")(function* (input) {
     const desktopWindow = yield* DesktopWindow.DesktopWindow;
     return yield* desktopWindow.openThreadPopout(input);
+  }),
+});
+
+export const setWindowAlwaysOnTop = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.SET_WINDOW_ALWAYS_ON_TOP_CHANNEL,
+  payload: Schema.Boolean,
+  result: Schema.Boolean,
+  handler: Effect.fn("desktop.ipc.window.setWindowAlwaysOnTop")(function* (alwaysOnTop, event) {
+    const electronWindow = yield* ElectronWindow.ElectronWindow;
+    const window = yield* resolveCallingOrFocusedWindow(electronWindow, event);
+    if (Option.isNone(window) || window.value.isDestroyed()) return false;
+    window.value.setAlwaysOnTop(alwaysOnTop, "floating");
+    return window.value.isAlwaysOnTop();
+  }),
+});
+
+export const getWindowAlwaysOnTop = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.GET_WINDOW_ALWAYS_ON_TOP_CHANNEL,
+  payload: Schema.Undefined,
+  result: Schema.Boolean,
+  handler: Effect.fn("desktop.ipc.window.getWindowAlwaysOnTop")(function* (_input, event) {
+    const electronWindow = yield* ElectronWindow.ElectronWindow;
+    const window = yield* resolveCallingOrFocusedWindow(electronWindow, event);
+    if (Option.isNone(window) || window.value.isDestroyed()) return false;
+    return window.value.isAlwaysOnTop();
+  }),
+});
+
+export const hideAllWindows = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.HIDE_ALL_WINDOWS_CHANNEL,
+  payload: Schema.Undefined,
+  result: Schema.Void,
+  handler: Effect.fn("desktop.ipc.window.hideAllWindows")(function* () {
+    const environment = yield* DesktopEnvironment.DesktopEnvironment;
+    if (environment.platform === "darwin" && typeof Electron.app?.hide === "function") {
+      Electron.app.hide();
+      return;
+    }
+    for (const win of Electron.BrowserWindow.getAllWindows()) {
+      if (!win.isDestroyed()) {
+        if (win.isFullScreen()) win.setFullScreen(false);
+        win.minimize();
+      }
+    }
+  }),
+});
+
+export const privacyNetworkGetState = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PRIVACY_NETWORK_GET_STATE_CHANNEL,
+  payload: Schema.Undefined,
+  result: DesktopPrivacyNetworkStateSchema,
+  handler: Effect.fn("desktop.ipc.privacyNetwork.getState")(function* () {
+    const shield = yield* DesktopNetworkShield.DesktopNetworkShield;
+    return yield* shield.getState;
+  }),
+});
+
+export const privacyNetworkSetPolicy = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PRIVACY_NETWORK_SET_POLICY_CHANNEL,
+  payload: DesktopEgressPolicySchema,
+  result: DesktopPrivacyNetworkStateSchema,
+  handler: Effect.fn("desktop.ipc.privacyNetwork.setPolicy")(function* (policy) {
+    const shield = yield* DesktopNetworkShield.DesktopNetworkShield;
+    return yield* shield.setEgressPolicy(policy);
+  }),
+});
+
+export const privacyNetworkApplyProxy = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PRIVACY_NETWORK_APPLY_PROXY_CHANNEL,
+  payload: Schema.NullOr(Schema.String),
+  result: DesktopPrivacyNetworkStateSchema,
+  handler: Effect.fn("desktop.ipc.privacyNetwork.applyProxy")(function* (proxyUrl) {
+    const shield = yield* DesktopNetworkShield.DesktopNetworkShield;
+    return yield* shield.applyProxy(proxyUrl);
+  }),
+});
+
+export const privacyNetworkClearLog = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.PRIVACY_NETWORK_CLEAR_LOG_CHANNEL,
+  payload: Schema.Undefined,
+  result: DesktopPrivacyNetworkStateSchema,
+  handler: Effect.fn("desktop.ipc.privacyNetwork.clearLog")(function* () {
+    const shield = yield* DesktopNetworkShield.DesktopNetworkShield;
+    return yield* shield.clearLog;
   }),
 });
 

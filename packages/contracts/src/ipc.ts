@@ -1114,6 +1114,35 @@ export const DesktopThreadPopoutInputSchema = Schema.Struct({
 });
 export type DesktopThreadPopoutInput = typeof DesktopThreadPopoutInputSchema.Type;
 
+export const DesktopEgressModeSchema = Schema.Literals(["monitor", "allowlist"]);
+export type DesktopEgressMode = typeof DesktopEgressModeSchema.Type;
+
+export const DesktopEgressPolicySchema = Schema.Struct({
+  mode: DesktopEgressModeSchema,
+  allowlist: Schema.Array(Schema.String),
+  blocklist: Schema.Array(Schema.String),
+  killSwitchActive: Schema.Boolean,
+});
+export type DesktopEgressPolicy = typeof DesktopEgressPolicySchema.Type;
+
+export const DesktopEgressEventSchema = Schema.Struct({
+  id: Schema.String,
+  timestamp: Schema.String,
+  host: Schema.String,
+  protocol: Schema.String,
+  action: Schema.Literals(["allowed", "blocked"]),
+  source: Schema.Literals(["desktop", "server"]),
+  reason: Schema.NullOr(Schema.String),
+});
+export type DesktopEgressEvent = typeof DesktopEgressEventSchema.Type;
+
+export const DesktopPrivacyNetworkStateSchema = Schema.Struct({
+  activeProxyDisplay: Schema.NullOr(Schema.String),
+  policy: DesktopEgressPolicySchema,
+  events: Schema.Array(DesktopEgressEventSchema),
+});
+export type DesktopPrivacyNetworkState = typeof DesktopPrivacyNetworkStateSchema.Type;
+
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
   /** `null` until the desktop host has read the login shell's environment; ask again later. */
@@ -1214,6 +1243,18 @@ export interface DesktopBridge {
   openExternal: (url: string) => Promise<boolean>;
   /** Opens a chat thread route in a dedicated secondary desktop window, or focuses its existing pop-out. */
   openThreadPopoutWindow?: (input: DesktopThreadPopoutInput) => Promise<boolean>;
+  /** Pins or unpins the calling desktop window above other windows (PiP mode). */
+  setWindowAlwaysOnTop?: (alwaysOnTop: boolean) => Promise<boolean>;
+  getWindowAlwaysOnTop?: () => Promise<boolean>;
+  /** Immediately minimizes/hides all V3 desktop windows (Boss Key / Panic Lock). */
+  hideAllWindows?: () => Promise<void>;
+  /** Desktop Chromium network egress monitor, allowlist/kill-switch, and live proxy routing. */
+  privacyNetwork?: {
+    getState: () => Promise<DesktopPrivacyNetworkState>;
+    setEgressPolicy: (policy: DesktopEgressPolicy) => Promise<DesktopPrivacyNetworkState>;
+    applyProxy: (proxyUrl: string | null) => Promise<DesktopPrivacyNetworkState>;
+    clearLog: () => Promise<DesktopPrivacyNetworkState>;
+  };
   /** Reads http(s) media in the main process, outside renderer CORS and CSP; null on network failure. */
   readMedia: (url: string) => Promise<DesktopMediaRead | null>;
   openSystemSettings: (pane: SystemSettingsPane) => Promise<boolean>;

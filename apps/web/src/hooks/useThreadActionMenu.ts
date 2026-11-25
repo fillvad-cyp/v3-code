@@ -28,6 +28,11 @@ import { titleRegenerationToast } from "../components/threadTitleRegenerationToa
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { copyThreadReference } from "../lib/copyThreadReference";
 import { isElectron } from "../env";
+import {
+  clearVaultBurnThread,
+  getBurnPolicyForThread,
+  setVaultBurnThread,
+} from "../lib/privacyVaultClient";
 import { openThreadInPopoutWindow } from "../lib/threadPopout";
 import { m } from "../i18n/messages";
 import { threadChipCopyTarget } from "@t3tools/client-runtime/thread-reference";
@@ -151,6 +156,7 @@ export function useThreadActionMenu(input: {
         autoSettleEnabled: thread.autoSettleDisabledAt == null,
         isSnoozed: supports.snooze && effectiveSnoozed(thread, { now: now.toISOString() }),
         canSnoozeNow: canSnooze(thread, { now: now.toISOString() }),
+        burnPreset: getBurnPolicyForThread(thread.id)?.preset ?? null,
         isRegeneratingTitle,
         isRunning: !threadRuntimeCanArchive(thread.runtime),
         hasCompletedRun: thread.latestRun?.completedAt != null,
@@ -186,6 +192,37 @@ export function useThreadActionMenu(input: {
         const result = await snoozeThread(threadRef, preset.snoozedUntil);
         if (result._tag === "Failure" && !isAtomCommandInterrupted(result)) {
           failureToast(m(msg("Failed to snooze thread")), squashAtomCommandFailure(result));
+        }
+        return;
+      }
+      if (action.startsWith("burn:")) {
+        const preset = action.slice("burn:".length);
+        if (preset === "clear") {
+          const res = await clearVaultBurnThread(thread.id);
+          toastManager.add(
+            stackedThreadToast({
+              type: res.ok ? "info" : "error",
+              title: res.ok
+                ? m(msg("Auto-burn timer cancelled"))
+                : (res.error ?? m(msg("Could not update auto-burn timer"))),
+            }),
+          );
+        } else if (
+          preset === "15m" ||
+          preset === "1h" ||
+          preset === "6h" ||
+          preset === "24h" ||
+          preset === "on-exit"
+        ) {
+          const res = await setVaultBurnThread(thread.id, preset);
+          toastManager.add(
+            stackedThreadToast({
+              type: res.ok ? "warning" : "error",
+              title: res.ok
+                ? m(msg("Thread scheduled to auto-burn ({preset})", { preset }))
+                : (res.error ?? m(msg("Could not schedule auto-burn"))),
+            }),
+          );
         }
         return;
       }

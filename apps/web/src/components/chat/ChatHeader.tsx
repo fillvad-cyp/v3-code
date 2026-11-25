@@ -12,7 +12,7 @@ import {
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
 import { T, useGT, Var } from "gt-react";
-import { ChevronDownIcon } from "lucide-react";
+import { ChevronDownIcon, FlameIcon, PinIcon, PinOffIcon } from "lucide-react";
 import {
   memo,
   useEffect,
@@ -41,9 +41,18 @@ import {
   WorkspaceBreadcrumbText,
 } from "../WorkspaceBreadcrumb";
 import { observeResize } from "~/lib/observeResize";
+import { isElectron } from "~/env";
+import {
+  clearVaultBurnThread,
+  hydrateWindowAlwaysOnTop,
+  toggleWindowAlwaysOnTop,
+  usePrivacyVaultStore,
+} from "~/lib/privacyVaultClient";
+import { isPopoutWindowRuntime } from "~/lib/threadPopout";
 import { cn } from "~/lib/utils";
 import { textDirection } from "~/textDirection";
 import { useClientSettings } from "../../hooks/useSettings";
+import { Button } from "../ui/button";
 import { GuestShareIndicator } from "./GuestShareControls";
 
 interface ChatHeaderProps {
@@ -91,6 +100,22 @@ export const ChatHeader = memo(function ChatHeader({
   const interfaceFont = useClientSettings((settings) => settings.fontFamilySans);
   const breadcrumbContainerRef = useRef<HTMLDivElement>(null);
   const [collapseParentTitle, setCollapseParentTitle] = useState(false);
+  const alwaysOnTop = usePrivacyVaultStore((state) => state.alwaysOnTop);
+  const showPipPinControl =
+    isElectron &&
+    isPopoutWindowRuntime() &&
+    typeof window.desktopBridge?.setWindowAlwaysOnTop === "function";
+  const activeBurnPolicy = usePrivacyVaultStore(
+    (state) => state.snapshot?.burnThreads.find((item) => item.threadId === activeThreadId) ?? null,
+  );
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- syncs PiP pin button with native Electron window state
+  useEffect(() => {
+    if (!showPipPinControl) return;
+    void hydrateWindowAlwaysOnTop();
+  }, [showPipPinControl]);
+  const toggleAlwaysOnTop = () => {
+    void toggleWindowAlwaysOnTop();
+  };
   const activeThreadRef = scopeThreadRef(activeThreadEnvironmentId, activeThreadId);
   const canOperateThread = useEnvironmentScope(
     activeThreadEnvironmentId,
@@ -413,6 +438,46 @@ export const ChatHeader = memo(function ChatHeader({
           ) : null}
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
+      {activeBurnPolicy ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <button
+                type="button"
+                onClick={() => void clearVaultBurnThread(activeThreadId)}
+                className="inline-flex cursor-pointer items-center"
+              />
+            }
+          >
+            <Badge variant="warning" size="sm">
+              <FlameIcon className="size-3" />
+              {activeBurnPolicy.onExit ? <T>Burn on exit</T> : activeBurnPolicy.preset}
+            </Badge>
+          </TooltipTrigger>
+          <TooltipPopup side="bottom">
+            <T>Auto-burn scheduled. Click to cancel.</T>
+          </TooltipPopup>
+        </Tooltip>
+      ) : null}
+      {showPipPinControl ? (
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <Button
+                size="icon-xs"
+                variant={alwaysOnTop ? "secondary" : "ghost"}
+                aria-label={alwaysOnTop ? gt("Unpin window from top") : gt("Pin window on top")}
+                onClick={toggleAlwaysOnTop}
+              />
+            }
+          >
+            {alwaysOnTop ? <PinOffIcon className="size-3.5" /> : <PinIcon className="size-3.5" />}
+          </TooltipTrigger>
+          <TooltipPopup side="bottom">
+            {alwaysOnTop ? <T>Unpin window from top</T> : <T>Pin window on top (PiP)</T>}
+          </TooltipPopup>
+        </Tooltip>
+      ) : null}
       {isServerThread ? <GuestShareIndicator threadRef={activeThreadRef} /> : null}
     </div>
   );

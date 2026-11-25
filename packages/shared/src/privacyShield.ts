@@ -193,6 +193,14 @@ export function validateOutboundProxyUrl(raw: string): ProxyUrlValidationResult 
   if (!parsed.hostname) {
     return { ok: false, reason: "Proxy URL must include a host." };
   }
+  const cleanHost = parsed.hostname.replace(/^\[|\]$/g, "");
+  if (
+    cleanHost.length === 0 ||
+    cleanHost.startsWith("-") ||
+    !/^[A-Za-z0-9._:-]+$/.test(cleanHost)
+  ) {
+    return { ok: false, reason: "Proxy URL contains an invalid host." };
+  }
   if (parsed.pathname && parsed.pathname !== "/") {
     return { ok: false, reason: "Proxy URL must not include a path." };
   }

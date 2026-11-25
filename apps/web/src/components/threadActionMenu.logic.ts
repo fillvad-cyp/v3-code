@@ -21,6 +21,8 @@ export type ThreadActionMenuId =
   | "snooze"
   | `snooze:${string}`
   | "unsnooze"
+  | "burn-timer"
+  | `burn:${"15m" | "1h" | "6h" | "24h" | "on-exit" | "clear"}`
   | "rename"
   | "regenerate-title"
   | "mark-unread"
@@ -109,6 +111,7 @@ export interface ThreadActionMenuState {
   readonly autoSettleEnabled: boolean;
   readonly isSnoozed: boolean;
   readonly canSnoozeNow: boolean;
+  readonly burnPreset?: "15m" | "1h" | "6h" | "24h" | "on-exit" | null | undefined;
   readonly isRegeneratingTitle: boolean;
   /** Archive rejects attached providers, so disable it while running. */
   readonly isRunning: boolean;
@@ -209,6 +212,49 @@ export function buildThreadActionMenuItems(
               },
         ]
       : []),
+    {
+      id: "burn-timer" as const,
+      label: state.burnPreset
+        ? resolve(msg("Burn timer ({preset})", { preset: state.burnPreset }))
+        : resolve(msg("Auto-burn thread")),
+      icon: "flame",
+      children: [
+        {
+          id: "burn:15m" as const,
+          label: resolve(msg("Burn in 15 minutes")),
+          checked: state.burnPreset === "15m",
+        },
+        {
+          id: "burn:1h" as const,
+          label: resolve(msg("Burn in 1 hour")),
+          checked: state.burnPreset === "1h",
+        },
+        {
+          id: "burn:6h" as const,
+          label: resolve(msg("Burn in 6 hours")),
+          checked: state.burnPreset === "6h",
+        },
+        {
+          id: "burn:24h" as const,
+          label: resolve(msg("Burn in 24 hours")),
+          checked: state.burnPreset === "24h",
+        },
+        {
+          id: "burn:on-exit" as const,
+          label: resolve(msg("Burn on exit")),
+          checked: state.burnPreset === "on-exit",
+        },
+        ...(state.burnPreset
+          ? [
+              {
+                id: "burn:clear" as const,
+                label: resolve(msg("Cancel burn timer")),
+                separatorBefore: true,
+              },
+            ]
+          : []),
+      ],
+    },
     {
       id: "rename",
       label: resolve(msg("Rename thread")),

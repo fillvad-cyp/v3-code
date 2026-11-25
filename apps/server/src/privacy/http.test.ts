@@ -4,6 +4,11 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { AuthAccessWriteScope, AuthSessionId, type AuthEnvironmentScope } from "@t3tools/contracts";
 import { PRIVACY_PANIC_LOGOUT_PATH, PRIVACY_STATUS_PATH } from "@t3tools/shared/privacyShield";
+import {
+  PRIVACY_VAULT_ACTION_HEADER,
+  PRIVACY_VAULT_PATH,
+  PRIVACY_VAULT_PROXIES_PATH,
+} from "@t3tools/shared/privacyVault";
 import { describe, vi } from "vite-plus/test";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -13,6 +18,7 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as PrivacyHttp from "./http.ts";
+import * as PrivacyVaultService from "./PrivacyVaultService.ts";
 
 function makeTestLayer(options: {
   readonly authenticated: boolean;
@@ -65,6 +71,7 @@ function makeTestLayer(options: {
   ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "v3-privacy-http-" })));
 
   return HttpRouter.serve(PrivacyHttp.layer, { disableLogger: true }).pipe(
+    Layer.provide(PrivacyVaultService.layer),
     Layer.provide(Layer.succeed(EnvironmentAuth.EnvironmentAuth, authMock)),
     Layer.provide(Layer.succeed(SessionStore.SessionStore, sessionsMock)),
     Layer.provide(baseConfigLayer),
@@ -203,5 +210,42 @@ describe("Privacy HTTP routes", () => {
         expect(revokeClientSpy).toHaveBeenCalledTimes(1);
       }).pipe(Effect.provide(layer));
     },
+  );
+
+  it.effect("gates privacy vault endpoints by auth and confirmation header", () =>
+    Effect.gen(function* () {
+      const client = yield* HttpClient.HttpClient;
+      const initial = yield* client.execute(HttpClientRequest.get(PRIVACY_VAULT_PATH));
+      expect(initial.status).toBe(200);
+
+      const missingHeader = yield* client.execute(
+        HttpClientRequest.post(PRIVACY_VAULT_PROXIES_PATH).pipe(
+          HttpClientRequest.bodyJsonUnsafe({
+            action: "add",
+            name: "Tor",
+            url: "socks5h://u:p@127.0.0.1:9050",
+          }),
+        ),
+      );
+      expect(missingHeader.status).toBe(400);
+
+      const added = yield* client.execute(
+        HttpClientRequest.post(PRIVACY_VAULT_PROXIES_PATH).pipe(
+          HttpClientRequest.setHeader(PRIVACY_VAULT_ACTION_HEADER, "1"),
+          HttpClientRequest.bodyJsonUnsafe({
+            action: "add",
+            name: "Tor",
+            url: "socks5h://u:p@127.0.0.1:9050",
+          }),
+        ),
+      );
+      expect(added.status).toBe(200);
+      const body = (yield* added.json) as {
+        readonly ok: boolean;
+        readonly snapshot: { readonly proxies: ReadonlyArray<{ readonly displayUrl: string }> };
+      };
+      expect(body.ok).toBe(true);
+      expect(body.snapshot.proxies[0]?.displayUrl).toBe("socks5h://u:***@127.0.0.1:9050");
+    }).pipe(Effect.provide(makeTestLayer({ authenticated: true }))),
   );
 });

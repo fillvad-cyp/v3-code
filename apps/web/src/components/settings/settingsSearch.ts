@@ -822,6 +822,16 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("panic wipe emergency logout revoke session clear storage cache")],
   },
   {
+    id: "privacy-vault",
+    title: msg("Privacy Vault, Compartments & Egress Control"),
+    to: "/settings/general",
+    searchTerms: [
+      msg(
+        "proxy vault socks5 tor server ssh tailscale compartment profile burner dlp secret redact egress allowlist kill switch burn ttl encrypt",
+      ),
+    ],
+  },
+  {
     id: "response-streaming",
     title: msg("Response streaming"),
     to: "/settings/threads",

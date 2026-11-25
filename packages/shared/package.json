@@ -686,6 +686,10 @@
     "./privacyShield": {
       "types": "./src/privacyShield.ts",
       "import": "./src/privacyShield.ts"
+    },
+    "./privacyVault": {
+      "types": "./src/privacyVault.ts",
+      "import": "./src/privacyVault.ts"
     }
   },
   "scripts": {

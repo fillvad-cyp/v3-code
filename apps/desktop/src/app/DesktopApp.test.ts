@@ -43,6 +43,7 @@ import * as ElectronDialog from "../electron/ElectronDialog.ts";
 import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronSafeStorage from "../electron/ElectronSafeStorage.ts";
 import * as PreviewPasskeys from "../preview/Passkeys.ts";
+import * as DesktopNetworkShield from "../privacy/DesktopNetworkShield.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopShellEnvironment from "../shell/DesktopShellEnvironment.ts";
 import * as DesktopSnapShot from "../snapShot/DesktopSnapShot.ts";
@@ -234,6 +235,7 @@ const runStubbedDesktop = (stub: StubbedDesktop) =>
           Layer.mock(ElectronTheme.ElectronTheme, {}),
           Layer.mock(ElectronWindow.ElectronWindow, {}),
           Layer.mock(MacPermissions.MacPermissions, {}),
+          Layer.mock(DesktopNetworkShield.DesktopNetworkShield, {}),
           Layer.mock(AppleSpeech.AppleSpeech, {}),
           Layer.mock(LoopbackTunnel.LoopbackTunnel, {}),
           Layer.mock(PreviewManager.PreviewManager, {

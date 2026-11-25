@@ -255,6 +255,19 @@ contextBridge.exposeInMainWorld("desktopBridge", {
   openExternal: (url: string) => ipcRenderer.invoke(IpcChannels.OPEN_EXTERNAL_CHANNEL, url),
   openThreadPopoutWindow: (input) =>
     ipcRenderer.invoke(IpcChannels.OPEN_THREAD_POPOUT_CHANNEL, input),
+  setWindowAlwaysOnTop: (alwaysOnTop) =>
+    ipcRenderer.invoke(IpcChannels.SET_WINDOW_ALWAYS_ON_TOP_CHANNEL, alwaysOnTop),
+  getWindowAlwaysOnTop: () =>
+    ipcRenderer.invoke(IpcChannels.GET_WINDOW_ALWAYS_ON_TOP_CHANNEL, undefined),
+  hideAllWindows: () => ipcRenderer.invoke(IpcChannels.HIDE_ALL_WINDOWS_CHANNEL, undefined),
+  privacyNetwork: {
+    getState: () => ipcRenderer.invoke(IpcChannels.PRIVACY_NETWORK_GET_STATE_CHANNEL, undefined),
+    setEgressPolicy: (policy) =>
+      ipcRenderer.invoke(IpcChannels.PRIVACY_NETWORK_SET_POLICY_CHANNEL, policy),
+    applyProxy: (proxyUrl) =>
+      ipcRenderer.invoke(IpcChannels.PRIVACY_NETWORK_APPLY_PROXY_CHANNEL, proxyUrl),
+    clearLog: () => ipcRenderer.invoke(IpcChannels.PRIVACY_NETWORK_CLEAR_LOG_CHANNEL, undefined),
+  },
   readMedia: (url: string) => ipcRenderer.invoke(IpcChannels.READ_MEDIA_CHANNEL, url),
   checkSystemPermission: (pane: string) =>
     ipcRenderer.invoke(IpcChannels.CHECK_SYSTEM_PERMISSION_CHANNEL, pane),

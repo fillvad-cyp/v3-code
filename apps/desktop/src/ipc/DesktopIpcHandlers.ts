@@ -50,6 +50,13 @@ import {
   getWindowFullscreenState,
   openExternal,
   openThreadPopout,
+  setWindowAlwaysOnTop,
+  getWindowAlwaysOnTop,
+  hideAllWindows,
+  privacyNetworkGetState,
+  privacyNetworkSetPolicy,
+  privacyNetworkApplyProxy,
+  privacyNetworkClearLog,
   readMedia,
   restartAudioService,
   openSystemSettings,
@@ -163,6 +170,13 @@ export const installDesktopIpcHandlers = Effect.fn("desktop.ipc.installHandlers"
   yield* ipc.handle(showContextMenu);
   yield* ipc.handle(openExternal);
   yield* ipc.handle(openThreadPopout);
+  yield* ipc.handle(setWindowAlwaysOnTop);
+  yield* ipc.handle(getWindowAlwaysOnTop);
+  yield* ipc.handle(hideAllWindows);
+  yield* ipc.handle(privacyNetworkGetState);
+  yield* ipc.handle(privacyNetworkSetPolicy);
+  yield* ipc.handle(privacyNetworkApplyProxy);
+  yield* ipc.handle(privacyNetworkClearLog);
   yield* ipc.handle(readMedia);
   yield* ipc.handle(receiveProviderAuthCallback);
   yield* ipc.handle(cancelProviderAuthCallback);

@@ -49,6 +49,7 @@ import { syncBrowserChromeTheme } from "./hooks/useTheme";
 import { startThreadVisitedMigration } from "./hooks/useThreadVisitedMigration";
 import { installDesktopPasteAsText } from "./lib/desktopPasteAsText";
 import { startPrivacyShieldService } from "./lib/privacyShield";
+import { refreshPrivacyVault } from "./lib/privacyVaultClient";
 import { isPopoutWindowRuntime } from "./lib/threadPopout";
 import { startPwaInstallService } from "./lib/pwaInstall";
 import {
@@ -275,6 +276,7 @@ export function startAppServices(): AppRouter {
     startPwaInstallService();
   }
   startPrivacyShieldService();
+  void refreshPrivacyVault();
 
   installDesktopPasteAsText(window.desktopBridge, window);
   guardDomAgainstPageTranslation();

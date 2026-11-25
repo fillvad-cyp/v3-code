@@ -187,6 +187,7 @@ import * as EnvironmentAuthPolicy from "./auth/EnvironmentAuthPolicy.ts";
 import * as CloudHttp from "./cloud/http.ts";
 import * as GuestHttp from "./guest/http.ts";
 import * as PrivacyHttp from "./privacy/http.ts";
+import * as PrivacyVaultService from "./privacy/PrivacyVaultService.ts";
 import * as LinkThreadHttp from "./peer/linkThreadHttp.ts";
 import * as CloudLink from "./cloud/CloudLink.ts";
 import * as ConnectReachability from "./cloud/ConnectReachability.ts";
@@ -862,6 +863,7 @@ const layerRuntimeDependencies = layerRuntimeCoreDependencies.pipe(
   Layer.provideMerge(RemoteOpenTargets.layer),
   Layer.provideMerge(DirectEndpoints.layer.pipe(Layer.provide(layerServerEnvironment))),
   Layer.provideMerge(ServerLifecycleEvents.layer),
+  Layer.provideMerge(PrivacyVaultService.layer),
   // GitVcsDriver.layer is memoized and some of its build sites live outside this file, so the
   // fetch interval goes in context here, before the first build captures it.
   Layer.provideMerge(VcsAutomaticFetchInterval.layer.pipe(Layer.provide(layerServerSettings))),

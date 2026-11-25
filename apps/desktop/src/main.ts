@@ -77,6 +77,7 @@ import * as DesktopBrowserHost from "./preview/DesktopBrowserHost.ts";
 import * as LoopbackTunnel from "./preview/LoopbackTunnel.ts";
 import * as PreviewManager from "./preview/Manager.ts";
 import * as PreviewPasskeys from "./preview/Passkeys.ts";
+import * as DesktopNetworkShield from "./privacy/DesktopNetworkShield.ts";
 import * as DesktopWindow from "./window/DesktopWindow.ts";
 import * as DesktopWslBackend from "./wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
@@ -157,6 +158,7 @@ const layerDesktopFoundation = Layer.mergeAll(
   DesktopPrimaryPaste.layer,
   DesktopObservability.layer,
   DesktopRendererHistory.layer,
+  DesktopNetworkShield.layer,
   AppleSpeech.layer,
 ).pipe(Layer.provideMerge(layerDesktopEnvironment));
 

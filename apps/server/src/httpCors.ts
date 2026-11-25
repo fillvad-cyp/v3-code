@@ -8,6 +8,7 @@ export const browserApiCorsAllowedHeaders = [
   "content-type",
   "dpop",
   "x-v3-panic-confirm",
+  "x-v3-vault-action",
   ORCHESTRATION_PROTOCOL_HEADER,
 ] as const;
 
