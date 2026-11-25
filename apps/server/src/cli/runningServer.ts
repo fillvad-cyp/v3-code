@@ -94,7 +94,7 @@ export const changeState = Effect.fn("RunningServer.changeState")(function* <A, 
   locally,
 }: {
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
-  readonly viaServer: (client: ServerClient) => Effect.Effect<A, E, R>;
+  readonly viaServer: (client: ServerClient, origin: string) => Effect.Effect<A, E, R>;
   readonly locally: Effect.Effect<A, E2, R2>;
 }) {
   const { serverRuntimeStatePath } = yield* ServerConfig.ServerConfig;
@@ -114,7 +114,7 @@ export const changeState = Effect.fn("RunningServer.changeState")(function* <A, 
   if (Option.isNone(running)) return yield* changeLocally(Effect.fail);
   const { origin } = running.value;
   return yield* serverClient(origin, scopes).pipe(
-    Effect.flatMap(viaServer),
+    Effect.flatMap((client) => viaServer(client, origin)),
     Effect.timeout(REQUEST_TIMEOUT),
     Effect.scoped,
     // A refused connection reached no server, so the lock decides whether one still runs.

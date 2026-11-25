@@ -267,3 +267,9 @@ export const MemberRemoveResult = Schema.Struct({
   promotedOwner: Schema.optionalKey(Schema.Boolean),
 });
 export type MemberRemoveResult = typeof MemberRemoveResult.Type;
+
+export const MemberLoginCodeResult = Schema.Struct({
+  code: TrimmedNonEmptyString,
+  expiresAt: IsoDateTime,
+});
+export type MemberLoginCodeResult = typeof MemberLoginCodeResult.Type;

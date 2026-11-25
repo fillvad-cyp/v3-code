@@ -987,6 +987,45 @@ export const layer = HttpApiBuilder.group(
             MembershipInternalError: (error) => failEnvironmentInternal("internal_error", error),
           }),
         ),
+      )
+      .handle(
+        "issueMemberLoginCode",
+        Effect.fn("environment.auth.issueMemberLoginCode")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* EnvironmentAuthenticatedPrincipal;
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const clientMetadata = deriveAuthClientMetadata({ request });
+            const actor = yield* resolveSessionActor(session);
+            const createdBy = session.principalId ?? InvitationService.OWNER_PRINCIPAL_ID;
+            yield* appendCredentialResponseHeaders;
+            const issued = yield* invitations.issueLogin({
+              principalId: args.params.principalId,
+              createdBy,
+              actor,
+              audit: {
+                sessionId: session.sessionId,
+                ip: clientMetadata.ipAddress ?? null,
+                userAgent: clientMetadata.userAgent ?? null,
+              },
+            });
+            return {
+              code: issued.code,
+              expiresAt: issued.invitation.expiresAt,
+            };
+          },
+          Effect.catchTags({
+            InvitationInvalidError: (error) =>
+              error.reason === "principal_not_found"
+                ? failEnvironmentNotFound("principal_not_found")
+                : Effect.fail(new EnvironmentHttpBadRequestError({ message: error.message })),
+            InvitationForbiddenError: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+            InvitationRateLimitedError: (error) =>
+              Effect.fail(new EnvironmentHttpTooManyRequestsError({ message: error.message })),
+            InvitationInternalError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
       );
   }),
 );

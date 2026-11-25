@@ -388,6 +388,15 @@ export function makeAccessGate(input: {
   >;
 }): RpcAccessGate {
   const check = Effect.fnUntraced(function* (method: string, payload: unknown) {
+    if (method === WS_METHODS.serverUpdateSettings && !input.actor.isOwner) {
+      const { patch } = decodeSettingsUpdate(payload);
+      if (patch.multiUser !== undefined) {
+        return yield* new EnvironmentAuthorizationError({
+          message: "Only the environment owner may change multi-user mode.",
+          ...authScopeRequiredResponse(AuthEnvironmentMaintainScope),
+        });
+      }
+    }
     const capability = input.resolver.capabilityForRpcCall(method, payload);
     if (capability === undefined) return;
     const accessibleIds = input.access.accessibleProjectIds(input.actor);

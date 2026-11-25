@@ -64,6 +64,7 @@ import {
   InvitationCreateResult,
   InvitationLoginInput,
   InvitationRevokeResult,
+  MemberLoginCodeResult,
   MemberRemoveResult,
   MemberUpdateInput,
   MemberWithMemberships,
@@ -295,6 +296,7 @@ export const EnvironmentResourceNotFoundReason = Schema.Literals([
   "resource_not_found",
   "member_not_found",
   "membership_not_found",
+  "principal_not_found",
 ]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
@@ -468,6 +470,13 @@ const EnvironmentMemberManageErrors = [
   EnvironmentHttpForbiddenError,
   EnvironmentResourceNotFoundError,
   EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentMemberLoginCodeErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentHttpTooManyRequestsError,
   EnvironmentInternalError,
 ] as const;
 const EnvironmentProjectSnapshotErrors = [
@@ -812,6 +821,14 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       query: Schema.Struct({ projectId: Schema.optionalKey(ProjectId) }),
       success: MemberRemoveResult,
       error: EnvironmentMemberManageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("issueMemberLoginCode", "/api/auth/members/:principalId/login-code", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ principalId: PrincipalId }),
+      success: MemberLoginCodeResult,
+      error: EnvironmentMemberLoginCodeErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 

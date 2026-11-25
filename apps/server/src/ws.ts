@@ -30,9 +30,11 @@ import { subscribeChatGptHandoff } from "./provider/CodexChatGptHandoff.ts";
 import {
   AcpRegistryOperationError,
   CommandId,
+  authScopeRequiredResponse,
   authScopeResponse,
   AuthAccessStreamError,
   type AuthAccessStreamEvent,
+  AuthEnvironmentMaintainScope,
   AuthFilesystemReadScope,
   AuthOrchestrationOperateScope,
   AuthTerminalOperateScope,
@@ -2980,6 +2982,16 @@ export const layerWsRpc = (
         [WS_METHODS.serverUpdateSettings]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* ({ patch, providerInstanceMutation }) {
+            if (
+              patch.multiUser !== undefined &&
+              currentActor !== undefined &&
+              !currentActor.isOwner
+            ) {
+              return yield* new EnvironmentAuthorizationError({
+                message: "Only the environment owner may change multi-user mode.",
+                ...authScopeRequiredResponse(AuthEnvironmentMaintainScope),
+              });
+            }
             const deviceHosts = patch.deviceHosts
               ? yield* remoteSshDeviceHosts(patch.deviceHosts).pipe(
                   Effect.provide(deviceHostContext),

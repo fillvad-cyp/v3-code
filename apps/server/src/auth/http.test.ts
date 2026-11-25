@@ -1111,3 +1111,202 @@ it.live(
       );
     }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
 );
+
+it.live(
+  "POST /api/auth/members/:principalId/login-code mints codes for owner and self, rejects others with 403, missing with 404, and rate limits with 429",
+  () =>
+    Effect.gen(function* () {
+      const random = yield* SecureRandom.SecureRandom;
+      let capturedLimits: MemberLimits.MemberLimitsRepository["Service"] | undefined;
+      const captureLayer = Layer.effectDiscard(
+        Effect.gen(function* () {
+          capturedLimits = yield* MemberLimits.MemberLimitsRepository;
+        }),
+      );
+      const multiUserRoutes = makeLayerRoutes({ multiUser: true });
+      const testLayer = captureLayer.pipe(
+        Layer.provideMerge(multiUserRoutes),
+        Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      );
+      const requestContext = Context.make(SecureRandom.SecureRandom, random);
+
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => HttpRouter.toWebHandler(testLayer, { disableLogger: true })),
+        (environment) =>
+          Effect.gen(function* () {
+            // Unauthenticated request is rejected with 401.
+            const unauthResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/members/owner/login-code", {
+                  method: "POST",
+                }),
+                requestContext,
+              ),
+            );
+            expect(unauthResp.status).toBe(401);
+
+            const devResponse = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/browser-session", { credential: DEV_TOKEN }),
+                requestContext,
+              ),
+            );
+            const ownerCookie =
+              devResponse.headers
+                .getSetCookie()
+                .find((cookie) => cookie.startsWith("t3_dev_session_"))
+                ?.split(";", 1)[0] ?? "";
+
+            const projectId = ProjectId.make("project-login-code-route");
+            const inviteAndAccept = (displayName: string) =>
+              Effect.gen(function* () {
+                const invResp = yield* Effect.promise(() =>
+                  environment.handler(
+                    postJson(
+                      "/api/auth/invitations",
+                      { kind: "staff", role: "developer", projectId },
+                      { cookie: ownerCookie },
+                    ),
+                    requestContext,
+                  ),
+                );
+                expect(invResp.status).toBe(200);
+                const inv = (yield* Effect.promise(() => invResp.json())) as { code: string };
+                const accResp = yield* Effect.promise(() =>
+                  environment.handler(
+                    postJson("/api/auth/invitations/accept", { code: inv.code, displayName }),
+                    requestContext,
+                  ),
+                );
+                expect(accResp.status).toBe(200);
+                const body = (yield* Effect.promise(() => accResp.json())) as {
+                  token: string;
+                  principal: { id: string; displayName: string };
+                };
+                return { principalId: body.principal.id, token: body.token };
+              });
+
+            const memberA = yield* inviteAndAccept("Member A");
+            const memberB = yield* inviteAndAccept("Member B");
+
+            // Owner mints login code for Member A (200) and the code logs Member A in.
+            const ownerMintResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/api/auth/members/${memberA.principalId}/login-code`, {
+                  method: "POST",
+                  headers: { cookie: ownerCookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(ownerMintResp.status).toBe(200);
+            expect(ownerMintResp.headers.get("cache-control")).toBe("no-store");
+            const ownerMintBody = (yield* Effect.promise(() => ownerMintResp.json())) as {
+              code: string;
+              expiresAt: string;
+            };
+            expect(ownerMintBody.code).toBeTruthy();
+            expect(ownerMintBody.expiresAt).toBeTruthy();
+
+            const ownerMintedLogin = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/invitations/login", { code: ownerMintBody.code }),
+                requestContext,
+              ),
+            );
+            expect(ownerMintedLogin.status).toBe(200);
+            expect(yield* Effect.promise(() => ownerMintedLogin.json())).toMatchObject({
+              authenticated: true,
+              principal: { id: memberA.principalId, displayName: "Member A" },
+            });
+
+            // Member A (developer, no access:write) mints login code for self (200) and logs in.
+            const selfMintResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/api/auth/members/${memberA.principalId}/login-code`, {
+                  method: "POST",
+                  headers: { authorization: `Bearer ${memberA.token}` },
+                }),
+                requestContext,
+              ),
+            );
+            expect(selfMintResp.status).toBe(200);
+            const selfMintBody = (yield* Effect.promise(() => selfMintResp.json())) as {
+              code: string;
+              expiresAt: string;
+            };
+            expect(selfMintBody.code).toBeTruthy();
+            const selfMintedLogin = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/invitations/login", { code: selfMintBody.code }),
+                requestContext,
+              ),
+            );
+            expect(selfMintedLogin.status).toBe(200);
+            expect(yield* Effect.promise(() => selfMintedLogin.json())).toMatchObject({
+              authenticated: true,
+              principal: { id: memberA.principalId },
+            });
+
+            // Member A cannot mint login code for Member B or owner (403).
+            const otherMemberResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/api/auth/members/${memberB.principalId}/login-code`, {
+                  method: "POST",
+                  headers: { authorization: `Bearer ${memberA.token}` },
+                }),
+                requestContext,
+              ),
+            );
+            expect(otherMemberResp.status).toBe(403);
+
+            const ownerTargetResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/members/owner/login-code", {
+                  method: "POST",
+                  headers: { authorization: `Bearer ${memberA.token}` },
+                }),
+                requestContext,
+              ),
+            );
+            expect(ownerTargetResp.status).toBe(403);
+
+            // Owner minting for a missing principal returns 404 principal_not_found.
+            const missingResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/members/does-not-exist/login-code", {
+                  method: "POST",
+                  headers: { cookie: ownerCookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(missingResp.status).toBe(404);
+            expect(yield* Effect.promise(() => missingResp.json())).toMatchObject({
+              code: "not_found",
+              reason: "principal_not_found",
+            });
+
+            // Rate limit: once invitesPerHour is reached, minting returns 429.
+            yield* capturedLimits!.set({
+              principalId: memberA.principalId as never,
+              maxSessions: null,
+              maxTerminals: null,
+              invitesPerHour: 1,
+              maxApiTokens: null,
+            });
+            const rateLimitedResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/api/auth/members/${memberA.principalId}/login-code`, {
+                  method: "POST",
+                  headers: { authorization: `Bearer ${memberA.token}` },
+                }),
+                requestContext,
+              ),
+            );
+            expect(rateLimitedResp.status).toBe(429);
+          }),
+        (environment) => Effect.promise(() => environment.dispose()),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);

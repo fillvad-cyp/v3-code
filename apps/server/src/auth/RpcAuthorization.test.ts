@@ -1,3 +1,5 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
@@ -6,6 +8,7 @@ import {
   AuthSettingsWriteScope,
   AuthAccessWriteScope,
   AuthSessionId,
+  AuthStandardClientScopes,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   PrincipalId,
@@ -35,12 +38,19 @@ import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as RpcTest from "effect/rpc/RpcTest";
 
+import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ProjectAccess from "../access/ProjectAccess.ts";
 import * as ResourceResolver from "../access/ResourceResolver.ts";
+import * as EnvironmentAuth from "./EnvironmentAuth.ts";
+import * as ServerSecretStore from "./ServerSecretStore.ts";
 import {
   RPC_REQUIRED_SCOPES,
   requiredScopeForRpcMethod,
@@ -1507,5 +1517,127 @@ describe("RPC project access gate", () => {
           `mutate:project.delete:${projectA}`,
         ]);
       }).pipe(Effect.provide(makeGateServices(new Map())), Effect.scoped),
+  );
+
+  it.effect(
+    "multiUser settings toggle rejects non-owner admin patches, allows owner patches, and switches descriptor authMode",
+    () =>
+      Effect.gen(function* () {
+        const access = yield* ProjectAccess.ProjectAccess;
+        const resolver = yield* ResourceResolver.ResourceResolver;
+        const settingsService = yield* ServerSettings.ServerSettingsService;
+        const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+
+        const settingsGroup = WsRpcGroup.omit(
+          ...[...WsRpcGroup.requests.keys()].filter(
+            (
+              tag,
+            ): tag is Exclude<
+              keyof typeof RPC_REQUIRED_SCOPES,
+              typeof WS_METHODS.serverUpdateSettings
+            > => tag !== WS_METHODS.serverUpdateSettings,
+          ),
+        );
+        const settingsHandlers = settingsGroup.toLayerHandler(
+          WS_METHODS.serverUpdateSettings,
+          ({ patch }) => settingsService.updateSettings(patch),
+        );
+
+        const makeClientForActor = (actor: ProjectAccess.AccessActor) => {
+          const gate = RpcAuthorization.makeAccessGate({ actor, access, resolver });
+          return RpcTest.makeClient(settingsGroup).pipe(
+            Effect.provide(
+              Layer.merge(settingsHandlers, RpcAuthorization.layer(actor.scopes, undefined, gate)),
+            ),
+          );
+        };
+
+        const adminActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("admin-multiuser"),
+          subject: "admin",
+          scopes: [AuthAccessWriteScope, AuthSettingsWriteScope],
+          principalId: PrincipalId.make("principal-admin"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "admin"]]),
+        };
+        const ownerActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("owner-multiuser"),
+          subject: "owner",
+          scopes: AuthStandardClientScopes,
+          principalId: PrincipalId.make("owner"),
+          binding: { _tag: "environment" },
+          isOwner: true,
+          roles: new Map(),
+        };
+
+        const adminClient = yield* makeClientForActor(adminActor);
+        const ownerClient = yield* makeClientForActor(ownerActor);
+
+        // Starts in single-owner mode (authMode omitted).
+        expect((yield* environmentAuth.getDescriptor()).authMode).toBeUndefined();
+
+        // Non-owner admin (even with access:write) cannot toggle multiUser.
+        const rejectedEnable = yield* adminClient[WS_METHODS.serverUpdateSettings]({
+          patch: { multiUser: true },
+        }).pipe(Effect.flip);
+        expect(rejectedEnable).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthEnvironmentMaintainScope,
+        });
+        expect((yield* environmentAuth.getDescriptor()).authMode).toBeUndefined();
+
+        // Owner enables multi-user mode; descriptor switches authMode to "multi-user".
+        const enabled = yield* ownerClient[WS_METHODS.serverUpdateSettings]({
+          patch: { multiUser: true },
+        });
+        expect(enabled.multiUser).toBe(true);
+        expect((yield* environmentAuth.getDescriptor()).authMode).toBe("multi-user");
+
+        // Non-owner admin cannot disable multi-user mode either.
+        const rejectedDisable = yield* adminClient[WS_METHODS.serverUpdateSettings]({
+          patch: { multiUser: false },
+        }).pipe(Effect.flip);
+        expect(rejectedDisable).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthEnvironmentMaintainScope,
+        });
+        expect((yield* environmentAuth.getDescriptor()).authMode).toBe("multi-user");
+
+        // Owner disables multi-user mode; descriptor switches back to single-owner (omitted).
+        const disabled = yield* ownerClient[WS_METHODS.serverUpdateSettings]({
+          patch: { multiUser: false },
+        });
+        expect(disabled.multiUser).toBe(false);
+        expect((yield* environmentAuth.getDescriptor()).authMode).toBeUndefined();
+      }).pipe(
+        Effect.provide(
+          (() => {
+            const config = ServerConfig.layerTest(process.cwd(), {
+              prefix: "t3-rpc-auth-multiuser-test-",
+            });
+            const sqlite = Layer.fresh(SqlitePersistence.layerMemory);
+            const secrets = ServerSecretStore.layer.pipe(Layer.provide(config));
+            const settingsLayer = ServerSettings.layer.pipe(
+              Layer.provide(secrets),
+              Layer.provide(ManagedPolicy.layerTest()),
+              Layer.provide(sqlite),
+              Layer.provide(config),
+            );
+            const authLayer = EnvironmentAuth.layer.pipe(
+              Layer.provide(settingsLayer),
+              Layer.provide(ManagedPolicy.layerTest()),
+              Layer.provide(sqlite),
+              Layer.provide(secrets),
+              Layer.provide(ServerEnvironment.layerIdentity),
+              Layer.provide(config),
+            );
+            return Layer.mergeAll(makeGateServices(new Map()), settingsLayer, authLayer).pipe(
+              Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+            );
+          })(),
+        ),
+        Effect.scoped,
+      ),
   );
 });
