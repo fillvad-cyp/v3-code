@@ -87,7 +87,8 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("112_MultiUser", (it)
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
       yield* runMigrations();
-      yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id = 112`;
+      // Later migrations must not be recorded while this one replays.
+      yield* sql`DELETE FROM effect_sql_migrations WHERE migration_id >= 112`;
       const before = yield* sql`SELECT id FROM principals`;
 
       yield* runMigrations();
@@ -99,7 +100,7 @@ it.layer(NodeSqliteClient.layer({ filename: ":memory:" }))("112_MultiUser", (it)
   it.effect("enforces roles, binding shape and outcomes", () =>
     Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      yield* runMigrations();
+      yield* runMigrations({ toMigrationInclusive: 112 });
       yield* sql`
         INSERT INTO project_memberships (project_id, principal_id, role, state, created_at,
           updated_at)

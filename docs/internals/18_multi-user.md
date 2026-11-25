@@ -1,385 +1,228 @@
 # Multi-user: идентичность, членство, роли и изоляция проектов
 
-**Статус:** проект, не реализовано. Затрагивает `apps/server`, `packages/contracts`, web/desktop/mobile и CLI.
+**Статус:** реализован базовый multi-user (L0): идентичность, членство, одноразовые коды приглашения и входа, роли и потолки, гейт доступа (`ProjectAccess` / `ResourceResolver` / `RpcAuthorization`), фильтрация shell и глобальных списков, граница путей (`ProjectPaths`), живой отзыв сокетов, web UI участников и приглашений, CLI `t3 members`. Переключатель `settings.multiUser` выключен по умолчанию. Не реализовано: изоляция L1/L2, CRM-портал, email/SMTP, passkeys, задача ретенции и UI аудита, мобильный экран входа, отзыв подписанных asset-URL до истечения TTL — см. раздел «Дальше».
+
 **Цель:** персональный рабочий хаб: сотрудники получают ограниченные права на отдельные проекты, владелец управляет составом и отзывает доступ. Позже — CRM (клиенты/контакты как ресурсы проекта).
 **Инвариант:** локальный сервер остаётся источником истины; внешний IdP не требуется.
 
-Исходная точка: доступ сегодня — это скоупы сессии (`orchestration`, `terminal`, `filesystem`, `providers`, `access`, `relay`), проверяемые на каждом RPC ([`RpcAuthorization.ts`](../../apps/server/src/auth/RpcAuthorization.ts)), проекты — только группировка. Сессия не знает, к какому проекту относится вызов. Шаринг — pairing-ссылка на всё окружение либо guest-ссылка на один тред.
-
 ## Первый реальный сценарий (эталон для дизайна прав)
 
-Владелец приглашает сотрудника (живого человека) в свой инстанс и даёт ему:
+Владелец приглашает сотрудника в свой инстанс и даёт ему:
 
-1. доступ **только к одному проекту** — рабочему CRM-проекту **kotcrm**; на сервере его пока нет: проект будет импортирован целиком с локального T3 владельца, грант выдаётся после импорта;
+1. доступ **только к одному проекту** — например, рабочему проекту **kotcrm**;
 2. возможность создавать **собственные новые проекты**;
 3. **нет** доступа к остальным проектам и к настройкам инстанса.
 
-Приглашение — **без почты и без логина**: владелец выдаёт сотруднику одноразовый код (как pairing-код), сотрудник вводит его на странице принятия, задаёт имя/пароль и сразу получает сессию и членство. Email и SMTP не нужны; повторный доступ — новый одноразовый код от владельца.
+Приглашение — **без почты и без пароля**: владелец выдаёт сотруднику одноразовый код, сотрудник открывает `/invite/:code` (или вводит код), задаёт отображаемое имя (`displayName`) и сразу получает сессию и членство. Email и SMTP не нужны; повторный вход — новый одноразовый код входа (TTL 15 минут), который выпускает владелец или сам активный участник.
 
 Из этого следует:
 
-- Приглашение по ссылке (email опционален), вход по логину/паролю; доступ выдаем и отзываем сервером (`accessRevision`), без переустановки клиента.
-- Роль сотрудника на вверенном проекте — `developer` (или `admin`, если надо управлять составом); потолок `staff`. Создание своих проектов — не отдельная «роль member», а возможность `project:create` внутри роли: её получают `developer`+.
-- Проект, созданный участником, создаётся в управляемом корне (`<stateDir>-adjacent members root`), не по произвольному пути хоста — произвольный путь выбирает только owner. Такой проект получает `visibility = private`, `owner_id = создатель`, и членство создателя `admin`; виден он только создателю и owner-у. Свои проекты участник удалять не может (`project.delete` — только owner).
-- «Свои проекты» участника = проекты, где он creator (`owner_id`) или член; всё остальное для него не существует (404). Настройки инстанса (`serverUpdateSettings`, провайдеры, relay) остаются owner-скими; участнику отдаётся отредактированный view (см. §2.3).
+- Приглашение и повторный вход работают по одноразовым кодам; доступ выдаётся и отзывается сервером (`access_revision` + отзыв сессий), без переустановки клиента.
+- Роль сотрудника на вверенном проекте — `developer` (или `admin`, если надо управлять составом); потолок — `staff`. Создание своих проектов — возможность `project:create` внутри роли: её получают `developer`+ (при наличии хотя бы одного доступного проекта с `project:create`).
+- Проект, созданный участником, размещается в управляемом корне `<baseDir>/projects/` (произвольный путь хоста выбирает только owner). Такой проект получает `visibility = 'private'`, `owner_id = создатель` и членство создателя `admin`; виден он только создателю и owner-у. Удалять проекты участник не может (`project:delete` — только owner).
+- «Свои проекты» участника = проекты, где он активный член или создатель (`owner_id`); всё остальное для него скрыто. Настройки инстанса (`serverUpdateSettings`, провайдеры, relay) остаются owner-скими; участнику отдаётся отредактированный view (`redactServerSettingsForMember`).
 
 ## Ключевые решения
 
-1. **Идентичность локальная и явная.** Владелец, участники и внешние клиенты — записи `principals`; доступ — `project_memberships`. OIDC/SAML — не в MVP.
-2. **Авторизация трёхслойная:** для ресурса `эффективные_скоупы = запрошенные ∩ потолок_принципала ∩ роль_на_проекте_ресурса`. Скоупы остаются словарём методов; проект — новым измерением ресурса.
-3. **Совместимость по умолчанию.** Сессии и pairing-ссылки без принципала получают `binding_kind = environment` и ведут себя ровно как сегодня. Всё новое — deny by default.
-4. **Изоляция честная по этапам.** MVP — логическая фильтрация (L0); v2 — OS-пользователь на проект на Linux (L1); v3 — контейнер (L2). В L0 терминал и агент — общая граница, это пишется в UI.
-5. **Отзыв серверный.** `accessRevision` растёт при любом изменении состава/роли/потолка; сервер закрывает сокеты и перефильтровывает стримы. Клиент не является границей.
-6. **Миграция всех установок — в одного `owner`.** Никто не разлогинивается, старые гранты остаются валидными с пометкой `legacy`.
-7. **CRM — расширение модели, не переделка:** ресурсы проекта, роль `manager`, внешний `client` с порталом; guest-ссылки переиспользуются, но привязываются к принципалу.
+1. **Идентичность локальная и явная.** Владелец, участники и будущие внешние клиенты — записи `principals`; доступ — `project_memberships`. OIDC/SAML не требуются.
+2. **Авторизация трёхслойная:** для ресурса `эффективные_скоупы = скоупы_сессии ∩ потолок_принципала`, а поверх них проверяется `роль_на_проекте_ресурса` (`ProjectAccess` + `ResourceResolver`). Скоупы остаются словарём методов; проект — измерением ресурса.
+3. **Совместимость по умолчанию.** Сессии и pairing-ссылки без принципала либо с `binding_kind = 'environment'` проходят проектные проверки без сужения (`passesProjectChecks`). Всё новое — deny by default.
+4. **Изоляция честная по этапам.** Сейчас реализована логическая фильтрация (L0); L1 (OS-пользователь на проект) и L2 (контейнер) — дальнейшие этапы. В L0 терминал и агент делят границу хоста.
+5. **Отзыв серверный.** `access_revision` растёт при любом изменении роли, статуса или потолка; сервер перефильтровывает стримы и закрывает сокеты (`4401` при отзыве сессии, приостановке или удалении принципала; `4403` при потере всех проектов или проекта активной подписки). Клиент не является границей.
+6. **Миграция всех установок — в одного `owner`.** Существующие живые сессии привязываются к `owner` с `binding_kind = 'environment'`, никто не разлогинивается, а изменения существующих таблиц строго аддитивны.
+7. **CRM — расширение модели, не переделка:** роли `manager` и `external`-принципалы уже предусмотрены в схеме и контрактах, но сам домен CRM и портал ещё не строились.
 
 Не делаем: отдельный сервер/БД на проект, per-thread ACL (кроме существующих guest-ссылок), Kubernetes, обязательный SMTP.
 
 ---
 
-## 1. Идентичность и членство
+## 1. Идентичность, приглашения и сессии
 
 ### 1.1 Модель
 
-`principals`: `id`, `kind` (`owner` | `member` | `external` | `service`), `display_name`, `email` (нормализованный, `UNIQUE`), `status` (`invited` | `active` | `suspended` | `removed`), `ceiling_json`, `access_revision`, `created_at`, `updated_at`, `removed_at`.
+Определено в [`packages/contracts/src/membership.ts`](../../packages/contracts/src/membership.ts) и миграциях [`112_MultiUser.ts`](../../apps/server/src/persistence/Migrations/112_MultiUser.ts), [`113_InvitationPrincipal.ts`](../../apps/server/src/persistence/Migrations/113_InvitationPrincipal.ts):
 
-- `owner` — ровно один в MVP. Обходит проверки проектов, держит все скоупы.
-- `member` — сотрудник. Существует только через членство хотя бы в одном проекте.
-- `external` — клиент CRM (v3): только проектные ресурсы, без терминала/файлов.
-- `service` — CI/машина: принципал без членств, `binding_kind = environment`, потолок ограничен.
+- `principals`: `id`, `kind` (`owner` | `member` | `external` | `service`), `display_name`, `email` (nullable, `UNIQUE`), `status` (`invited` | `active` | `suspended` | `removed`), `ceiling_json`, `access_revision`, `created_at`, `updated_at`, `removed_at`.
+  - `owner` — ровно один на окружение (`id = 'owner'`), обходит проектные проверки и не ограничен потолком.
+  - `member` — сотрудник с `binding_kind = 'principal'`, чьи права следуют за активными `project_memberships` и собственными проектами (`owner_id`).
+- `project_memberships`: PK `(project_id, principal_id)`, `role` (`viewer` | `operator` | `developer` | `manager` | `admin`), `state` (`invited` | `active` | `suspended` | `removed`), `invited_by`, `expires_at`, `created_at`, `updated_at`.
+- `invitations`: `id`, `token_hash` (HMAC-хеш кода), `email` (nullable), `kind` (`staff` | `client`), `role`, `project_id` (NULL для environment-инвайта или кода входа), `principal_id` (nullable, добавлено в `113_InvitationPrincipal.ts` — не-NULL для одноразового кода входа существующего принципала), `ceiling_json`, `created_by`, `created_at`, `expires_at`, `accepted_at`, `revoked_at`.
+- `session_principals`: `session_id`, `principal_id`, `binding_kind` (`environment` | `principal` | `projects`), `binding_json` (обязателен и допустим только для `projects`).
+- Заготовки таблиц для следующих этапов (`principal_credentials`, `api_tokens`, `audit_events`, `member_limits`, `project_quotas`, `project_secrets`) также создаются миграцией `112_MultiUser.ts`. В рантайме сейчас используются `audit_events` (запись событий приглашений и членств), `member_limits` (`invites_per_hour`, по умолчанию 10) и `api_tokens` (каскадный отзыв при приостановке/удалении принципала).
 
-`principal_credentials`: `principal_id`, `algo = scrypt`, `salt`, `hash`, `updated_at`. Пароль — `node:crypto.scrypt` (N=16384), без нативной зависимости. Passkeys — v2.
+### 1.2 Приглашения и вход
 
-`project_memberships`: `project_id`, `principal_id`, `role`, `state` (`invited` | `active` | `suspended`), `invited_by`, `expires_at` (для внешних), `created_at`, `updated_at`, PK `(project_id, principal_id)`.
+Реализовано в [`InvitationService.ts`](../../apps/server/src/identity/InvitationService.ts) и [`auth/http.ts`](../../apps/server/src/auth/http.ts):
 
-Индексы: `principals(email)`, `project_memberships(principal_id, state)`, `project_memberships(project_id, role)`.
+- **Приглашение нового участника:** `owner` (в окружение или в проект) либо project `admin` (только в свой проект, роль ≤ своей, скоупы роли ⊆ потолка приглашающего) выпускает одноразовый код (`POST /api/auth/invitations` или `t3 members invite`, TTL по умолчанию 7 дней). Сырой код возвращается только в ответе создания; в БД хранится HMAC-хеш.
+- **Принятие приглашения:** `GET /invite/:code` отдаёт минимальную HTML-страницу, которая вызывает `POST /api/auth/invitations/accept` `{ code, displayName }`. Атомарно потребляет код, создаёт принципала и членство `active`, выдаёт `browser-session-cookie` с `binding_kind = 'principal'`.
+- **Повторный вход существующего участника:** `owner` или сам активный принципал выпускает одноразовый код входа (`POST /api/auth/members/:principalId/login-code` или `t3 members login-code`, TTL по умолчанию 15 минут). Клиент (web `/login` или внешний клиент) обменивает код через `POST /api/auth/invitations/login` `{ code }` и получает `bearer-access-token` + cookie с `binding_kind = 'principal'`.
+- **Desktop/CLI bootstrap, T3 Connect и pairing-ссылки** продолжают работать с `binding_kind = 'environment'` (либо без строки в `session_principals`, что эквивалентно `environment`).
+- **Восстановление доступа:** в текущем виде — выпуск нового одноразового кода входа владельцем через UI/API или локально через CLI `t3 members login-code --principal <id>` (работает и при остановленном сервере напрямую по SQLite).
 
-### 1.2 Приглашения
+### 1.3 Сессии и каскадный отзыв
 
-`invitations`: `id`, `token_hash` (HMAC серверным ключом; сырой токен только в ответе), `email`, `kind` (`staff` | `client`), `role`, `project_id` (NULL — приглашение в окружение, только owner), `ceiling_json`, `created_by`, `created_at`, `expires_at` (по умолчанию 7 дней), `accepted_at`, `revoked_at`.
-
-Правила:
-
-- Приглашение выдаёт `owner` (в окружение или в проект) либо `project admin` (только в свой проект, роль ≤ своей, скоупы ∩ свой потолок).
-- Приглашение — одноразовый код (как pairing-код): человеко-вводимый, HMAC-хеш хранится вместо кода; email опционален и по умолчанию отсутствует (см. «Первый реальный сценарий»). С SMTP письмо; доставка не блокирует создание.
-- Одноразовость и атомарное потребление — как в `AuthPairingLinks.consumeAvailable`.
-- Повторный инвайт на существующий email добавляет членство тому же принципалу, а не создаёт дубль.
-- Инвайт на `external` всегда с `project_id` и `expires_at`.
-
-### 1.3 Вход
-
-- `POST /api/auth/login` `{ email, password }` → обычная browser-session cookie через `SessionStore.issue` с `principalId`.
-- DPoP-клиенты: `POST /api/auth/token` (grant `password`) с proof-key; сессия привязывается к ключу, как сейчас.
-- Приглашённый принимает ссылку на `/invite/:token`: имя, пароль, сразу сессия и членство.
-- Ограничение попыток: 5 неудач / 15 минут на email+IP, dummy-хеш для неизвестных email, одинаковая ошибка.
-- Cookie-сессии уже отклоняются при чужом Origin в `authenticateRequest`; login-эндпоинт дополнительно проверяет Origin и лимитируется.
-- Desktop/CLI bootstrap, T3 Connect и pairing-ссылки продолжают работать без принципала (owner-эквивалент, `legacy`). Десктоп, подключённый к чужому серверу, входит обычным логином; собственный сервер десктопа остаётся owner-bootstrap.
-
-### 1.4 Восстановление
-
-Четыре уровня, от дешёвого к всегда доступному:
-
-1. **Сам** — `POST /api/auth/recovery` по email: всегда 204, письмо/ссылка на 30 минут, одноразово. Новый пароль отзывает все сессии принципала.
-2. **Владелец** — `POST /api/members/:id/recovery`: одноразовый код, отзывает все сессии и устройства, принципал обязан сменить пароль.
-3. **Break-glass по ОС** — `t3 members recover --base-dir <state> --email <email>`: печатает одноразовую owner-ссылку. Работает без сети и SMTP; корень доверия — доступ к ОС-пользователю сервера.
-4. Потерян единственный owner без email — CLI создаёт `owner` из текущего ОС-пользователя (`t3 members owner-reset`).
-
-Восстановление — событие аудита; все прежние сессии, PAT и MCP-сессии отзываются.
-
-### 1.5 Сессии и устройства
-
-`SessionStore` получает `principalId`, `binding_kind` (`environment` | `principal` | `projects`) и `binding_json` (явные project id — только для `projects`). `environment` — owner, service и легаси; `principal` — живое членство (права следуют за изменениями); `projects` — узкие ссылки/PAT. Узкая ссылка переносит свой `projects`-binding в сессию и не расширяется до принципала. Свой список клиентов и «отозвать остальные» видит принципал; admin проекта — сессии принципалов своего проекта; owner — все. Отзыв принципала каскадно убивает его сессии, устройства (по `proofKeyThumbprint`), PAT, MCP-сессии и pending-инвайты.
-
-Альтернативы: (а) каждый сотрудник = долгоживущая pairing-ссылка — нет имён, мультидевайса и точечного отзыва; (б) OIDC сразу — ломает local-first и офлайн; (в) один общий пароль на сервер — не даёт per-project прав.
+- `environment` — owner и legacy-сессии; `principal` — живое членство (права перечитываются при росте `access_revision`); `projects` — явный список пар `(projectId, role)` в `binding_json`, который никогда не расширяется до членств принципала.
+- Приостановка (`suspendPrincipal`) или удаление (`removePrincipal`) принципала в [`MembershipService.ts`](../../apps/server/src/identity/MembershipService.ts) поднимает `access_revision`, отзывает его сессии в `SessionStore`, API-токены и ожидающие приглашения.
 
 ---
 
-## 2. Роли и права
+## 2. Роли, потолки и скоупы
 
 ### 2.1 Потолок
 
-`principals.ceiling_json` — максимум скоупов принципала, задаётся owner-ом из шаблонов `staff` / `restricted` / `client`. Потолок — глобальный: роль проекта сужает его, но не расширяет. Инварианты:
+`principals.ceiling_json` задаётся owner-ом из шаблонов в [`packages/contracts/src/roleScopes.ts`](../../packages/contracts/src/roleScopes.ts):
 
-- Сессия никогда не получает скоуп вне потолка, даже если роль проекта его подразумевает.
-- Никто не выдаёт больше, чем имеет: инвайт и смена роли режутся `потолок_приглашающего ∩ роль`.
-- Понижение потолка немедленно сужает живые сессии (проверка на каждом вызове, не только при выдаче).
-- `access:write` в окружении, `relay:configure`, `environment:maintain` — только у owner. Project admin держит `access:write` только в границах своего проекта.
-- Создание проекта: `project:create` есть у `developer`+; owner выбирает произвольный путь хоста, участник получает управляемый корень (см. «Первый реальный сценарий»).
+- `staff` — все скоупы роли `admin` + `relay:read`;
+- `restricted` — `orchestration:{read,operate}`, `terminal:{read,operate}`, `preview:operate`, `filesystem:read`, `access:read`;
+- `client` — `orchestration:read`, `filesystem:read`, `access:read`.
+
+Инварианты:
+
+- Эффективные скоупы не-owner сессии на каждом RPC-вызове пересекаются с потолком (`scopes ∩ ceiling`); понижение потолка действует немедленно.
+- Никто не выдаёт больше, чем имеет: приглашение и смена роли проверяют ранг актёра и его потолок.
+- `environment:maintain`, `diagnostics:read`, `relay:write`, `relay:configure` и переключение `multiUser` доступны только owner-у.
+- `project:create` есть у `developer`+ и проверяется по наличию хотя бы одного доступного проекта с этой возможностью.
 
 ### 2.2 Матрица ролей
 
-`viewer` ⊂ `operator` ⊂ `developer` ⊂ `admin`; `manager` — боковая ветка для CRM; `owner` — окружение и удаление проектов.
+`viewer` ⊂ `operator` ⊂ `developer` ⊂ `admin`; `manager` — боковая ветка под будущую CRM; `owner` — окружение и удаление проектов. Константы определены в [`roleScopes.ts`](../../packages/contracts/src/roleScopes.ts) (не в БД).
 
-| Возможность                                        | viewer | operator | developer | manager | admin | owner |
-| -------------------------------------------------- | :----: | :------: | :-------: | :-----: | :---: | :---: |
-| `project.read` (треды, файлы, список preview)      |   ✓    |    ✓     |     ✓     |    ✓    |   ✓   |   ✓   |
-| `thread.operate` (запуск, ответы, стоп)            |   –    |    ✓     |     ✓     |    ✓    |   ✓   |   ✓   |
-| `terminal.read` / `terminal.operate`               |   –    |    ✓*    |    ✓*     |    –    |  ✓*   |   ✓   |
-| `preview.operate`                                  |   –    |    ✓     |     ✓     |    –    |   ✓   |   ✓   |
-| `file.write`                                       |   –    |    –     |     ✓     |    –    |   ✓   |   ✓   |
-| `source.write` (git, ветки, PR)                    |   –    |    –     |     ✓     |    –    |   ✓   |   ✓   |
-| `thread.manage` (архив, удаление, перенос, теги)   |   –    |    –     |     ✓     |    –    |   ✓   |   ✓   |
-| `project.settings` (скрипты, модель, папки)        |   –    |    –     |     –     |    –    |   ✓   |   ✓   |
-| `project:create` (свой проект, управляемый корень) |   –    |    –     |     ✓     |    –    |   ✓   |   ✓   |
-| состав проекта: видеть (`access:read`)             |   ✓    |    ✓     |     ✓     |    ✓    |   ✓   |   ✓   |
-| `project.members` (управление, `access:write`)     |   –    |    –     |     –     |    –    |   ✓   |   ✓   |
-| `project.secrets` / `project.webhooks`             |   –    |    –     |     –     |    –    |   ✓   |   ✓   |
-| `crm.read`                                         |   ✓    |    ✓     |     ✓     |    ✓    |   ✓   |   ✓   |
-| `crm.write` / `crm.invite_client`                  |   –    |    –     |     –     |    ✓    |   ✓   |   ✓   |
-| `project.delete`                                   |   –    |    –     |     –     |    –    |   –   |   ✓   |
-| окружение: настройки, провайдеры, доступ, relay    |   –    |    –     |     –     |    –    |   –   |   ✓   |
+| Возможность                                                         | viewer | operator | developer | manager | admin | owner |
+| ------------------------------------------------------------------- | :----: | :------: | :-------: | :-----: | :---: | :---: |
+| `project:read` (треды, файлы, список preview)                       |   ✓    |    ✓     |     ✓     |    ✓    |   ✓   |   ✓   |
+| `project:thread.operate` (запуск, ответы, стоп)                     |   –    |    ✓     |     ✓     |    ✓    |   ✓   |   ✓   |
+| `project:terminal.read` / `project:terminal.operate`                |   –    |   ✓\*    |    ✓\*    |    –    |  ✓\*  |   ✓   |
+| `project:preview.operate`                                           |   –    |    ✓     |     ✓     |    –    |   ✓   |   ✓   |
+| `project:file.write`                                                |   –    |    –     |     ✓     |    –    |   ✓   |   ✓   |
+| `project:source.write` (git, ветки, PR)                             |   –    |    –     |     ✓     |    –    |   ✓   |   ✓   |
+| `project:thread.manage` (архив, удаление, fork/merge, теги)         |   –    |    –     |     ✓     |    –    |   ✓   |   ✓   |
+| `project:settings` (настройки проекта, скрипты, issue tracker bind) |   –    |    –     |     –     |    –    |   ✓   |   ✓   |
+| `project:create` (свой проект в `<baseDir>/projects/`)              |   –    |    –     |     ✓     |    –    |   ✓   |   ✓   |
+| состав проекта: видеть (`access:read`)                              |   ✓    |    ✓     |     ✓     |    ✓    |   ✓   |   ✓   |
+| `project:members` (управление составом, `guestShareCreate`)         |   –    |    –     |     –     |    –    |   ✓   |   ✓   |
+| `project:secrets` (контракт; API — в «Дальше»)                      |   –    |    –     |     –     |    –    |   ✓   |   ✓   |
+| `project:webhooks` (вебхук-задачи, ротация токена, логи доставок)   |   –    |    –     |     –     |    –    |   ✓   |   ✓   |
+| `project:crm.read` (контракт; домен — в «Дальше»)                   |   ✓    |    ✓     |     ✓     |    ✓    |   ✓   |   ✓   |
+| `project:crm.write` / `project:crm.invite_client` (в «Дальше»)      |   –    |    –     |     –     |    ✓    |   ✓   |   ✓   |
+| `project:delete`                                                    |   –    |    –     |     –     |    –    |   –   |   ✓   |
+| окружение: настройки, провайдеры, `multiUser`, relay, устройства    |   –    |    –     |     –     |    –    |   –   |   ✓   |
 
-\* В L0 терминал фактически видит весь хост (см. §4); UI помечает это. В L1 — только проект.
+\* В L0 терминал работает от ОС-пользователя сервера и технически видит весь хост; `ProjectPaths` ограничивает только начальный `cwd`.
 
-### 2.3 Скоупы: картирование и совместимость
+### 2.3 Гейт доступа и настройки
 
-Роль разворачивается в скоупы для гейтов `RPC_REQUIRED_SCOPES`; проектная проверка идёт отдельно.
-
-| Возможность        | Примеры методов                                                                                   | Скоуп                                                    |
-| ------------------ | ------------------------------------------------------------------------------------------------- | -------------------------------------------------------- |
-| `project.read`     | `subscribeShell`, `getThreadProjection`, `projectsListEntries`, `projectsReadFile`, `previewList` | `orchestration:read`, `filesystem:read`                  |
-| `thread.operate`   | `launchThread`, `dispatchCommand`, `secretsAnswerRequest`                                         | `orchestration:operate`                                  |
-| `terminal.operate` | `terminalOpen`, `terminalWrite`, `previewTunnel`                                                  | `terminal:read` / `terminal:operate`                     |
-| `preview.operate`  | `previewOpen`, `previewAdjust`                                                                    | `preview:operate`                                        |
-| `file.write`       | `projectsWriteFile`, вложения                                                                     | `filesystem:write`, `orchestration:operate`              |
-| `source.write`     | `vcs*`, `pullRequests*` (mutate)                                                                  | `source-control:write`                                   |
-| `project.settings` | `projectsMutate(update)`, скрипты                                                                 | `orchestration:operate` (+`settings:write` для скриптов) |
-| `project.members`  | `members.*`, `invitations.*`                                                                      | `access:read` / `access:write`                           |
-| `project.secrets`  | `/api/projects/:id/secrets/*`                                                                     | `providers:manage`                                       |
-
-Правила совместимости:
-
-- `sessionGrantsScope` и `permissions` в `packages/contracts/src/auth.ts` не меняются; старый клиент продолжает декодировать ответы.
-- Старые pairing-ссылки и сессии — `binding_kind = environment`: проектная проверка для них возвращает `allow`.
-- Скоупы проекта выдаются уже суженными; ссылка, выпущенная project admin, несёт ровно роль-скоупы и `binding_kind = projects` на проект(ы).
-- `access:write` у project admin позволяет выпускать только проектные ссылки и отзывать сессии принципалов, с которыми есть общий проект.
-- `access:read` входит в любую проектную роль (видеть состав своего проекта), `access:write` — только admin+; список клиентов/ссылок фильтруется проектом.
-- Создание проекта — `project:create` (см. «Первый реальный сценарий»): owner — произвольный путь, участник — управляемый корень.
-- `serverGetSettings` для участника отдаётся редактированным: провайдеры и их инстансы — без путей/секретов, оверрайды — только его проектов. `serverUpdateSettings` от участника принимает лишь `projectSettingsOverrides[ownProject]` и `projectScriptOverrides[ownProject]`; глобальные поля — owner.
-- Роль-скоупы — константы, не строки БД: апгрейд не оставляет устаревших ролей.
-
-### 2.4 Наследование
-
-Тред наследует проект; сабагенты и worktree — тред. Перенос треда между проектами требует `thread.manage` на источнике и `thread.operate` на цели. Guest-ссылка остаётся вне ролей: анонимный токен на один тред, отзывается вместе с share.
-
-Решение: роли, а не произвольные списки скоупов на проект. Альтернатива — ACL-редактор — гибче, но даёт дыры при отзыве и тяжела в UI.
+- `RpcAuthorization.layer` + `makeAccessGate` ([`RpcAuthorization.ts`](../../apps/server/src/auth/RpcAuthorization.ts)) на каждом RPC обновляют актёра по `access_revision`, проверяют `scopes ∩ ceiling`, затем резолвят цель через [`ResourceResolver.ts`](../../apps/server/src/access/ResourceResolver.ts) и проверяют роль через [`ProjectAccess.ts`](../../apps/server/src/access/ProjectAccess.ts).
+- Отказы: нехватка скоупа или owner-only настройка → `EnvironmentAuthorizationError`; нехватка проектной возможности → `ProjectForbiddenError` (`_tag: "project_forbidden"`, `projectId`, `requiredPermission: "project:<cap>"`). Чужие треды на HTTP `/api/orchestration/threads/:threadId*` возвращают `EnvironmentResourceNotFoundError` (404); чужие scheduled tasks и workflow runs скрываются доменной ошибкой not-found.
+- `serverGetSettings` для не-owner редактируется через `redactServerSettingsForMember` ([`serverSettings.ts`](../../apps/server/src/serverSettings.ts)): вырезаются пути/секреты провайдеров, хостовые настройки и оверрайды чужих проектов. `serverUpdateSettings` для не-owner принимает только `projectSettingsOverrides` и `projectScriptOverrides` по проектам с `project:settings` (без secret references, без `multiUser`, без мутаций `providerInstanceMutation`).
+- Тред наследует проект; сабагенты и worktree — тред. Guest-ссылка остаётся анонимным токеном на один тред; её создание (`guestShareCreate`) требует `project:members`.
 
 ---
 
-## 3. Жизненный цикл доступа
+## 3. Жизненный цикл доступа и живой отзыв
 
-| Шаг                  | Актор                 | Эффект                                                          | Аудит                     |
-| -------------------- | --------------------- | --------------------------------------------------------------- | ------------------------- |
-| Создание инвайта     | owner / project admin | запись `invitations`, ссылка                                    | `invitation.created`      |
-| Принятие             | приглашённый          | принципал (или существующий), членство `active`, сессия         | `invitation.accepted`     |
-| Смена роли           | admin+                | новая роль ⊆ потолок                                            | `membership.role.changed` |
-| Suspended в проекте  | admin+                | членство `suspended`, проектные сессии перефильтрованы          | `membership.suspended`    |
-| Suspended принципал  | owner                 | членство(а) `suspended`, все сессии и устройства отозваны       | `member.suspended`        |
-| Возврат              | admin+ / owner        | членство `active`, нужен новый вход                             | `member.reactivated`      |
-| Отзыв из проекта     | admin+                | членство `removed`, `accessRevision++`                          | `membership.removed`      |
-| Удаление принципала  | owner                 | отзыв всего, членства `removed`, аудит хранит id и снимок имени | `member.removed`          |
-| Истечение (external) | планировщик           | `suspended`, письмо владельцу                                   | `membership.expired`      |
-| Передача owner       | owner                 | оба активны, подтверждение, старый owner → `member`/admin       | `owner.transferred`       |
+Реализовано в [`MembershipService.ts`](../../apps/server/src/identity/MembershipService.ts), [`RpcAuthorization.ts`](../../apps/server/src/auth/RpcAuthorization.ts) и [`ws.ts`](../../apps/server/src/ws.ts):
 
-Правила:
-
-- Любое изменение поднимает `access_revision` у принципала и глобальный `accessRevision` окружения. RPC сверяет ревизию перед вызовом; стримы перефильтровываются на лету; при потере доступа — close `4403`, после `suspended`/`removed` — `4401` и повторный вход.
-- Смена роли не рвёт сессию: следующий вызов видит новую роль. Понижение роли мгновенно убирает методы и элементы стрима.
-- Удаление принципала не удаляет треды: авторство остаётся в `createdBy` снимком.
-- **Orphan-проекты.** Удаление последнего admin автоматически делает owner admin-ом проекта и пишет уведомление; проект не остаётся без admin-а. Удаление owner-а требует преемника (CLI допускает forced transfer).
-- Удаление проекта: `project.delete` (owner). Треды/worktree удаляются по текущей процедуре, членства и инвайты вычищаются, аудит сохраняется.
-- Проект в архиве: членство сохраняется, `project.read` работает, запись — нет.
-
-Альтернатива — каждый шаг через подтверждение owner-а: проще в реализации, но не масштабируется на десятки сотрудников. Выбрано делегирование вниз с потолком, потому что отзыв всё равно остаётся у owner-а.
+- **Приглашение / принятие / отзыв инвайта:** пишет аудит в `audit_events` (`invitation.created`, `invitation.accepted`, `invitation.revoked`, `invitation.login.*`).
+- **Смена роли / потолка:** поднимает `access_revision`, **не рвёт** живой сокет; следующий RPC и shell-стрим пересчитывают права по новой ревизии.
+- **Приостановка в проекте / удаление из проекта:** поднимает `access_revision`. Если у участника не осталось доступных проектов, активный сокет закрывается кодом **`4403`** (`project_access_revoked`); если потерян доступ к проекту открытой подписки на тред — **`4403`** (`resource_access_revoked`).
+- **Приостановка (`suspendPrincipal`) или удаление (`removePrincipal`) принципала (только owner):** переводит не-удалённые членства в `suspended`/`removed`, поднимает `access_revision`, отзывает все сессии, API-токены и pending-инвайты. Живые и простаивающие WebSocket-соединения закрываются кодом **`4401`** немедленно через `SessionStore.awaitInvalidation` (а при прямой смене статуса в БД — на ближайшем RPC-refresh). Возврат (`reactivatePrincipal`) требует нового кода входа.
+- **Orphan-проекты:** при удалении последнего `admin` проекта `MembershipService` автоматически назначает `owner` администратором проекта (`promotedOwner: true`).
+- **Защита owner:** модифицировать или удалить `owner` через `MembershipService` нельзя.
 
 ---
 
-## 4. Изоляция
+## 4. Изоляция (текущий уровень — L0)
 
-### 4.1 Решение по уровням
+| Уровень                          | Что изолирует                                  | Где           | Статус      |
+| -------------------------------- | ---------------------------------------------- | ------------- | ----------- |
+| **L0 логический**                | серверная фильтрация ресурсов, путей и стримов | все ОС        | реализовано |
+| **L1 OS-пользователь на проект** | файлы, процессы, git-креды, env                | Linux-серверы | дальше      |
+| **L2 контейнер на проект**       | ФС, сеть, ресурсы                              | Linux, сервер | дальше      |
 
-| Уровень                          | Что изолирует                           | Где           | Когда                |
-| -------------------------------- | --------------------------------------- | ------------- | -------------------- |
-| **L0 логический**                | серверная фильтрация ресурсов и стримов | все ОС        | MVP                  |
-| **L1 OS-пользователь на проект** | файлы, процессы, git-креды, env         | Linux-серверы | v2, по флагу проекта |
-| **L2 контейнер на проект**       | ФС, сеть, ресурсы                       | Linux, сервер | v3, опция            |
+По поверхностям в L0:
 
-L0 обязателен всегда: он даёт UX и защиту от случайных ошибок, но не от злонамеренного участника с терминалом. В L0 `filesystem:read` по-прежнему «что видит ОС-пользователь» — это документируется, а UI показывает бейдж «доступ к хосту».
-
-L1: запуск через `systemd-run --uid=svc-<project>` (или маленький setuid-хелпер); сервер-супервизор не обязан быть root. Корни проектов и worktree переводятся в группу `t3-<project>` с `g+rws`, `stateDir` — 0700 под сервисным пользователем; порты — из диапазона проекта. L1b (альтернатива) — `bwrap`-песочница без создания юзеров: дешевле, но ломается на pty/Node и не даёт git-кред.
-
-L2: podman-контейнер с bind-mount проекта и worktree, сетевым неймспейсом и лимитами cgroup. Дорого на macOS/десктопе; потому v3.
-
-### 4.2 По поверхностям
-
-- **Оркестрация.** `projectId` обязателен в `launchThread`, `dispatchCommand`, `projectsMutate` и в переносе треда. `ProjectAccess` проверяется до `Orchestrator`; сабагент наследует проект родителя, кросс-проектный делегат запрещён. Глобальные списки (`pullRequests*`, `issues*`, `workflows*`, `scheduledTasks*`, `serverGetUsageSummary`, `device*`) сужаются по проекту: PR — по `repositoryIdentity`, issues/задачи/прогоны — по `projectId`, устройства и общая телеметрия — owner.
-- **Файлы.** `projectsReadFile` принимает абсолютный host-путь в `relativePath` и не проверяет `cwd`; `projectsListEntries`/`searchContents` верят переданному `cwd`; `filesystemBrowse` не ограничен. Внутри выбранного корня `WorkspaceFileSystem` исправно режет `..` и симлинки через `realpath` ([`WorkspaceFileSystem.ts:590`](../../apps/server/src/workspace/WorkspaceFileSystem.ts)), но сам корень сегодня любой. Добавляется `assertProjectPath(path, capability)` с `realpath` и матчингом самого длинного корня проекта/worktree — на все cwd- и path-методы; environment-чтение (`/`, `~`, `/etc`) остаётся owner-у. `workspaceListFolders` отдаёт только корни его проектов и worktree.
-- **Терминал.** `terminalOpen` получает `projectId`; `cwd` обязан лежать в корне проекта или его worktree (сейчас проверяется только `stat` — [`Manager.ts:3309`](../../apps/server/src/terminal/Manager.ts)). Env: `T3_PROJECT_ID`, `T3_MEMBER_ID`; allowlist вместо наследования всего env (v2). `cd ..` наружу в L0 разрешён и подписан в UI.
-- **Секреты.** Два уровня: `server_secrets` (owner, существующий `ServerSecretStore`) и `project_secrets` (AES-GCM, ключ сервера, только имена и отпечатки наружу). Ссылки вида `secret://project/<id>/<name>` резолвятся в контексте проекта; env-секреты участнику не видны. Провайдерские ключи остаются owner-скими; `providers:manage` у admin даёт выбор инстанса, не значение.
-- **Preview.** Сессия preview несёт `projectId`; `previewOpen` принимает только URL, поднятый тредом проекта, либо порт из диапазона проекта (v2). `/api/preview/tunnel` (raw TCP в loopback, требует `terminal:operate`) получает подписанный токен с `projectId` и TTL 15 минут; порт вне диапазона — 403 `x-t3-tunnel-out-of-scope`.
-- **Git-креды.** L0 — общие креды хоста, `source-control:write` только UX-граница. L1 — `GIT_SSH_COMMAND`/askpass на проект из `project_secrets`, свой `safe.directory`; force-push и PR-права проверяются на проект.
-- **Worktree.** Каталог worktree на проект (`worktrees/<projectId>/...`), проверка владельца при усыновлении существующего пути; managed-пути уже валидируются (`makeIsManagedWorktreePath`).
-- **Вложения и ассеты.** Подписанные URL получают claim `pid` (проект) и `sub` (принципал), TTL 15 минут для участников (сейчас 1 час). Проверка — при выпуске; после отзыва URL живёт до TTL, это документируется. Токен загрузки вложения привязывается к принципалу и треду.
-- **Устройства/симуляторы, импорт агентских сессий.** `device:*`, `agentSessionsScan/Import` — owner-only в MVP (общий парк машин и домашние каталоги); в v2 — привязка устройства к проекту.
-
-Компромисс local-first: L0 не требует ни root, ни контейнеров, работает на macOS/Windows и в десктопе. Цена — честно названная слабая граница; переход на L1 — флаг проекта, а не смена модели прав.
+- **Оркестрация и глобальные списки:** `subscribeShell`, HTTP `/api/projects` и `/api/orchestration/*`, `searchThreads`, `pullRequests*`, `issues*`, `issueTrackersList`, `workflows*` и `scheduledTasks*` сужаются до доступных проектов участника. `device*`, `agentSessions*` и `serverGetUsageSummary` остаются owner-only.
+- **Файлы, VCS и терминал:** [`ProjectPaths.ts`](../../apps/server/src/access/ProjectPaths.ts) (`assertPath` / `assertCwd`) нормализует путь с рекурсивным `realpath` (и защитой от симлинк-циклов) и матчит самый длинный корень проекта, worktree, `trackedFolders` или `task_folders`. Применяется ко всем файловым, VCS- и `terminalOpen`-методам в `ws.ts`; `workspaceListFolders` и `filesystemBrowse` ограничены корнями проектов участника. В L0 терминал после запуска всё ещё работает от ОС-пользователя сервера (`cd ..` наружу не режется ОС).
+- **Preview:** `/api/preview/tunnel` требует `terminal:operate`, а при переданном query-параметре `projectId` проверяет `project:preview.operate` (403 при отказе, 401 при неактивном принципале). Диапазоны портов и отдельные tunnel-токены — в «Дальше».
+- **Вложения и ассеты:** [`AssetAccess.ts`](../../apps/server/src/assets/AssetAccess.ts) проверяет `project:read` для проектных ресурсов, записывает `projectId` в подписанные claims и сокращает TTL для не-owner с 1 часа до 15 минут. Проверка выполняется только при выпуске URL; отзыв до истечения TTL не реализован.
+- **Вебхуки:** доставка `/api/hooks/:hookId/:token` ([`ScheduledTaskService.ts`](../../apps/server/src/scheduledTasks/ScheduledTaskService.ts)) проверяет состояние проекта задачи (удалённый → 404, архивный → `disabled`). Ротация токена и просмотр журналов доставок (`scheduledTasksListWebhookDeliveries`, `scheduledTasksGetWebhookDelivery`) требуют `project:webhooks` (`admin`+), а задачи чужих проектов скрываются как не найденные.
 
 ---
 
-## 5. Аудит, лимиты, квоты
+## 5. API, CLI, UI и совместимость
 
-### 5.1 Аудит
+### 5.1 HTTP-эндпоинты
 
-`audit_events`: `id`, `at`, `actor_principal_id`, `actor_session_id`, `action`, `resource_type`, `resource_id`, `project_id`, `ip`, `user_agent`, `outcome` (`allow` | `deny` | `error`), `metadata_json` (редактированный).
+Определены в [`packages/contracts/src/environmentHttp.ts`](../../packages/contracts/src/environmentHttp.ts) и [`apps/server/src/auth/http.ts`](../../apps/server/src/auth/http.ts):
 
-Пишем: вход/выход, провалы входа, инвайты и их принятие, смены ролей/потолков/статусов, отзывы сессий и устройств, выдачу PAT, открытие терминала, чтение секрета, выпуск asset-URL, открытие preview-туннеля, отказы авторизации (сэмплирование 1/10 на шумные чтения), экспорт и purge CRM.
+| Метод  | Путь                                             | Право                                                                         |
+| ------ | ------------------------------------------------ | ----------------------------------------------------------------------------- |
+| GET    | `/invite/:code`                                  | публичный (HTML-страница принятия кода)                                       |
+| POST   | `/api/auth/invitations/accept`                   | одноразовый код приглашения (`{ code, displayName }`)                         |
+| POST   | `/api/auth/invitations/login`                    | одноразовый код входа (`{ code }`)                                            |
+| POST   | `/api/auth/invitations`                          | `access:write` + `project:members` (или owner)                                |
+| GET    | `/api/auth/invitations[?projectId=...]`          | `access:read` (фильтрация по проектам актёра)                                 |
+| DELETE | `/api/auth/invitations/:id`                      | `access:write` (в границах проектов актёра)                                   |
+| GET    | `/api/auth/members`                              | `access:read` (фильтрация по общим проектам)                                  |
+| PATCH  | `/api/auth/members/:principalId`                 | `access:write` (потолок и статус принципала — owner)                          |
+| DELETE | `/api/auth/members/:principalId[?projectId=...]` | `access:write` (с `projectId` — из проекта; без — удаление принципала, owner) |
+| POST   | `/api/auth/members/:principalId/login-code`      | аутентифицированный `owner` или сам активный принципал                        |
 
-Не пишем: значения секретов, тела сообщений, содержимое файлов; только id и отпечатки.
+### 5.2 CLI и UI
 
-Чтение: owner — всё; admin — свой проект. `GET /api/audit?projectId=&actor=&action=&from=&to=`. Ретенция 90 дней (настройка), purge — owner. Экспорт JSONL. В v2 — hash-chain (`prev_hash`) и проверка `t3 audit verify`.
+- **CLI** ([`apps/server/src/cli/members.ts`](../../apps/server/src/cli/members.ts)): `t3 members invite`, `t3 members list`, `t3 members login-code`, `t3 members enable`, `t3 members disable`. Все команды работают через запущенный сервер либо напрямую по SQLite, если сервер остановлен.
+- **Web UI:** экран входа `/login` (`LoginRouteSurface`), настройки участников и приглашений (`MembersSettings`, `ProjectMembersSettings`, `MemberInviteDialog`, `MemberLoginCodeDialog`), индикация сессии и переключение `multiUser` в `ConnectionsSettings` / `SessionPermissions`.
 
-### 5.2 Лимиты
+### 5.3 Совместимость контрактов
 
-`member_limits`: сессии/принципал (5), конкурентные терминалы (3), preview-вкладки (4), инвайты/час (10), PAT (10), MCP-клиенты (5). Дефолты в коде, owner переопределяет. Превышение — 429 + `Retry-After`; для терминалов — 409 с id открытых.
-
-### 5.3 Квоты
-
-`project_quotas`: `max_active_threads` (10), `max_worktrees` (5), `disk_bytes` (5 ГБ, мягко), `attachment_bytes` (200 МБ). Проверка в `ThreadLaunchService`, `terminal.Manager`, `attachmentStore`; 80% — предупреждение, 100% — отказ новым треду/worktree/вложению, текущие turn-ы не убиваются. `GET /api/projects/:id/usage`, страница Usage, событие `quota.exceeded`.
-
-Альтернатива — только глобальные лимиты: дешевле, но один проект съедает диск и останавливает остальные. Поэтому лимиты — на принципала (антиабьюз), квоты — на проект (справедливость).
-
----
-
-## 6. API, токены, вебхуки, версионирование
-
-### 6.1 HTTP
-
-| Метод           | Путь                                | Право                                          |
-| --------------- | ----------------------------------- | ---------------------------------------------- |
-| POST            | `/api/auth/login`                   | — (лимит)                                      |
-| POST            | `/api/auth/token`                   | — (лимит, DPoP)                                |
-| POST            | `/api/auth/recovery`                | — (лимит)                                      |
-| POST            | `/api/auth/recovery/confirm`        | токен                                          |
-| POST            | `/api/invitations`                  | `access:write` + `project.members`             |
-| POST            | `/api/invitations/accept`           | токен                                          |
-| GET/DELETE      | `/api/invitations[/:id]`            | `access:read` / `access:write`                 |
-| GET             | `/api/members`                      | `access:read` (фильтр по проектам)             |
-| PATCH/DELETE    | `/api/members/:id`                  | `access:write` (потолок — owner)               |
-| GET/PUT/DELETE  | `/api/projects/:id/members[/:pid]`  | `access:read` / `project.members`              |
-| GET/PUT/DELETE  | `/api/projects/:id/secrets[/:name]` | `project.secrets`                              |
-| GET/POST/DELETE | `/api/tokens[/:id]`                 | свой принципал `потолок ∩ роли`; чужой — owner |
-| GET             | `/api/projects/:id/usage`           | `access:read`                                  |
-| GET             | `/api/audit`                        | `access:read`                                  |
-
-Кроме входа, восстановления и принятия инвайта — все через `EnvironmentAuthenticatedAuth`, затем `ResourceResolver`.
-
-### 6.2 WS RPC
-
-Новые методы: `membersList`, `memberInvite`, `memberSetRole`, `memberSetCeiling`, `memberSetState`, `memberRemove`, `memberRecover`, `invitationsList`, `invitationRevoke`, `auditList`, `usageGet`, `tokensList`, `tokenCreate`, `tokenRevoke`. Каждый получает запись в `RPC_REQUIRED_SCOPES` (карта исчерпывающая, компилятор заставит).
-
-`RpcAuthorization` расширяется: `requiredScopesForRpcCall` уже умеет смотреть payload — добавляется `requiredResourcesForRpcCall(method, payload)`, возвращающий `{ projectId } | { threadId } | { path } | { terminalId } | ...`. Гейт: скоуп → `ResourceResolver` → `ProjectAccess` → роль. Ошибки: чужой ресурс — `EnvironmentResourceNotFoundError` (404, не палим существование), свой без роли — `EnvironmentAuthorizationError` c `requiredPermission: "project:<cap>"` (403).
-
-### 6.3 MCP
-
-OAuth-одобрение (`McpOAuth`) получает выбор проектов и потолок; сессия несёт `binding_kind = projects`. `mcpClientScopes` расширяется до роль-эквивалента (`read-only` → viewer-скоупы, включая `filesystem:read`), `McpToolAccess` объявляет проектную возможность рядом с уровнем доступа; `threadAccess.ts` проверяет проект цели, а не только лимиты режима. Списки тредов/проектов фильтруются. Peer-link остаётся environment-binding (owner одобряет ссылку).
-
-### 6.4 Токены участника
-
-PAT: префикс `t3p_`, хранится HMAC-хешем, поля `scopes_json`, `binding_kind` (`principal` или `projects`), `binding_json`, `expires_at`, `last_used_at`, `revoked_at`. Выдаёт себе сам участник в пределах `потолок ∩ роли`; owner — любому. В `Authorization: Bearer`, DPoP не обязателен. Показывается один раз.
-
-Альтернатива — только cookie-сессии: не работает для CI и внешних агентов. PAT выбран потому, что он узкий, именованный, с TTL и отдельным отзывом.
-
-### 6.5 Вебхуки
-
-Путь `/api/hooks/<taskId>/<token>` (`ScheduledTaskService.webhookPath`) уже bearer на задачу, подпись задачи уже настраивается (`webhook_secret`, `signature_verified`). Добавляется: проект задачи проверяется при доставке; rate-limit; секрет по умолчанию — проектный; журнал доставок (`scheduledTasksListWebhookDeliveries`/`GetWebhookDelivery`) — только admin-у проекта. Вебхук не получает сессию и не видит чужие проекты.
-
-### 6.6 Версионирование
-
-- `ExecutionEnvironmentCapabilities` (`packages/contracts/src/environment.ts:86`): `members`, `audit`, `projectSecrets`; `ServerAuthDescriptor`: `authMode: "single-owner" | "multi-user"`; `principal`, `binding_kind` и `binding` в состоянии сессии — все новые поля опциональны.
-- `AuthAccessSnapshot` дополняется `members`, `invitations`, `revision`; старые клиенты лишние поля игнорируют (Effect Schema), менять существующие — нельзя.
-- HTTP: минорный заголовок `T3-Minor`; несовместимость — только через новый major и `426`.
-- Депрекация: `legacy`-гранты помечаются в UI, отключаются не раньше чем через два минора.
+- `ServerAuthDescriptor.authMode` и `ExecutionEnvironmentDescriptor.authMode` принимают `"multi-user"` при `settings.multiUser === true` и опускаются в режиме single-owner (старые клиенты игнорируют поле).
+- Ответы `/api/auth/session` и приглашений добавляют опциональные `principal`, `binding_kind`, `binding`, `role`; существующие поля `scopes` и `permissions` не меняются.
+- В `ExecutionEnvironmentCapabilities` объявлены опциональные флаги `members`, `audit`, `projectSecrets` (пока не выставляются сервером; клиенты проверяют `authMode`).
 
 ---
 
-## 7. Миграция установок
+## 6. Миграция установок и аддитивные гарантии
 
-Порядок (миграция `112_MultiUser.ts`, идемпотентно):
+Миграции [`112_MultiUser.ts`](../../apps/server/src/persistence/Migrations/112_MultiUser.ts) и [`113_InvitationPrincipal.ts`](../../apps/server/src/persistence/Migrations/113_InvitationPrincipal.ts) идемпотентны:
 
-1. Создать таблицы (`principals`, `principal_credentials`, `project_memberships`, `invitations`, `session_principals(binding_kind, binding_json)`, `project_secrets`, `audit_events`, `member_limits`, `project_quotas`, `api_tokens`).
-2. Создать `owner` из текущего subject: desktop-пользователь, subject административного CLI или ОС-пользователь; `display_name` = имя ОС, `email` пуст.
-3. Проставить всем живым сессиям `principalId = owner`, `binding_kind = 'environment'`.
-4. Всем активным pairing-ссылкам — `binding_kind = 'environment'`, `legacy = 1`; поведение не меняется.
-5. `settings.multiUser = false`; включение — `t3 members enable` (после создания owner-пароля/email).
-6. Начать писать `audit_events`; старые записи не восстанавливаются.
+1. Создают новые таблицы (`principals`, `principal_credentials`, `project_memberships`, `invitations` + `principal_id`, `session_principals`, `api_tokens`, `audit_events`, `member_limits`, `project_quotas`, `project_secrets`).
+2. Добавляют в `projection_projects` колонки `owner_id TEXT` и `visibility TEXT NOT NULL DEFAULT 'shared'`.
+3. Создают единственного `owner` (`id = 'owner'`, `access_revision = 0`, `display_name` = имя ОС, `email = NULL`), если его ещё нет.
+4. Привязывают все живые (`revoked_at IS NULL`) записи `auth_sessions` в `session_principals` к `owner` с `binding_kind = 'environment'`. Отозванные сессии не привязываются; существующие pairing-ссылки без binding продолжают работать как `environment`.
+5. `settings.multiUser` остаётся `false` до явного включения (`t3 members enable` или настройка owner-а).
 
-Совместимость грантов: `sessionGrantsScope`, `permissions`, `access:write`-семантика не меняются. Environment-binding проходит проектные проверки без запросов. Старый клиент на новом сервере видит только разрешённые проекты, потому что фильтрация серверная; отсутствие UI членства ничего не ломает.
+**Аддитивные гарантии (совместимость при откате):** удалять новые таблицы и колонки не требуется. Каждая колонка, добавленная в существующие таблицы, либо nullable, либо имеет `DEFAULT` (`projection_projects.owner_id` — nullable, `projection_projects.visibility` — `DEFAULT 'shared'`). Старый single-owner код продолжает вставлять и читать строки без этих колонок, а ранее выданные cookie-сессии сохраняют формат и подпись и проходят оркестрационные вызовы без повторного входа.
 
-Откат: новые таблицы и колонки аддитивны, `principalId` nullable; v1-код их игнорирует и продолжает проверять только скоупы. Сессии, выпущенные новым сервером, валидны на старом (подпись и формат прежние).
-
-Проверка: фикстура `apps/server/src/persistence/testkit/legacyState.ts` — БД до миграции, прогон `upgrade → login старой cookie → RPC` и обратного даунгрейда.
+Доказательство апгрейда и аддитивности: фикстура [`legacyState.ts`](../../apps/server/src/persistence/testkit/legacyState.ts) и тест [`112_MultiUser.legacy.test.ts`](../../apps/server/src/persistence/Migrations/112_MultiUser.legacy.test.ts).
 
 ---
 
-## 8. Расширение под CRM
+## 7. Риски и тесты безопасности (L0)
 
-- Ресурсы: `crm_clients`, `crm_contacts`, `crm_notes`, `crm_client_threads` — все с `project_id`; доступ через тот же `ResourceResolver`, что и треды.
-- Роль `manager`: `crm.*`, `crm.invite_client`, `thread.operate` только по тредам, связанным с клиентами; без файлов/терминала.
-- Внешний `client`: `kind=external`, вход по приглашению, портал `/c/:clientId` — только свои записи и связанные треды. Guest-share остаётся, но токен привязывается к принципалу и отзывается вместе с ним.
-- PII: телефоны/email контактов шифруются полем, в событиях — маска; экспорт и DSR (`DELETE ...?purge=true`) — аудит, поле `redacted_at`.
-- Метаданные CRM в MCP: `t3_crm_client_search`, `t3_crm_note_add` (v3), в пределах проекта.
-- Отдельная БД не нужна: объём на SQLite достаточен до сотен тысяч записей; при росте — вынос CRM в схему-сателлит.
+| Риск                            | Контрмера в L0                                                                                | Остаток      |
+| ------------------------------- | --------------------------------------------------------------------------------------------- | ------------ |
+| Выход из проекта через терминал | `ProjectPaths.assertCwd` проверяет начальный `cwd`; процесс делит ОС-пользователя до L1       | высокий в L0 |
+| Утечка событиями и списками     | Серверная фильтрация shell, HTTP-снимков, поиска, PR, issues, workflows, scheduled tasks      | низкий       |
+| IDOR по id и путям              | `ResourceResolver` + `ProjectAccess` + `ProjectPaths` (realpath, длиннейший корень)           | низкий       |
+| Секреты хоста                   | Редакция `serverGetSettings`, запрет secret references не-owner; полная изоляция env — в L1   | средний в L0 |
+| Подписанный asset-URL           | Проверка `project:read` при выпуске, claim `projectId`, TTL 15 мин для не-owner               | низкий       |
+| Preview-туннель                 | `terminal:operate` + `project:preview.operate` при указании `projectId`; порты проекта — в L1 | средний в L0 |
+| Отзыв доступа                   | `access_revision` + `SessionStore.awaitInvalidation` (`4401`/`4403`)                          | низкий       |
 
----
-
-## 9. Риски и контрмеры
-
-| #   | Риск                            | Вектор                                                                                                                 | Контрмера                                                                                       | Остаток      |
-| --- | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------- | ------------ |
-| R1  | Выход из проекта через терминал | `cd /`, абсолютные пути, env                                                                                           | L0 — бейдж и документация; L1 — юзер на проект; тест «побега»                                   | L0 высокий   |
-| R2  | Утечка событиями                | shell отдаёт все проекты, глобальные `searchThreads`/`pullRequests*`/`issues*`/`workflows*`, HTTP-snapshot             | фильтр на сервере в `subscribeShell`, HTTP, поиске, PR/issues и MCP; тест на каждый тип события | низкий       |
-| R3  | IDOR по id                      | `threadId`, `getTurnItem`, diff, `runId`, `taskId`, `deliveryId`, `deviceId`, `terminalId`, `tabId`, attachment, asset | единый `ResourceResolver`, 404 для чужого, тест-матрица «чужой id на каждый метод»              | низкий       |
-| R4  | Секреты в env/на диске          | агент и терминал читают `stateDir/secrets`                                                                             | L1 + отдельный env-allowlist; project_secrets; owner-only reveal                                | средний в L0 |
-| R5  | Подписанный asset-URL           | bearer до TTL                                                                                                          | claim `pid`, TTL 15 мин, перевыпуск                                                             | низкий       |
-| R6  | Preview-туннель                 | raw TCP в любой loopback-порт                                                                                          | требует `terminal:operate`; порты проекта в v2; бейдж                                           | средний      |
-| R7  | MCP                             | OAuth-сессия без привязки                                                                                              | проект и потолок в одобрении; проверка в `threadAccess.ts`; peer-link только owner              | низкий       |
-| R8  | Вебхук                          | токен задачи — bearer                                                                                                  | проект при доставке, подпись/секрет проекта, лимит, журнал                                      | низкий       |
-| R9  | Git                             | общие креды, push в чужие репо                                                                                         | `source-control:write` на проект; L1 — креды на проект                                          | средний в L0 |
-| R10 | Перебор входа                   | слабые пароли, enum email                                                                                              | scrypt, лимиты, одинаковые ошибки, dummy-хеш                                                    | низкий       |
-| R11 | Блокировка owner                | потеря пароля/email                                                                                                    | CLI break-glass, обязательный преемник                                                          | низкий       |
-| R12 | Исчерпание                      | циклы агента, диск                                                                                                     | лимиты принципала, квоты проекта, 429/409                                                       | средний      |
-| R13 | Утечка через гостевые ссылки    | анонимный bearer на тред                                                                                               | TTL, отзыв с share и с членством, «только тред»                                                 | низкий       |
-
-Обязательные тесты безопасности: `apps/server/src/access/ProjectAccess.test.ts`, `.../ResourceResolver.test.ts` (таблица id × метод), `apps/server/src/ws.shellFilter.test.ts` (перечисление всех `OrchestrationV2DomainEvent`), `apps/server/src/http.idor.test.ts`, `apps/server/src/terminal/isolation.test.ts`.
+Ключевые тесты: [`ProjectAccess.test.ts`](../../apps/server/src/access/ProjectAccess.test.ts), [`ResourceResolver.test.ts`](../../apps/server/src/access/ResourceResolver.test.ts), [`ProjectPaths.test.ts`](../../apps/server/src/access/ProjectPaths.test.ts), [`MultiUserNarrowing.test.ts`](../../apps/server/src/access/MultiUserNarrowing.test.ts), [`ws.shellFilter.test.ts`](../../apps/server/src/ws.shellFilter.test.ts), [`ws.revocation.test.ts`](../../apps/server/src/ws.revocation.test.ts), [`112_MultiUser.legacy.test.ts`](../../apps/server/src/persistence/Migrations/112_MultiUser.legacy.test.ts).
 
 ---
 
-## 10. Этапы
+## 8. Дальше (не реализовано)
 
-Этапы дают обратную связь до того, как усложнять изоляцию. Альтернатива — один большой релиз: короче по календарю, но дольше без проверки модели прав и выше риск переделок.
-
-### MVP — внутренняя команда, L0
-
-Объём: таблицы и контракты; owner из миграции; инвайты/вход/восстановление; потолок, роли, `ProjectAccess`, гейт в `RpcAuthorization`; фильтрация shell/threads/projects/settings; проверки файлов, терминала (`cwd`), preview, assets, вебхуков, MCP; UI участников и аудита; серверный отзыв через `accessRevision`.
-
-Готово, когда: зелёная матрица «роль × метод»; чужой id на каждом ресурсе → 404; ни один тип события не проходит мимо фильтра (тест-перечисление); старый клиент и фикстура старой БД работают; owner не разлогинен; runbook восстановления проверен на копии.
-
-### v2 — внешние сотрудники и Linux-изоляция
-
-Объём: L1 (юзер на проект, `setuid`, порты, git-креды, project_secrets), PAT, email-инвайты, квоты, привязка MCP, hash-chain аудита, проектные секреты вебхуков, passkeys.
-
-Готово, когда: побег из терминала (`cd /`, `stateDir`, чужой проект, env) не удаётся; worktree переустановлены на `svc-*`; у участника нет owner-секретов; квоты и лимиты дают 429/409 без убийства turn-ов.
-
-### v3 — CRM
-
-Объём: ресурсы CRM, роли `manager`/`client`, портал, привязка guest-ссылок к принципалу, маскирование PII, DSR, L2-контейнеры как опция.
-
-Готово, когда: клиент видит только свои записи и треды; экспорт/удаление PII проходят аудит; контейнер-побег по чек-листу закрыт; бюджет задержки UI < 100 мс на списках.
-
----
-
-## Карта изменений
-
-**Новое:** `packages/contracts/src/membership.ts`, `packages/contracts/src/crm.ts`; `apps/server/src/persistence/Migrations/112_MultiUser.ts`, `.../Principals.ts`, `.../Memberships.ts`, `.../Invitations.ts`, `.../ProjectSecrets.ts`, `.../AuditEvents.ts`, `.../ApiTokens.ts`; `apps/server/src/identity/*`; `apps/server/src/access/{ProjectAccess,ResourceResolver,AccessAudit,MemberLimits,ProjectQuotas}.ts`, `access/http.ts`; `apps/server/src/cli/members.ts`; web: `settings/MembersSettings.tsx`, `settings/ProjectMembersDialog.tsx`, `auth/LoginPage.tsx`, `auth/InviteAcceptPage.tsx`, `auth/RecoveryPage.tsx`, `audit/AuditPage.tsx`; тесты из §9.
-
-**Правки:** `contracts/{auth,rpc,environmentHttp,settings,preview,environment}.ts`; `apps/server/src/auth/{SessionStore,EnvironmentAuth,RpcAuthorization,http}.ts`; `apps/server/src/{ws,http}.ts`; `orchestration-v2/{ShellStream,ThreadStream,ProjectionStore,ProjectStore,ThreadSearch,ThreadLaunchService}.ts`; `workspace/{WorkspaceFileSystem,WorkspaceEntries,KnownWorkspaces}.ts`; `terminal/Manager.ts`; `preview/PreviewTunnel.ts`; `assets/AssetAccess.ts`; `scheduledTasks/ScheduledTaskService.ts`; `mcp/{McpToolAccess,threadAccess,McpOAuth}.ts`; `web/src/components/settings/ConnectionsSettings.tsx`; mobile: `auth/LoginScreen`, `auth/InviteScreen`, `state/session`; i18n `apps/{web,mobile}/src/i18n/translations`; этот документ и [`04_environment-auth.md`](04_environment-auth.md).
+- **Изоляция L1 и L2:** OS-пользователь на проект (`svc-<project>`, `systemd-run`/setuid, группа `t3-<project>`, `env`-allowlist, проектные диапазоны портов и git-креды) и контейнерная изоляция (L2).
+- **CRM и внешний портал:** таблицы `crm_clients`, `crm_contacts`, `crm_notes`, `crm_client_threads`, портал `/c/:clientId`, приглашение `external`-клиентов и планировщик истечения членств, шифрование PII и DSR, CRM-инструменты MCP, привязка guest-ссылок к принципалу.
+- **Парольный вход, passkeys и email-восстановление:** `POST /api/auth/login`, `POST /api/auth/token` (grant `password`), использование `principal_credentials` (scrypt), passkeys, `POST /api/auth/recovery`, `t3 members recover` / `owner-reset`, передача владения (`owner.transferred`).
+- **Email / SMTP:** отправка писем с приглашениями и уведомлениями.
+- **Аудит (чтение, ретенция, целостность):** HTTP/RPC API (`GET /api/audit`, `auditList`), страница аудита в UI, фоновая задача ретенции/purge и hash-chain (`t3 audit verify`). Сейчас события пишутся в `audit_events` без API чтения и очистки.
+- **Проектные секреты, PAT, квоты и полные лимиты:** API `/api/projects/:id/secrets` и `secret://project/...`, выдача и Bearer-аутентификация PAT (`t3p_*`, `/api/tokens`), квоты проектов (`project_quotas`, `/api/projects/:id/usage`), лимиты на число сессий/терминалов/preview-вкладок/PAT/MCP (сейчас таблицы и репозитории созданы, но в рантайме применяется только `invites_per_hour`).
+- **Проектная привязка MCP OAuth:** выбор проектов и потолка при одобрении `/mcp` и фильтрация MCP-инструментов по проектам.
+- **Мобильный экран входа:** на mobile сейчас есть только заготовка перевода; поток входа по одноразовому коду реализован в web (`/login`).
+- **Отзыв подписанных asset-URL до истечения TTL:** сейчас выданный URL действует до конца своего 15-минутного (для участников) или 1-часового (для owner) срока жизни.
+- **Прочее:** выставление `ExecutionEnvironmentCapabilities.members` / `audit` / `projectSecrets` сервером, расширение `AuthAccessSnapshot` полями `members`/`invitations`/`revision`, отдельные WS RPC методы управления участниками (сейчас всё идёт через HTTP `/api/auth/members*` и `/api/auth/invitations*`).
