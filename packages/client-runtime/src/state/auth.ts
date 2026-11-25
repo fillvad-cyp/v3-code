@@ -1,23 +1,37 @@
-import type {
-  AuthAccessSnapshot,
-  AuthApproveConnectDeviceInput,
-  AuthRevokeConnectDeviceInput,
-  AuthAccessStreamEvent,
-  AuthAccessStreamSnapshotEvent,
-  AuthCreatePairingCredentialInput,
-  AuthRevokeClientSessionInput,
-  AuthRevokePairingLinkInput,
+import {
+  AuthAccessReadScope,
+  AuthAccessWriteScope,
+  type AuthAccessSnapshot,
+  type AuthApproveConnectDeviceInput,
+  type AuthEnvironmentScope,
+  type AuthRevokeConnectDeviceInput,
+  type AuthAccessStreamEvent,
+  type AuthAccessStreamSnapshotEvent,
+  type AuthCreatePairingCredentialInput,
+  type AuthRevokeClientSessionInput,
+  type AuthRevokePairingLinkInput,
+  type EnvironmentId,
+  type InvitationCreateInput,
+  type MemberUpdateInput,
+  type PrincipalId,
+  type ProjectId,
+  sessionGrantsScope,
+  WS_METHODS,
 } from "@t3tools/contracts";
-import { WS_METHODS } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import type { HttpClient } from "effect/http";
 import * as Stream from "effect/Stream";
-import { Atom } from "effect/reactivity";
+import { AsyncResult, Atom } from "effect/reactivity";
 
 import type { EnvironmentRegistry } from "../connection/registry.ts";
 import { subscribe } from "../rpc/client.ts";
 import { executeConnectedEnvironmentHttpRequest } from "./environmentHttpAuth.ts";
-import { createEnvironmentCommand, createEnvironmentSubscriptionAtomFamily } from "./runtime.ts";
+import {
+  createEnvironmentCommand,
+  createEnvironmentQueryAtomFamily,
+  createEnvironmentSubscriptionAtomFamily,
+} from "./runtime.ts";
+import { createEnvironmentSessionAtoms } from "./session.ts";
 
 const ACCESS_REQUEST_TIMEOUT_MS = 8_000;
 
@@ -85,10 +99,60 @@ function projectAuthAccessSnapshot(
   return [snapshot, [projected]];
 }
 
+export interface AuthUpdateMemberCommandInput {
+  readonly principalId: PrincipalId;
+  readonly patch: MemberUpdateInput;
+}
+
+export interface AuthRemoveMemberCommandInput {
+  readonly principalId: PrincipalId;
+  readonly projectId?: ProjectId;
+}
+
+export interface AuthIssueMemberLoginCodeCommandInput {
+  readonly principalId: PrincipalId;
+}
+
+function createAuthScopePermissionAtom<R, E>(
+  runtime: Atom.AtomRuntime<EnvironmentRegistry | HttpClient.HttpClient | R, E>,
+  scopes: ReadonlyArray<AuthEnvironmentScope>,
+  label: string,
+) {
+  const sessionAtoms = createEnvironmentSessionAtoms(runtime);
+  return Atom.family((environmentId: EnvironmentId) =>
+    Atom.make((get) => {
+      const result = get(sessionAtoms.sessionStateAtom(environmentId));
+      const session = AsyncResult.getOrElse(result, () => null);
+      return (
+        result._tag !== "Failure" &&
+        session !== null &&
+        session.authenticated &&
+        scopes.every((scope) => sessionGrantsScope(session, scope))
+      );
+    }).pipe(Atom.withLabel(`${label}:${environmentId}`)),
+  );
+}
+
 /** Access management runs on the chosen environment with this client's own session there. */
 export function createAuthEnvironmentAtoms<R, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | HttpClient.HttpClient | R, E>,
 ) {
+  const accessReadPermissionAtom = createAuthScopePermissionAtom(
+    runtime,
+    [AuthAccessReadScope],
+    "environment-data:server:auth-access-read-permission",
+  );
+  const accessWritePermissionAtom = createAuthScopePermissionAtom(
+    runtime,
+    [AuthAccessWriteScope],
+    "environment-data:server:auth-access-write-permission",
+  );
+  const authenticatedPermissionAtom = createAuthScopePermissionAtom(
+    runtime,
+    [],
+    "environment-data:server:auth-authenticated-permission",
+  );
+
   return {
     createPairingCredential: createEnvironmentCommand(runtime, {
       label: "environment-data:server:auth-create-pairing-credential",
@@ -169,6 +233,96 @@ export function createAuthEnvironmentAtoms<R, E>(
           request: ({ client, headers }) => client.revokeConnectDevice({ headers, payload: input }),
         }),
     }),
+    listMembers: Object.assign(
+      createEnvironmentQueryAtomFamily(runtime, {
+        label: "environment-data:server:auth-list-members",
+        staleTimeMs: 10_000,
+        execute: (_input: null) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "GET",
+            url: (urls) => urls.listMembers(),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) => client.listMembers({ headers }),
+          }),
+      }),
+      { permissionAtom: accessReadPermissionAtom },
+    ),
+    updateMember: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:auth-update-member",
+        execute: (input: AuthUpdateMemberCommandInput) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "PATCH",
+            url: (urls) => urls.updateMember({ params: { principalId: input.principalId } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.updateMember({
+                headers,
+                params: { principalId: input.principalId },
+                payload: input.patch,
+              }),
+          }),
+      }),
+      { permissionAtom: accessWritePermissionAtom },
+    ),
+    removeMember: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:auth-remove-member",
+        execute: (input: AuthRemoveMemberCommandInput) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "DELETE",
+            url: (urls) =>
+              urls.removeMember({
+                params: { principalId: input.principalId },
+                query: input.projectId === undefined ? {} : { projectId: input.projectId },
+              }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.removeMember({
+                headers,
+                params: { principalId: input.principalId },
+                query: input.projectId === undefined ? {} : { projectId: input.projectId },
+              }),
+          }),
+      }),
+      { permissionAtom: accessWritePermissionAtom },
+    ),
+    createInvitation: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:auth-create-invitation",
+        execute: (input: InvitationCreateInput) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "POST",
+            url: (urls) => urls.createInvitation(),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) => client.createInvitation({ headers, payload: input }),
+          }),
+      }),
+      { permissionAtom: accessWritePermissionAtom },
+    ),
+    issueMemberLoginCode: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:auth-issue-member-login-code",
+        execute: (input: AuthIssueMemberLoginCodeCommandInput) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "POST",
+            url: (urls) =>
+              urls.issueMemberLoginCode({ params: { principalId: input.principalId } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.issueMemberLoginCode({
+                headers,
+                params: { principalId: input.principalId },
+              }),
+          }),
+      }),
+      { permissionAtom: authenticatedPermissionAtom },
+    ),
     accessChanges: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:auth-access-changes",
       subscribe: (_input: null) =>

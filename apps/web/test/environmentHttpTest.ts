@@ -127,7 +127,8 @@ export async function installEnvironmentHttpTest(scenario: EnvironmentHttpTestSc
             .handle("revokeInvitation", () => unexpectedEndpoint("auth.revokeInvitation"))
             .handle("listMembers", () => unexpectedEndpoint("auth.listMembers"))
             .handle("updateMember", () => unexpectedEndpoint("auth.updateMember"))
-            .handle("removeMember", () => unexpectedEndpoint("auth.removeMember")),
+            .handle("removeMember", () => unexpectedEndpoint("auth.removeMember"))
+            .handle("issueMemberLoginCode", () => unexpectedEndpoint("auth.issueMemberLoginCode")),
         ),
       ]),
       Effect.provideService(EnvironmentAuthenticatedAuth, authenticatedAuth),

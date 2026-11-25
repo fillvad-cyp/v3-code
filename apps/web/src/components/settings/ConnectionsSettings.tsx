@@ -151,6 +151,7 @@ import {
   SavedBackendListRow,
 } from "./SavedEnvironmentRows";
 import { AddEnvironmentDialog } from "./AddEnvironmentDialog";
+import { MembersSettings } from "./MembersSettings";
 import {
   type ConnectDeviceRevokeRequest,
   RevokeConnectDeviceDialog,
@@ -1447,6 +1448,7 @@ function ConnectionsSettingsContent({
             ) : null}
           </SettingsSection>
 
+          <MembersSettings environmentId={accessEnvironmentId} />
           {canReadAccess || canWriteAccess ? (
             <FoldedSettingsSection
               id="authorized-clients"

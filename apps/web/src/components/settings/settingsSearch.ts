@@ -316,6 +316,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: [msg("name icon emoji image checkout remove delete")],
   },
   {
+    id: "project-members",
+    title: msg("Project members"),
+    to: "/settings/projects",
+    scope: "project",
+    searchTerms: [msg("invite role admin developer viewer suspend remove login code team access")],
+  },
+  {
     id: "default-model",
     title: msg("Default model"),
     to: "/settings/threads",
@@ -1507,6 +1514,20 @@ export const SETTINGS_SEARCH_ITEMS = [
     targetId: "connections-environment",
     searchTerms: [
       msg("localhost loopback port forwarding open on this device browser tabs stream security"),
+    ],
+  },
+  {
+    id: "multi-user-mode",
+    title: msg("Multi-user mode"),
+    to: "/settings/access",
+    searchTerms: [msg("members team multiuser invite login code ceiling owner host access roles")],
+  },
+  {
+    id: "environment-members",
+    title: msg("Members"),
+    to: "/settings/access",
+    searchTerms: [
+      msg("team staff ceiling invite login code suspend remove owner host access roles"),
     ],
   },
   {

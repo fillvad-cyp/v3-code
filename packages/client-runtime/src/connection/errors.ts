@@ -245,6 +245,21 @@ export function mapRemoteEnvironmentError(
         hop: "server",
         via,
       });
+    case "EnvironmentHttpForbiddenError":
+      return new ConnectionBlockedError({
+        reason: "permission",
+        detail: error.message,
+        hop: "server",
+        via,
+      });
+    case "EnvironmentHttpTooManyRequestsError":
+      return new ConnectionTransientError({
+        reason: "remote-unavailable",
+        detail: error.message,
+        hop: "server",
+        via,
+        httpStatus: 429,
+      });
     case "EnvironmentAuthInvalidError":
       return new ConnectionBlockedError({
         reason: "authentication",

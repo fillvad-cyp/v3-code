@@ -5,6 +5,8 @@ import {
   EnvironmentHttpBadRequestError,
   EnvironmentHttpCommonError,
   EnvironmentHttpConflictError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentHttpTooManyRequestsError,
   type EnvironmentAuthInvalidError,
   type EnvironmentConnectApprovalPendingError,
   type EnvironmentInternalError,
@@ -25,6 +27,8 @@ import * as HttpApiClient from "effect/http-api/HttpApiClient";
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
 const isEnvironmentHttpBadRequestError = Schema.is(EnvironmentHttpBadRequestError);
 const isEnvironmentHttpConflictError = Schema.is(EnvironmentHttpConflictError);
+const isEnvironmentHttpForbiddenError = Schema.is(EnvironmentHttpForbiddenError);
+const isEnvironmentHttpTooManyRequestsError = Schema.is(EnvironmentHttpTooManyRequestsError);
 
 export class RemoteEnvironmentAuthFetchError extends Schema.TaggedError<RemoteEnvironmentAuthFetchError>()(
   "RemoteEnvironmentAuthFetchError",
@@ -98,6 +102,8 @@ export type RemoteEnvironmentRequestError =
   | EnvironmentConnectApprovalPendingError
   | EnvironmentHttpBadRequestError
   | EnvironmentHttpConflictError
+  | EnvironmentHttpForbiddenError
+  | EnvironmentHttpTooManyRequestsError
   | RemoteEnvironmentAuthFetchError
   | RemoteEnvironmentAuthInvalidJsonError
   | RemoteEnvironmentAuthUndeclaredStatusError
@@ -153,7 +159,9 @@ const failRemoteRequest = (
   if (
     isEnvironmentHttpCommonError(cause) ||
     isEnvironmentHttpBadRequestError(cause) ||
-    isEnvironmentHttpConflictError(cause)
+    isEnvironmentHttpConflictError(cause) ||
+    isEnvironmentHttpForbiddenError(cause) ||
+    isEnvironmentHttpTooManyRequestsError(cause)
   ) {
     return Effect.fail(cause);
   }
