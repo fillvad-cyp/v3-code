@@ -177,6 +177,7 @@ function RootRouteBranch() {
 
   if (
     pathname === "/pair" ||
+    pathname === "/login" ||
     pathname === "/connect" ||
     pathname === "/connect-agent" ||
     pathname === "/approve-agent"

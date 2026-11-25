@@ -114,11 +114,48 @@ export const bootstrapRemoteBearerSession = Effect.fn(
   );
 });
 
+export const loginRemoteInvitationCode = Effect.fn(
+  "clientRuntime.authorization.loginRemoteInvitationCode",
+)(function* (input: {
+  readonly httpBaseUrl: string;
+  readonly code: string;
+  readonly timeoutMs?: number;
+}) {
+  const client = yield* makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "auth");
+  return yield* executeEnvironmentHttpRequest(
+    environmentEndpointUrl(input.httpBaseUrl, "/api/auth/invitations/login"),
+    input.timeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS,
+    client.loginInvitation({
+      payload: {
+        code: input.code,
+      },
+    }),
+  );
+});
+
+export const revokeRemoteCurrentSession = Effect.fn(
+  "clientRuntime.authorization.revokeRemoteCurrentSession",
+)(function* (input: {
+  readonly httpBaseUrl: string;
+  readonly bearerToken?: string;
+  readonly timeoutMs?: number;
+}) {
+  const client = yield* makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "auth");
+  return yield* executeEnvironmentHttpRequest(
+    environmentEndpointUrl(input.httpBaseUrl, "/api/auth/clients/revoke"),
+    input.timeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS,
+    client.revokeClient({
+      headers: input.bearerToken ? { authorization: `Bearer ${input.bearerToken}` } : {},
+      payload: { current: true },
+    }),
+  );
+});
+
 export const fetchRemoteSessionState = Effect.fn(
   "clientRuntime.authorization.fetchRemoteSessionState",
 )(function* (input: {
   readonly httpBaseUrl: string;
-  readonly bearerToken: string;
+  readonly bearerToken?: string;
   readonly timeoutMs?: number;
 }) {
   const client = yield* makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "auth");
@@ -126,9 +163,7 @@ export const fetchRemoteSessionState = Effect.fn(
     environmentEndpointUrl(input.httpBaseUrl, "/api/auth/session"),
     input.timeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS,
     client.session({
-      headers: {
-        authorization: `Bearer ${input.bearerToken}`,
-      },
+      headers: input.bearerToken ? { authorization: `Bearer ${input.bearerToken}` } : {},
     }),
   );
 });

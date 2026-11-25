@@ -14,6 +14,7 @@ import { expect, it } from "@effect/vitest";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as SecureRandom from "effect/crypto/SecureRandom";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
@@ -28,6 +29,7 @@ import * as ProjectAccess from "../access/ProjectAccess.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as InvitationService from "../identity/InvitationService.ts";
 import * as MembershipService from "../identity/MembershipService.ts";
 import * as ApiTokens from "../persistence/ApiTokens.ts";
@@ -61,13 +63,6 @@ const layerConfig = Layer.effect(
   }),
 ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-auth-http-test-" })));
 
-const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
-  Layer.provide(ManagedPolicy.layerTest()),
-  Layer.provideMerge(SqlitePersistence.layerMemory),
-  Layer.provideMerge(ServerSecretStore.layer),
-  Layer.provide(ServerEnvironment.layerIdentity),
-  Layer.provide(layerConfig),
-);
 const layerIdentityRepositories = Layer.mergeAll(
   Principals.layer,
   Memberships.layer,
@@ -77,6 +72,16 @@ const layerIdentityRepositories = Layer.mergeAll(
   MemberLimits.layer,
   SessionPrincipals.layer,
 );
+const makeLayerEnvironmentAuth = (settingsOverrides?: { readonly multiUser?: boolean }) =>
+  EnvironmentAuth.layer.pipe(
+    Layer.provide(ServerSettings.layerTest(settingsOverrides)),
+    Layer.provide(layerIdentityRepositories),
+    Layer.provide(ManagedPolicy.layerTest()),
+    Layer.provideMerge(SqlitePersistence.layerMemory),
+    Layer.provideMerge(ServerSecretStore.layer),
+    Layer.provide(ServerEnvironment.layerIdentity),
+    Layer.provide(layerConfig),
+  );
 const layerAccess = ProjectAccess.layer.pipe(
   Layer.provide(layerIdentityRepositories),
   Layer.provide(ProjectStore.layer),
@@ -95,20 +100,24 @@ const layerIdentity = Layer.mergeAll(
   layerAccess,
   layerIdentityRepositories,
 );
-const layerRoutes = HttpApiBuilder.layer(AuthTestApi).pipe(
-  Layer.provide(AuthHttp.layer),
-  Layer.provide(AuthHttp.layerAuthenticatedAuth),
-  Layer.provide(layerIdentity),
-  Layer.provideMerge(layerEnvironmentAuth),
-  Layer.provide(layerConfig),
-  Layer.provideMerge(
-    HttpPlatform.layer.pipe(
-      Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
-      Layer.provideMerge(Etag.layerWeak),
+const makeLayerRoutes = (settingsOverrides?: { readonly multiUser?: boolean }) => {
+  const authLayer = makeLayerEnvironmentAuth(settingsOverrides);
+  return HttpApiBuilder.layer(AuthTestApi).pipe(
+    Layer.provide(AuthHttp.layer),
+    Layer.provide(AuthHttp.layerAuthenticatedAuth),
+    Layer.provideMerge(layerIdentity),
+    Layer.provideMerge(authLayer),
+    Layer.provide(layerConfig),
+    Layer.provideMerge(
+      HttpPlatform.layer.pipe(
+        Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+        Layer.provideMerge(Etag.layerWeak),
+      ),
     ),
-  ),
-  Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
-);
+    Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+  );
+};
+const layerRoutes = makeLayerRoutes();
 
 const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const postJson = (path: string, body: unknown, headers?: Readonly<Record<string, string>>) =>
@@ -851,6 +860,252 @@ it.effect(
               ),
             );
             expect(deleteAgainResp.status).toBe(404);
+          }),
+        (environment) => Effect.promise(() => environment.dispose()),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.live(
+  "issues and consumes member login codes, returns a bearer token usable for WS tickets and session identity, and supports self sign-out",
+  () =>
+    Effect.gen(function* () {
+      const random = yield* SecureRandom.SecureRandom;
+      let capturedInvitations: InvitationService.InvitationService["Service"] | undefined;
+      let capturedAuth: EnvironmentAuth.EnvironmentAuth["Service"] | undefined;
+      const captureLayer = Layer.effectDiscard(
+        Effect.gen(function* () {
+          capturedInvitations = yield* InvitationService.InvitationService;
+          capturedAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        }),
+      );
+      const multiUserRoutes = makeLayerRoutes({ multiUser: true });
+      const testLayer = captureLayer.pipe(
+        Layer.provideMerge(multiUserRoutes),
+        Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      );
+      const requestContext = Context.make(SecureRandom.SecureRandom, random);
+
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => HttpRouter.toWebHandler(testLayer, { disableLogger: true })),
+        (environment) =>
+          Effect.gen(function* () {
+            // Unauthenticated /api/auth/session advertises authMode "multi-user".
+            const unauthSessionResp = yield* Effect.promise(() =>
+              environment.handler(new Request("http://127.0.0.1/api/auth/session"), requestContext),
+            );
+            expect(unauthSessionResp.status).toBe(200);
+            expect(yield* Effect.promise(() => unauthSessionResp.json())).toMatchObject({
+              authenticated: false,
+              auth: { authMode: "multi-user" },
+            });
+
+            // Owner bootstraps and invites a member to a project.
+            const devResponse = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/browser-session", { credential: DEV_TOKEN }),
+                requestContext,
+              ),
+            );
+            const ownerCookie =
+              devResponse.headers
+                .getSetCookie()
+                .find((cookie) => cookie.startsWith("t3_dev_session_"))
+                ?.split(";", 1)[0] ?? "";
+
+            const projectId = ProjectId.make("project-login-test");
+            const createInviteResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/invitations",
+                  { kind: "staff", role: "developer", projectId },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(createInviteResp.status).toBe(200);
+            const createdInvite = (yield* Effect.promise(() => createInviteResp.json())) as {
+              code: string;
+            };
+
+            const acceptResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/invitations/accept", {
+                  code: createdInvite.code,
+                  displayName: "Ada Lovelace",
+                }),
+                requestContext,
+              ),
+            );
+            expect(acceptResp.status).toBe(200);
+            const acceptedBody = (yield* Effect.promise(() => acceptResp.json())) as {
+              token: string;
+              principal: { id: string; displayName: string };
+              binding_kind: string;
+              role: string;
+            };
+            expect(acceptedBody.token).toBeTruthy();
+            expect(acceptedBody.principal.displayName).toBe("Ada Lovelace");
+            expect(acceptedBody.binding_kind).toBe("principal");
+            expect(acceptedBody.role).toBe("developer");
+
+            const memberPrincipalId = acceptedBody.principal.id as never;
+
+            // Owner mints a login code (15-minute TTL) for the existing member.
+            const loginCodeIssued = yield* capturedInvitations!.issueLogin(memberPrincipalId);
+            expect(loginCodeIssued.invitation.kind).toBe("staff");
+            expect(loginCodeIssued.invitation.projectId).toBeNull();
+            expect(loginCodeIssued.invitation.principalId).toBe(memberPrincipalId);
+
+            // Member can also mint a login code for herself, but not for owner.
+            const expiredLoginIssued = yield* capturedInvitations!.issueLogin({
+              principalId: memberPrincipalId,
+              createdBy: memberPrincipalId,
+              ttl: Duration.millis(-1_000),
+            });
+            expect(expiredLoginIssued.invitation.principalId).toBe(memberPrincipalId);
+
+            const forbiddenOtherLogin = yield* capturedInvitations!
+              .issueLogin({
+                principalId: InvitationService.OWNER_PRINCIPAL_ID,
+                createdBy: memberPrincipalId,
+              })
+              .pipe(Effect.flip);
+            expect(forbiddenOtherLogin._tag).toBe("InvitationForbiddenError");
+
+            // POST /api/auth/invitations/login logs the existing principal in without creating a new one.
+            const loginResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/invitations/login", { code: loginCodeIssued.code }),
+                requestContext,
+              ),
+            );
+            expect(loginResp.status).toBe(200);
+            const loginBody = (yield* Effect.promise(() => loginResp.json())) as {
+              authenticated: boolean;
+              token: string;
+              expiresAt: string;
+              scopes: Array<string>;
+              permissions: Array<string>;
+              sessionMethod: string;
+              binding_kind: string;
+              binding: { _tag: string };
+              role: string;
+              principal: { id: string; displayName: string };
+            };
+            expect(loginBody.authenticated).toBe(true);
+            expect(loginBody.token).toBeTruthy();
+            expect(loginBody.sessionMethod).toBe("bearer-access-token");
+            expect(loginBody.binding_kind).toBe("principal");
+            expect(loginBody.binding).toEqual({ _tag: "principal" });
+            expect(loginBody.role).toBe("developer");
+            expect(loginBody.principal.id).toBe(memberPrincipalId);
+            expect(loginBody.principal.displayName).toBe("Ada Lovelace");
+            expect(loginBody.permissions).toEqual(
+              intersectScopes(roleScopes("developer"), ceilingScopes("staff")),
+            );
+            // Cookie is also set on login.
+            expect(
+              loginResp.headers.getSetCookie().some((cookie) => cookie.startsWith("t3_session_")),
+            ).toBe(true);
+
+            // Single-use: reusing the login code returns 409 Conflict.
+            const replayResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/invitations/login", { code: loginCodeIssued.code }),
+                requestContext,
+              ),
+            );
+            expect(replayResp.status).toBe(409);
+
+            // Expiry: an already-expired login code is rejected with 400 Bad Request.
+            const expiredResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/invitations/login", { code: expiredLoginIssued.code }),
+                requestContext,
+              ),
+            );
+            expect(expiredResp.status).toBe(400);
+
+            // GET /api/auth/session with the returned bearer token reports principal, binding, role, and authMode.
+            const sessionResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/session", {
+                  headers: { authorization: `Bearer ${loginBody.token}` },
+                }),
+                requestContext,
+              ),
+            );
+            expect(sessionResp.status).toBe(200);
+            expect(yield* Effect.promise(() => sessionResp.json())).toMatchObject({
+              authenticated: true,
+              auth: { authMode: "multi-user" },
+              binding_kind: "principal",
+              binding: { _tag: "principal" },
+              role: "developer",
+              principal: {
+                id: memberPrincipalId,
+                displayName: "Ada Lovelace",
+              },
+            });
+
+            // POST /api/auth/websocket-ticket succeeds with the returned bearer token.
+            const ticketResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/websocket-ticket/rpc", {
+                  method: "POST",
+                  headers: { authorization: `Bearer ${loginBody.token}` },
+                }),
+                requestContext,
+              ),
+            );
+            expect(ticketResp.status).toBe(200);
+            const ticketBody = (yield* Effect.promise(() => ticketResp.json())) as {
+              ticket: string;
+              expiresAt: string;
+            };
+            expect(ticketBody.ticket).toBeTruthy();
+
+            // Verify the WS ticket authenticates a WebSocket upgrade for that principal.
+            const upgradedSession = yield* capturedAuth!.authenticateWebSocketUpgrade(
+              {
+                method: "GET",
+                url: `/ws?wsTicket=${encodeURIComponent(ticketBody.ticket)}`,
+                originalUrl: `/ws?wsTicket=${encodeURIComponent(ticketBody.ticket)}`,
+                headers: { host: "127.0.0.1" },
+                cookies: {},
+              } as never,
+              "rpc",
+            );
+            expect(upgradedSession.principalId).toBe(memberPrincipalId);
+            expect(upgradedSession.binding).toEqual({ _tag: "principal" });
+
+            // Member signs out via POST /api/auth/clients/revoke { current: true } without needing access:write.
+            const signOutResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/clients/revoke",
+                  { current: true },
+                  { authorization: `Bearer ${loginBody.token}` },
+                ),
+                requestContext,
+              ),
+            );
+            expect(signOutResp.status).toBe(200);
+            expect(yield* Effect.promise(() => signOutResp.json())).toEqual({ revoked: true });
+
+            // Revoked bearer token is now rejected with 401.
+            const afterSignOutTicket = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/websocket-ticket/rpc", {
+                  method: "POST",
+                  headers: { authorization: `Bearer ${loginBody.token}` },
+                }),
+                requestContext,
+              ),
+            );
+            expect(afterSignOutTicket.status).toBe(401);
           }),
         (environment) => Effect.promise(() => environment.dispose()),
       );

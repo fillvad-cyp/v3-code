@@ -421,3 +421,63 @@ it.effect("enforces owner vs project admin rules for issuing, listing, and revok
     assert.isTrue(yield* service.revoke({ id: projectAInvite.invitation.id, revokedBy: adminA }));
   }).pipe(Effect.provide(makeTestLayer())),
 );
+
+it.effect("issues 15-minute single-use login codes with owner/self auth and rate limits", () =>
+  Effect.gen(function* () {
+    const service = yield* InvitationService.InvitationService;
+    const principals = yield* Principals.PrincipalRepository;
+    const memberLimits = yield* MemberLimits.MemberLimitsRepository;
+
+    const invited = yield* service.issue({
+      kind: "staff",
+      role: "developer",
+      projectId: PROJECT_A,
+      createdBy: OWNER,
+    });
+    const accepted = yield* service.consume({ code: invited.code, displayName: "Grace Hopper" });
+    const memberId = accepted.principal.id;
+
+    // Owner issues login code for member; consuming logs existing principal in without creating a duplicate.
+    const ownerIssued = yield* service.issueLogin(memberId);
+    assert.strictEqual(ownerIssued.invitation.kind, "staff");
+    assert.strictEqual(ownerIssued.invitation.projectId, null);
+    assert.strictEqual(ownerIssued.invitation.principalId, memberId);
+
+    const beforeCount = (yield* principals.list).length;
+    const loggedIn = yield* service.consume({ code: ownerIssued.code });
+    assert.strictEqual(loggedIn.principal.id, memberId);
+    assert.strictEqual(loggedIn.principal.displayName, "Grace Hopper");
+    assert.strictEqual((yield* principals.list).length, beforeCount);
+
+    // Single-use: consuming the same login code again fails with InvitationAlreadyUsedError.
+    const replay = yield* service.consume({ code: ownerIssued.code }).pipe(Effect.flip);
+    assert.strictEqual(replay._tag, "InvitationAlreadyUsedError");
+
+    // Member can issue a login code for herself, but not for another principal.
+    const selfIssued = yield* service.issueLogin({ principalId: memberId, createdBy: memberId });
+    assert.strictEqual(selfIssued.invitation.principalId, memberId);
+
+    const forbidden = yield* service
+      .issueLogin({ principalId: OWNER, createdBy: memberId })
+      .pipe(Effect.flip);
+    assert.strictEqual(forbidden._tag, "InvitationForbiddenError");
+
+    // Rate-limited by invites_per_hour limit.
+    yield* memberLimits.set({
+      principalId: memberId,
+      maxSessions: null,
+      maxTerminals: null,
+      invitesPerHour: 1,
+      maxApiTokens: null,
+    });
+    const limited = yield* service
+      .issueLogin({ principalId: memberId, createdBy: memberId })
+      .pipe(Effect.flip);
+    assert.strictEqual(limited._tag, "InvitationRateLimitedError");
+
+    // Default login code TTL is 15 minutes.
+    yield* TestClock.adjust(Duration.minutes(16));
+    const expired = yield* service.consume({ code: selfIssued.code }).pipe(Effect.flip);
+    assert.strictEqual(expired._tag, "InvitationExpiredError");
+  }).pipe(Effect.provide(makeTestLayer())),
+);

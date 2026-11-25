@@ -510,6 +510,7 @@
   "93e37fedae7eaa5b": "{host}의 T3 Code가 너무 바빠서 응답하지 못했습니다.",
   "5c5941732d5dfac6": "페어링 정보가 올바르지 않습니다.",
   "b8ca23ad7dda376e": "이 주소는 다른 머신인 {host}에 연결됩니다. 대신 별도의 환경으로 추가하세요.",
+  "d075e109b5a21c40": "Enter a login code to continue.",
   "0c0150a90b582a7a": "환경 URL이 올바르지 않습니다.",
   "693cb5c4fb40f109": "저장된 bearer 환경만 편집할 수 있습니다.",
   "5f5844b910cb1544": "저장된 bearer 자격 증명을 사용할 수 없습니다.",
@@ -3186,6 +3187,28 @@
   "49e3cf16b3ac3e5f": "액세스",
   "9699d255b374e215": "허용할 작업",
   "86f5769278f5fa4d": "읽기 전용 외에 스레드를 시작하고, 메시지를 보내고, 중지할 수 있으며, 어떤 스레드도 선택한 모드보다 높은 권한으로 실행할 수 없습니다.",
+  "1b9fda6296b3d704": "Sign-in failed.",
+  "5cb9336f416cf8b2": "Sign in to {environment}",
+  "94558950f40cc75f": "Sign in to this environment",
+  "46fd1af6924ef2a4": "Enter your one-time login code to start a session.",
+  "2baec6c1271a2342": "Paste or type your one-time login code",
+  "ded2c1b352def757": "로그인하는 중...",
+  "4681c4c9541539a4": "로그인",
+  "0528294df7656322": [
+    "호스트:",
+    " ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
+  ],
+  "f3c2d0defe06d0bc": "Login code",
+  "0b546cff8fdd5357": "Ask the environment owner for a new one-time login code if yours has expired.",
   "4f3982f640dfed5b": "이 링크는 이 브라우저에 백엔드를 추가합니다. 신뢰하는 경우에만 계속하세요.",
   "41b32a424841adb7": "이 페어링 링크의 백엔드 호스트가 올바르지 않습니다.",
   "ec2a82b05e616aa0": "이 페어링 링크에 백엔드 호스트 또는 토큰이 없습니다.",
@@ -3212,19 +3235,6 @@
   "8049e9ba2e8b4867": "페어링 토큰",
   "5b173e2cff60d31b": "Using iPhone or mobile? Pin this app to your Home Screen first so your paired session stays inside the app.",
   "86783d423df150c6": "How to pin",
-  "0528294df7656322": [
-    "호스트:",
-    " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
-  ],
   "ff5f1c260e87ecde": "이 브라우저에서 백엔드에 접근할 수 있는지, 호스팅된 클라이언트용 CORS를 지원하는지, HTTPS 페이지에서 열 때 HTTPS로 제공되는지 확인하세요.",
   "984c25ffcae69300": "백엔드 추가",
   "08570ee0982df89d": "페어링하는 중...",
@@ -5922,7 +5932,6 @@
   "82e9b02a3e95e425": "켜기: {agent}",
   "72fc7ba5bac9e666": "업데이트",
   "a91e7d543039be52": "설정: {agent}",
-  "4681c4c9541539a4": "로그인",
   "8d712e3b01096e79": "세부 정보",
   "c193540d6298ce6a": "설정",
   "2ca89fd7bbd7ea94": "이 연결로는 터미널을 제어할 수 없습니다.",
@@ -7878,7 +7887,6 @@
   "d41bfe2d12bb84e3": "연결 다시 시도",
   "54e19e5408c831c7": "ChatGPT 로그인 열기",
   "cf215059a6af6964": "로그인 페이지 열기",
-  "ded2c1b352def757": "로그인하는 중...",
   "ec921e74dbd3d95e": "ChatGPT 로그인 리디렉션 URL",
   "eb7c76d051ea05f0": "로그인 탭의 URL 붙여 넣기",
   "9b5fbf1553719ccf": "로그인에 문제가 있나요?",
@@ -10032,8 +10040,43 @@
     },
     "에서 읽으며 설정이 해제됩니다. 시크릿 자체는 변경되지 않습니다."
   ],
+  "83ce5ef1a3e36282": "Could not sign out",
+  "32fb403d56d6a040": "Could not sign out.",
+  "d7558ce48bab6fba": "Signing out…",
+  "a656dc69a38a3639": "Sign out",
   "910a79263d640e22": "허용됨",
   "43e5c059e5308eee": "허용되지 않음",
+  "ed32768c406291db": [
+    "Signed in as ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
+    " (",
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
+    ")"
+  ],
+  "7dcb88d47fbe469a": [
+    "Signed in as ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
+  ],
   "32659cddbd37d220": "이 권한은 현재 경로에 적용됩니다. 다른 경로는 권한이 다를 수 있습니다.",
   "26fa470bd81ee396": "이 권한은 이 클라이언트의 현재 연결에 적용됩니다.",
   "059f7301895a5c0d": "저장소 규칙",

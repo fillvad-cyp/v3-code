@@ -510,6 +510,7 @@
   "93e37fedae7eaa5b": "T3 Code på {host} var för upptagen för att svara.",
   "5c5941732d5dfac6": "Uppgifterna för parkopplingen är ogiltiga.",
   "b8ca23ad7dda376e": "Den adressen leder till {host}, en annan dator. Lägg till den som en egen miljö i stället.",
+  "d075e109b5a21c40": "Enter a login code to continue.",
   "0c0150a90b582a7a": "Miljöns URL är ogiltig.",
   "693cb5c4fb40f109": "Bara sparade bearer-miljöer kan redigeras.",
   "5f5844b910cb1544": "Den sparade bearer-uppgiften är inte tillgänglig.",
@@ -3187,6 +3188,28 @@
   "49e3cf16b3ac3e5f": "Åtkomst",
   "9699d255b374e215": "Vad den får göra",
   "86f5769278f5fa4d": "Utöver endast läsning kan den starta, skicka meddelanden till och stoppa trådar, och ingen av dem kan köras med mer än det läge du väljer.",
+  "1b9fda6296b3d704": "Sign-in failed.",
+  "5cb9336f416cf8b2": "Sign in to {environment}",
+  "94558950f40cc75f": "Sign in to this environment",
+  "46fd1af6924ef2a4": "Enter your one-time login code to start a session.",
+  "2baec6c1271a2342": "Paste or type your one-time login code",
+  "ded2c1b352def757": "Loggar in...",
+  "4681c4c9541539a4": "Logga in",
+  "0528294df7656322": [
+    "Värd:",
+    " ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
+  ],
+  "f3c2d0defe06d0bc": "Login code",
+  "0b546cff8fdd5357": "Ask the environment owner for a new one-time login code if yours has expired.",
   "4f3982f640dfed5b": "Den här länken lägger till en backend i den här webbläsaren. Fortsätt bara om du litar på den.",
   "41b32a424841adb7": "Den här parkopplingslänken har en ogiltig backend-värd.",
   "ec2a82b05e616aa0": "Den här parkopplingslänken saknar backend-värd eller token.",
@@ -3213,19 +3236,6 @@
   "8049e9ba2e8b4867": "Parkopplingstoken",
   "5b173e2cff60d31b": "Using iPhone or mobile? Pin this app to your Home Screen first so your paired session stays inside the app.",
   "86783d423df150c6": "How to pin",
-  "0528294df7656322": [
-    "Värd:",
-    " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
-  ],
   "ff5f1c260e87ecde": "Kontrollera att backenden kan nås från den här webbläsaren, stöder CORS för webbaserade klienter och betjänas via HTTPS när den här sidan öppnas via HTTPS.",
   "984c25ffcae69300": "Lägg till backend",
   "08570ee0982df89d": "Parkopplar...",
@@ -5939,7 +5949,6 @@
   "82e9b02a3e95e425": "Aktivera: {agent}",
   "72fc7ba5bac9e666": "Uppdatera",
   "a91e7d543039be52": "Konfigurera: {agent}",
-  "4681c4c9541539a4": "Logga in",
   "8d712e3b01096e79": "Detaljer",
   "c193540d6298ce6a": "Konfigurera",
   "2ca89fd7bbd7ea94": "Den här anslutningen kan inte styra terminaler.",
@@ -7912,7 +7921,6 @@
   "d41bfe2d12bb84e3": "Försök ansluta igen",
   "54e19e5408c831c7": "Öppna ChatGPT-inloggning",
   "cf215059a6af6964": "Öppna inloggningssidan",
-  "ded2c1b352def757": "Loggar in...",
   "ec921e74dbd3d95e": "Omdirigerings-URL för ChatGPT-inloggning",
   "eb7c76d051ea05f0": "Klistra in URL:en från inloggningsfliken",
   "9b5fbf1553719ccf": "Problem med att logga in?",
@@ -10078,8 +10086,43 @@
     },
     " och kommer att avmarkeras. Själva hemligheterna påverkas inte."
   ],
+  "83ce5ef1a3e36282": "Could not sign out",
+  "32fb403d56d6a040": "Could not sign out.",
+  "d7558ce48bab6fba": "Signing out…",
+  "a656dc69a38a3639": "Sign out",
   "910a79263d640e22": "Tillåtet",
   "43e5c059e5308eee": "Inte beviljat",
+  "ed32768c406291db": [
+    "Signed in as ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
+    " (",
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
+    ")"
+  ],
+  "7dcb88d47fbe469a": [
+    "Signed in as ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
+  ],
   "32659cddbd37d220": "De här behörigheterna gäller din aktiva rutt. Andra rutter kan ha andra behörigheter.",
   "26fa470bd81ee396": "De här behörigheterna gäller den här klientens aktuella anslutning.",
   "059f7301895a5c0d": "Repokonventioner",

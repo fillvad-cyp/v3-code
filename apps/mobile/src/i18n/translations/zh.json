@@ -510,6 +510,7 @@
   "93e37fedae7eaa5b": "{host} 上的 T3 Code 太忙，未能响应。",
   "5c5941732d5dfac6": "配对信息无效。",
   "b8ca23ad7dda376e": "该地址指向另一台机器 {host}。请将其添加为独立环境。",
+  "d075e109b5a21c40": "Enter a login code to continue.",
   "0c0150a90b582a7a": "环境 URL 无效。",
   "693cb5c4fb40f109": "只能编辑已保存的 bearer 环境。",
   "5f5844b910cb1544": "已保存的 bearer 凭据不可用。",

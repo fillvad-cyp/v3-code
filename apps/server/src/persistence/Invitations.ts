@@ -27,6 +27,7 @@ const InvitationRow = Schema.Struct({
   kind: InvitationKind,
   role: ProjectRole,
   projectId: Schema.NullOr(ProjectId),
+  principalId: Schema.NullOr(PrincipalId),
   ceiling: Schema.fromJsonString(Schema.Array(Schema.String)),
   createdBy: PrincipalId,
   createdAt: EpochMillis,
@@ -43,6 +44,7 @@ export const CreateInvitationInput = Schema.Struct({
   kind: InvitationKind,
   role: ProjectRole,
   projectId: Schema.NullOr(ProjectId),
+  principalId: Schema.optionalKey(Schema.NullOr(PrincipalId)),
   ceiling: Schema.Array(Schema.String),
   createdBy: PrincipalId,
   createdAt: EpochMillis,
@@ -120,9 +122,9 @@ const make = Effect.gen(function* () {
 
   const selectRow = sql`
     SELECT id AS "id", email AS "email", kind AS "kind", role AS "role",
-      project_id AS "projectId", ceiling_json AS "ceiling", created_by AS "createdBy",
-      created_at AS "createdAt", expires_at AS "expiresAt", accepted_at AS "acceptedAt",
-      revoked_at AS "revokedAt"
+      project_id AS "projectId", principal_id AS "principalId", ceiling_json AS "ceiling",
+      created_by AS "createdBy", created_at AS "createdAt", expires_at AS "expiresAt",
+      accepted_at AS "acceptedAt", revoked_at AS "revokedAt"
     FROM invitations
   `;
 
@@ -134,11 +136,11 @@ const make = Effect.gen(function* () {
     Request: CreateInvitationInput,
     execute: (input) =>
       sql`
-        INSERT INTO invitations (id, token_hash, email, kind, role, project_id, ceiling_json,
-          created_by, created_at, expires_at)
+        INSERT INTO invitations (id, token_hash, email, kind, role, project_id, principal_id,
+          ceiling_json, created_by, created_at, expires_at)
         VALUES (${input.id}, ${input.tokenHash}, ${input.email}, ${input.kind}, ${input.role},
-          ${input.projectId}, ${JSON.stringify(input.ceiling)}, ${input.createdBy},
-          ${input.createdAt}, ${input.expiresAt})
+          ${input.projectId}, ${input.principalId ?? null}, ${JSON.stringify(input.ceiling)},
+          ${input.createdBy}, ${input.createdAt}, ${input.expiresAt})
       `,
   });
 
@@ -153,9 +155,9 @@ const make = Effect.gen(function* () {
           AND ${pendingCondition}
           AND expires_at > ${now}
         RETURNING id AS "id", email AS "email", kind AS "kind", role AS "role",
-          project_id AS "projectId", ceiling_json AS "ceiling", created_by AS "createdBy",
-          created_at AS "createdAt", expires_at AS "expiresAt", accepted_at AS "acceptedAt",
-          revoked_at AS "revokedAt"
+          project_id AS "projectId", principal_id AS "principalId", ceiling_json AS "ceiling",
+          created_by AS "createdBy", created_at AS "createdAt", expires_at AS "expiresAt",
+          accepted_at AS "acceptedAt", revoked_at AS "revokedAt"
       `,
   });
 

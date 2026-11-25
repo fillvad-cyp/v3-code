@@ -25,7 +25,9 @@ import {
   type AuthWebSocketTicketUse,
   DpopFailureReason,
   type DpopFailureReason as DpopFailureReasonType,
+  highestProjectRole,
   mcpClientScopes,
+  type ProjectRole,
 } from "@t3tools/contracts";
 import { isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
@@ -52,6 +54,9 @@ import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./Reusa
 import { verifyRequestDpopProof } from "./dpop.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ManagedLimits from "../policy/managedLimits.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import {
@@ -604,6 +609,23 @@ export class EnvironmentAuth extends Context.Service<
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly label?: string;
     }) => Effect.Effect<IssuedBearerSession, ServerAuthInternalError>;
+    readonly issuePrincipalSession: (input: {
+      readonly principalId: PrincipalId;
+      readonly binding: SessionBinding;
+      readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+      readonly method: "browser-session-cookie" | "bearer-access-token";
+      readonly client: AuthClientMetadata;
+      readonly ttl?: Duration.Duration;
+    }) => Effect.Effect<
+      {
+        readonly sessionId: AuthSessionId;
+        readonly token: string;
+        readonly method: "browser-session-cookie" | "bearer-access-token";
+        readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+        readonly expiresAt: DateTime.Utc;
+      },
+      ServerAuthInternalError
+    >;
     readonly listSessions: () => Effect.Effect<
       ReadonlyArray<AuthClientSession>,
       ServerAuthInternalError
@@ -828,7 +850,23 @@ export const make = Effect.gen(function* () {
   const descriptor = yield* policy.getDescriptor();
   const config = yield* ServerConfig.ServerConfig;
   const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
+  const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+  const principalsRepo = yield* Effect.serviceOption(Principals.PrincipalRepository);
+  const membershipsRepo = yield* Effect.serviceOption(Memberships.MembershipRepository);
   const devAuth = resolveReusableDevAuth(config);
+
+  const resolveDescriptor = Option.match(serverSettings, {
+    onNone: () => Effect.succeed(descriptor),
+    onSome: (settingsService) =>
+      settingsService.getSettings.pipe(
+        Effect.map((settings) =>
+          settings.multiUser
+            ? ({ ...descriptor, authMode: "multi-user" } satisfies ServerAuthDescriptor)
+            : descriptor,
+        ),
+        Effect.orElseSucceed(() => descriptor),
+      ),
+  });
 
   const authenticateToken = (
     token: string,
@@ -935,26 +973,64 @@ export const make = Effect.gen(function* () {
     );
   };
 
-  const getSessionState: EnvironmentAuth["Service"]["getSessionState"] = (request) =>
-    authenticateRequest(request).pipe(
-      Effect.map(
-        (session) =>
-          ({
+  const getSessionState: EnvironmentAuth["Service"]["getSessionState"] = Effect.fn(
+    "EnvironmentAuth.getSessionState",
+  )(function* (request) {
+    const currentDescriptor = yield* resolveDescriptor;
+    return yield* authenticateRequest(request).pipe(
+      Effect.flatMap((session) =>
+        Effect.gen(function* () {
+          let principalFields: Pick<
+            AuthSessionState,
+            "principal" | "binding_kind" | "binding" | "role"
+          > = {};
+          if (session.principalId !== undefined) {
+            const binding: SessionBinding = session.binding ?? { _tag: "environment" };
+            const principal = Option.isSome(principalsRepo)
+              ? Option.getOrUndefined(
+                  yield* principalsRepo.value
+                    .get(session.principalId)
+                    .pipe(Effect.orElseSucceed(() => Option.none())),
+                )
+              : undefined;
+            let role: ProjectRole | undefined;
+            if (principal?.kind === "owner") {
+              role = "owner";
+            } else if (binding._tag === "projects") {
+              role = highestProjectRole(binding.projects.map((entry) => entry.role));
+            } else if (Option.isSome(membershipsRepo)) {
+              const membershipRows = yield* membershipsRepo.value
+                .listForPrincipal(session.principalId)
+                .pipe(Effect.orElseSucceed(() => []));
+              role = highestProjectRole(
+                membershipRows.filter((row) => row.state === "active").map((row) => row.role),
+              );
+            }
+            principalFields = {
+              ...(principal !== undefined ? { principal } : {}),
+              binding_kind: binding._tag,
+              binding,
+              ...(role !== undefined ? { role } : {}),
+            };
+          }
+          return {
             authenticated: true,
-            auth: descriptor,
+            auth: currentDescriptor,
             ...authScopeResponse(session.scopes),
             sessionMethod: session.method,
             ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
-          }) satisfies AuthSessionState,
+            ...principalFields,
+          } satisfies AuthSessionState;
+        }),
       ),
       Effect.catchIf(isServerAuthCredentialError, () =>
         Effect.succeed({
           authenticated: false,
-          auth: descriptor,
+          auth: currentDescriptor,
         } satisfies AuthSessionState),
       ),
-      Effect.withSpan("EnvironmentAuth.getSessionState"),
     );
+  });
 
   // T3 Connect credential issuance, DPoP exchanges and device revocation take turns. Two mints
   // at once would open two requests with one code, and a revoke landing between an exchange
@@ -1408,6 +1484,29 @@ export const make = Effect.gen(function* () {
         Effect.withSpan("EnvironmentAuth.issueSession"),
       );
 
+  const issuePrincipalSession: EnvironmentAuth["Service"]["issuePrincipalSession"] = (input) =>
+    sessions
+      .issue({
+        method: input.method,
+        subject: `principal:${input.principalId}`,
+        scopes: input.scopes,
+        principalId: input.principalId,
+        binding: input.binding,
+        client: input.client,
+        ...(input.ttl ? { ttl: input.ttl } : {}),
+      })
+      .pipe(
+        Effect.map((issued) => ({
+          sessionId: issued.sessionId,
+          token: issued.token,
+          method: input.method,
+          scopes: issued.scopes,
+          expiresAt: DateTime.toUtc(issued.expiresAt),
+        })),
+        Effect.mapError((cause) => new ServerAuthAuthenticatedAccessTokenIssueError({ cause })),
+        Effect.withSpan("EnvironmentAuth.issuePrincipalSession"),
+      );
+
   const listSessions: EnvironmentAuth["Service"]["listSessions"] = () =>
     sessions.listActive().pipe(
       Effect.map((activeSessions) => activeSessions.toSorted(bySessionPriority)),
@@ -1769,7 +1868,7 @@ export const make = Effect.gen(function* () {
 
   return EnvironmentAuth.of({
     getDescriptor: Effect.fn("EnvironmentAuth.getDescriptor")(function () {
-      return Effect.succeed(descriptor);
+      return resolveDescriptor;
     }),
     getSessionState,
     createBrowserSession,
@@ -1787,6 +1886,7 @@ export const make = Effect.gen(function* () {
     listPairingLinks,
     revokePairingLink,
     issueSession,
+    issuePrincipalSession,
     listSessions,
     revokeSession,
     listClientSessions,

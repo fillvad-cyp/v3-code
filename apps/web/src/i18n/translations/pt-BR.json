@@ -510,6 +510,7 @@
   "93e37fedae7eaa5b": "O T3 Code em {host} estava ocupado demais para responder.",
   "5c5941732d5dfac6": "Os detalhes de pareamento são inválidos.",
   "b8ca23ad7dda376e": "Esse endereço leva a {host}, outra máquina. Adicione-a como um ambiente próprio.",
+  "d075e109b5a21c40": "Enter a login code to continue.",
   "0c0150a90b582a7a": "A URL do ambiente é inválida.",
   "693cb5c4fb40f109": "Só é possível editar ambientes bearer salvos.",
   "5f5844b910cb1544": "A credencial bearer salva não está disponível.",
@@ -3187,6 +3188,28 @@
   "49e3cf16b3ac3e5f": "Acesso",
   "9699d255b374e215": "O que ele pode fazer",
   "86f5769278f5fa4d": "Além da leitura, ele pode iniciar, enviar mensagens e parar threads, e nenhuma delas pode rodar com mais do que o modo que você escolher.",
+  "1b9fda6296b3d704": "Sign-in failed.",
+  "5cb9336f416cf8b2": "Sign in to {environment}",
+  "94558950f40cc75f": "Sign in to this environment",
+  "46fd1af6924ef2a4": "Enter your one-time login code to start a session.",
+  "2baec6c1271a2342": "Paste or type your one-time login code",
+  "ded2c1b352def757": "Entrando...",
+  "4681c4c9541539a4": "Entrar",
+  "0528294df7656322": [
+    "Host:",
+    " ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
+  ],
+  "f3c2d0defe06d0bc": "Login code",
+  "0b546cff8fdd5357": "Ask the environment owner for a new one-time login code if yours has expired.",
   "4f3982f640dfed5b": "Este link adiciona um backend a este navegador. Continue somente se você confia nele.",
   "41b32a424841adb7": "Este link de pareamento tem um host de backend inválido.",
   "ec2a82b05e616aa0": "Falta o host do backend ou o token neste link de pareamento.",
@@ -3213,19 +3236,6 @@
   "8049e9ba2e8b4867": "Token de pareamento",
   "5b173e2cff60d31b": "Using iPhone or mobile? Pin this app to your Home Screen first so your paired session stays inside the app.",
   "86783d423df150c6": "How to pin",
-  "0528294df7656322": [
-    "Host:",
-    " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
-  ],
   "ff5f1c260e87ecde": "Verifique se o backend está acessível a partir deste navegador, se permite CORS para clientes hospedados e se é servido por HTTPS quando esta página é aberta via HTTPS.",
   "984c25ffcae69300": "Adicionar backend",
   "08570ee0982df89d": "Pareando...",
@@ -5938,7 +5948,6 @@
   "82e9b02a3e95e425": "Ativar: {agent}",
   "72fc7ba5bac9e666": "Atualizar",
   "a91e7d543039be52": "Configurar: {agent}",
-  "4681c4c9541539a4": "Entrar",
   "8d712e3b01096e79": "Detalhes",
   "c193540d6298ce6a": "Configurar",
   "2ca89fd7bbd7ea94": "Esta conexão não pode controlar terminais.",
@@ -7906,7 +7915,6 @@
   "d41bfe2d12bb84e3": "Tentar conectar novamente",
   "54e19e5408c831c7": "Abrir o login do ChatGPT",
   "cf215059a6af6964": "Abrir a página de login",
-  "ded2c1b352def757": "Entrando...",
   "ec921e74dbd3d95e": "URL de redirecionamento do login do ChatGPT",
   "eb7c76d051ea05f0": "Cole a URL da aba de login",
   "9b5fbf1553719ccf": "Problemas para entrar?",
@@ -10070,8 +10078,43 @@
     },
     " e serão removidas. Os segredos em si não são afetados."
   ],
+  "83ce5ef1a3e36282": "Could not sign out",
+  "32fb403d56d6a040": "Could not sign out.",
+  "d7558ce48bab6fba": "Signing out…",
+  "a656dc69a38a3639": "Sign out",
   "910a79263d640e22": "Permitido",
   "43e5c059e5308eee": "Não concedido",
+  "ed32768c406291db": [
+    "Signed in as ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
+    " (",
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
+    ")"
+  ],
+  "7dcb88d47fbe469a": [
+    "Signed in as ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
+  ],
   "32659cddbd37d220": "Estas permissões valem para sua rota ativa. Outras rotas podem ter permissões diferentes.",
   "26fa470bd81ee396": "Estas permissões valem para a conexão atual deste cliente.",
   "059f7301895a5c0d": "Convenções do repositório",

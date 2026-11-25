@@ -173,6 +173,16 @@ export function roleAtLeast(actor: ProjectRole, role: ProjectRole): boolean {
   return ROLE_RANK[actor] >= ROLE_RANK[role];
 }
 
+export function highestProjectRole(roles: ReadonlyArray<ProjectRole>): ProjectRole | undefined {
+  let highest: ProjectRole | undefined;
+  for (const role of roles) {
+    if (highest === undefined || ROLE_RANK[role] > ROLE_RANK[highest]) {
+      highest = role;
+    }
+  }
+  return highest;
+}
+
 /**
  * The ceiling templates an owner sets on a principal. `staff` covers every project role, so an
  * admin may hand out any role inside it; `restricted` and `client` are read-and-operate only.

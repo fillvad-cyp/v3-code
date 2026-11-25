@@ -1,9 +1,15 @@
+import {
+  loginRemoteInvitationCode,
+  revokeRemoteCurrentSession,
+} from "@t3tools/client-runtime/authorization";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
+import { layerRemoteHttpClient } from "@t3tools/client-runtime/rpc";
 import type {
   AuthBrowserSessionResult,
   AuthClientMetadata,
   AuthConnectDeviceRequest,
   AuthEnvironmentScope,
+  AuthInvitationSessionResult,
   ServerAuthSessionMethod,
   AuthSessionId,
   AuthSessionState,
@@ -20,6 +26,7 @@ import {
 } from "@t3tools/shared/remote";
 
 import { PrimaryEnvironmentHttpClient } from "./httpClient";
+import { resolvePrimaryEnvironmentHttpUrl } from "./target";
 import { runPrimaryHttp } from "../../lib/runtime";
 import { msg } from "gt-react";
 import { m } from "../../i18n/messages";
@@ -358,6 +365,40 @@ export async function submitServerAuthCredential(credential: string): Promise<vo
   bootstrapPromise = null;
   explicitPairingRequested = false;
   stripPairingTokenFromUrl();
+}
+
+const primaryCookieFetch: typeof fetch = (input, init) =>
+  globalThis.fetch(input, { ...init, credentials: "include" });
+
+export async function submitMemberLoginCode(code: string): Promise<AuthInvitationSessionResult> {
+  const trimmedCode = code.trim();
+  if (!trimmedCode) {
+    throw new Error(m(msg("Enter a login code to continue.")));
+  }
+
+  resolvedAuthenticatedGateState = null;
+  const result = await Effect.runPromise(
+    loginRemoteInvitationCode({
+      httpBaseUrl: resolvePrimaryEnvironmentHttpUrl("/"),
+      code: trimmedCode,
+    }).pipe(Effect.provide(layerRemoteHttpClient(primaryCookieFetch))),
+  );
+  await waitForAuthenticatedSessionAfterBootstrap();
+  resolvedAuthenticatedGateState = { status: "authenticated" };
+  bootstrapPromise = null;
+  explicitPairingRequested = false;
+  return result;
+}
+
+export async function signOutPrimaryEnvironment(): Promise<void> {
+  await Effect.runPromise(
+    revokeRemoteCurrentSession({
+      httpBaseUrl: resolvePrimaryEnvironmentHttpUrl("/"),
+    }).pipe(Effect.provide(layerRemoteHttpClient(primaryCookieFetch))),
+  );
+  resolvedAuthenticatedGateState = null;
+  bootstrapPromise = null;
+  explicitPairingRequested = false;
 }
 
 export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGateState> {

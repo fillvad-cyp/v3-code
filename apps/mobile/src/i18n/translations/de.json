@@ -510,6 +510,7 @@
   "93e37fedae7eaa5b": "T3 Code auf {host} war zu beschäftigt, um zu antworten.",
   "5c5941732d5dfac6": "Die Kopplungsdaten sind ungültig.",
   "b8ca23ad7dda376e": "Diese Adresse führt zu {host}, einem anderen Rechner. Füge sie stattdessen als eigene Umgebung hinzu.",
+  "d075e109b5a21c40": "Enter a login code to continue.",
   "0c0150a90b582a7a": "Die URL der Umgebung ist ungültig.",
   "693cb5c4fb40f109": "Nur gespeicherte Bearer-Umgebungen können bearbeitet werden.",
   "5f5844b910cb1544": "Die gespeicherten Bearer-Zugangsdaten sind nicht verfügbar.",

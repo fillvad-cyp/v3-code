@@ -510,6 +510,7 @@
   "93e37fedae7eaa5b": "{host} 上的 T3 Code 太忙，未能响应。",
   "5c5941732d5dfac6": "配对信息无效。",
   "b8ca23ad7dda376e": "该地址指向另一台机器 {host}。请将其添加为独立环境。",
+  "d075e109b5a21c40": "Enter a login code to continue.",
   "0c0150a90b582a7a": "环境 URL 无效。",
   "693cb5c4fb40f109": "只能编辑已保存的 bearer 环境。",
   "5f5844b910cb1544": "已保存的 bearer 凭据不可用。",
@@ -3191,6 +3192,28 @@
   "49e3cf16b3ac3e5f": "访问权限",
   "9699d255b374e215": "允许它做什么",
   "86f5769278f5fa4d": "除只读外，它还可以启动会话、向会话发消息和停止会话，且任何会话的权限都不会超过你选择的模式。",
+  "1b9fda6296b3d704": "Sign-in failed.",
+  "5cb9336f416cf8b2": "Sign in to {environment}",
+  "94558950f40cc75f": "Sign in to this environment",
+  "46fd1af6924ef2a4": "Enter your one-time login code to start a session.",
+  "2baec6c1271a2342": "Paste or type your one-time login code",
+  "ded2c1b352def757": "正在登录…",
+  "4681c4c9541539a4": "登录",
+  "0528294df7656322": [
+    "主机：",
+    " ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
+  ],
+  "f3c2d0defe06d0bc": "Login code",
+  "0b546cff8fdd5357": "Ask the environment owner for a new one-time login code if yours has expired.",
   "4f3982f640dfed5b": "此链接会向此浏览器添加一个后端。仅在你信任它时继续。",
   "41b32a424841adb7": "此配对链接中的后端主机无效。",
   "ec2a82b05e616aa0": "此配对链接缺少后端主机或 token。",
@@ -3217,19 +3240,6 @@
   "8049e9ba2e8b4867": "配对 token",
   "5b173e2cff60d31b": "Using iPhone or mobile? Pin this app to your Home Screen first so your paired session stays inside the app.",
   "86783d423df150c6": "How to pin",
-  "0528294df7656322": [
-    "主机：",
-    " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
-  ],
   "ff5f1c260e87ecde": "请确认此浏览器能访问该后端、后端为托管客户端启用了 CORS，并且在通过 HTTPS 打开此页面时后端也使用 HTTPS。",
   "984c25ffcae69300": "添加后端",
   "08570ee0982df89d": "正在配对…",
@@ -5945,7 +5955,6 @@
   "82e9b02a3e95e425": "开启：{agent}",
   "72fc7ba5bac9e666": "更新",
   "a91e7d543039be52": "设置：{agent}",
-  "4681c4c9541539a4": "登录",
   "8d712e3b01096e79": "详情",
   "c193540d6298ce6a": "设置",
   "2ca89fd7bbd7ea94": "此连接无法控制终端。",
@@ -7924,7 +7933,6 @@
   "d41bfe2d12bb84e3": "重试连接",
   "54e19e5408c831c7": "打开 ChatGPT 登录页面",
   "cf215059a6af6964": "打开登录页面",
-  "ded2c1b352def757": "正在登录…",
   "ec921e74dbd3d95e": "ChatGPT 登录重定向 URL",
   "eb7c76d051ea05f0": "粘贴登录标签页中的 URL",
   "9b5fbf1553719ccf": "登录遇到问题？",
@@ -10086,8 +10094,43 @@
     },
     " 读取，将被取消设置。凭据本身不受影响。"
   ],
+  "83ce5ef1a3e36282": "Could not sign out",
+  "32fb403d56d6a040": "Could not sign out.",
+  "d7558ce48bab6fba": "Signing out…",
+  "a656dc69a38a3639": "Sign out",
   "910a79263d640e22": "已允许",
   "43e5c059e5308eee": "未授予",
+  "ed32768c406291db": [
+    "Signed in as ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
+    " (",
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
+    ")"
+  ],
+  "7dcb88d47fbe469a": [
+    "Signed in as ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
+  ],
   "32659cddbd37d220": "这些权限适用于当前使用的线路。其他线路的权限可能不同。",
   "26fa470bd81ee396": "这些权限适用于此客户端的当前连接。",
   "059f7301895a5c0d": "仓库规范",

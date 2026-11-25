@@ -14,6 +14,7 @@ import * as HttpClient from "effect/http/HttpClient";
 import {
   bootstrapRemoteBearerSession,
   exchangeRemoteDpopAccessToken,
+  loginRemoteInvitationCode,
 } from "../authorization/remote.ts";
 import {
   deriveWsBaseUrl,
@@ -53,6 +54,12 @@ export interface PairingConnectionInput {
   readonly expectedEnvironmentId?: EnvironmentId;
 }
 
+export interface LoginCodeConnectionInput {
+  readonly host: string;
+  readonly code: string;
+  readonly expectedEnvironmentId?: EnvironmentId;
+}
+
 export interface SshConnectionInput {
   readonly target: DesktopSshEnvironmentTarget;
   readonly label?: string;
@@ -70,6 +77,12 @@ export class ConnectionOnboarding extends Context.Service<
   {
     readonly registerPairing: (
       input: PairingConnectionInput,
+    ) => Effect.Effect<
+      EnvironmentId,
+      ConnectionAttemptError | Persistence.ConnectionPersistenceError
+    >;
+    readonly registerLoginCode: (
+      input: LoginCodeConnectionInput,
     ) => Effect.Effect<
       EnvironmentId,
       ConnectionAttemptError | Persistence.ConnectionPersistenceError
@@ -212,6 +225,81 @@ const registerPairingConnection = Effect.fn(
   if (!(yield* registry.register(registration, { knownAddressOnly }))) {
     return registration.target.environmentId;
   }
+  yield* registry.setCompatibility(registration.target.environmentId, null);
+  yield* registry
+    .setEnabled(registration.target.environmentId, true)
+    .pipe(Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }));
+  return registration.target.environmentId;
+});
+
+const prepareLoginCodeRegistration = Effect.fn(
+  "clientRuntime.connection.onboarding.prepareLoginCodeRegistration",
+)(function* (input: LoginCodeConnectionInput) {
+  const code = input.code.trim();
+  if (code.length === 0) {
+    return yield* new ConnectionBlockedError({
+      reason: "authentication",
+      ...translatableDetail(msg("Enter a login code to continue.")),
+    });
+  }
+  const httpBaseUrl = yield* Effect.try({
+    try: () => normalizeHttpBaseUrl(input.host),
+    catch: (cause) =>
+      new ConnectionBlockedError({
+        reason: "configuration",
+        ...(cause instanceof Error
+          ? detailFromError(cause)
+          : translatableDetail(msg("The environment URL is invalid."))),
+      }),
+  });
+  const wsBaseUrl = deriveWsBaseUrl(httpBaseUrl);
+  const descriptor = yield* fetchRemoteEnvironmentDescriptor({
+    httpBaseUrl,
+  }).pipe(Effect.mapError(mapRemoteEnvironmentError));
+  if (
+    input.expectedEnvironmentId !== undefined &&
+    descriptor.environmentId !== input.expectedEnvironmentId
+  ) {
+    return yield* differentMachineError(descriptor.label);
+  }
+  const connectionId = bearerConnectionId(descriptor.environmentId, httpBaseUrl);
+  const route = {
+    target: new BearerConnectionTarget({
+      environmentId: descriptor.environmentId,
+      label: descriptor.label,
+      connectionId,
+    }),
+    profile: new BearerConnectionProfile({
+      connectionId,
+      environmentId: descriptor.environmentId,
+      label: descriptor.label,
+      httpBaseUrl,
+      wsBaseUrl,
+    }),
+  };
+  const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
+  if (compatibilityError !== null && compatibilityError.serverUpdateRequired !== true) {
+    return yield* compatibilityError;
+  }
+  const session = yield* loginRemoteInvitationCode({
+    httpBaseUrl,
+    code,
+  }).pipe(Effect.mapError(mapRemoteEnvironmentError));
+
+  return new BearerConnectionRegistration({
+    ...route,
+    credential: new BearerConnectionCredential({
+      token: session.token,
+    }),
+  });
+});
+
+const registerLoginCodeConnection = Effect.fn(
+  "clientRuntime.connection.onboarding.registerLoginCodeConnection",
+)(function* (input: LoginCodeConnectionInput) {
+  const registration = yield* prepareLoginCodeRegistration(input);
+  const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+  yield* registry.register(registration);
   yield* registry.setCompatibility(registration.target.environmentId, null);
   yield* registry
     .setEnabled(registration.target.environmentId, true)
@@ -388,6 +476,13 @@ export const make = Effect.gen(function* () {
       },
       Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, registry),
       Effect.provideService(ClientCapabilities.ClientPresentation, presentation),
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+    ),
+    registerLoginCode: Effect.fnUntraced(
+      function* (input) {
+        return yield* registerLoginCodeConnection(input);
+      },
+      Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, registry),
       Effect.provideService(HttpClient.HttpClient, httpClient),
     ),
     registerSsh: Effect.fnUntraced(

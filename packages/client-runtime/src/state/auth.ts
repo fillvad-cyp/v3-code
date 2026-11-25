@@ -123,6 +123,18 @@ export function createAuthEnvironmentAtoms<R, E>(
           request: ({ client, headers }) => client.revokeClient({ headers, payload: input }),
         }),
     }),
+    signOutCurrentSession: createEnvironmentCommand(runtime, {
+      label: "environment-data:server:auth-sign-out-current-session",
+      execute: (_input: null) =>
+        executeConnectedEnvironmentHttpRequest({
+          group: "auth",
+          method: "POST",
+          url: (urls) => urls.revokeClient(),
+          timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+          request: ({ client, headers }) =>
+            client.revokeClient({ headers, payload: { current: true } }),
+        }),
+    }),
     revokeOtherClients: createEnvironmentCommand(runtime, {
       label: "environment-data:server:auth-revoke-other-clients",
       execute: (_input: null) =>

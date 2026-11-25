@@ -36,7 +36,14 @@ export const Route = createFileRoute("/_chat")({
       context.authGateState.status !== "authenticated" &&
       context.authGateState.status !== "hosted-static"
     ) {
-      throw redirect({ to: "/pair", replace: true });
+      throw redirect({
+        to:
+          context.authGateState.status === "requires-auth" &&
+          context.authGateState.auth.authMode === "multi-user"
+            ? "/login"
+            : "/pair",
+        replace: true,
+      });
     }
     return { appModalPage: isAppModalPage(location.pathname) };
   },

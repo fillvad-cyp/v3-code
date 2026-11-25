@@ -104,6 +104,8 @@ export const Invitation = Schema.Struct({
   role: ProjectRole,
   /** Null is an invitation to the environment, which only an owner may issue. */
   projectId: Schema.NullOr(ProjectId),
+  /** Non-null when this code logs an existing principal in instead of creating a new one. */
+  principalId: Schema.optionalKey(Schema.NullOr(PrincipalId)),
   ceiling: Schema.Array(Schema.String),
   createdBy: PrincipalId,
   createdAt: IsoDateTime,
@@ -235,6 +237,11 @@ export const InvitationAcceptInput = Schema.Struct({
   displayName: TrimmedNonEmptyString,
 });
 export type InvitationAcceptInput = typeof InvitationAcceptInput.Type;
+
+export const InvitationLoginInput = Schema.Struct({
+  code: TrimmedNonEmptyString,
+});
+export type InvitationLoginInput = typeof InvitationLoginInput.Type;
 
 export const InvitationRevokeResult = Schema.Struct({
   revoked: Schema.Boolean,

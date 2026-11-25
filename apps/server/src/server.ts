@@ -583,12 +583,6 @@ const layerProjectFaviconResolver = ProjectFaviconResolver.layer.pipe(
 
 const layerServerEnvironment = ServerEnvironment.layer.pipe(Layer.provide(ServerSecretStore.layer));
 
-const layerAuth = EnvironmentAuth.layer.pipe(
-  Layer.provideMerge(layerPersistence),
-  Layer.provide(layerServerEnvironment),
-  Layer.provide(ServerSecretStore.layer),
-);
-
 const layerIdentityRepositories = Layer.mergeAll(
   Principals.layer,
   Memberships.layer,
@@ -598,6 +592,14 @@ const layerIdentityRepositories = Layer.mergeAll(
   MemberLimits.layer,
   SessionPrincipals.layer,
 ).pipe(Layer.provide(layerPersistence));
+
+const layerAuth = EnvironmentAuth.layer.pipe(
+  Layer.provide(layerServerSettings),
+  Layer.provide(layerIdentityRepositories),
+  Layer.provideMerge(layerPersistence),
+  Layer.provide(layerServerEnvironment),
+  Layer.provide(ServerSecretStore.layer),
+);
 
 const layerAccess = Layer.merge(
   ProjectAccess.layer.pipe(

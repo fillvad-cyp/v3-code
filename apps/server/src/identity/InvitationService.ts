@@ -11,6 +11,7 @@ import {
   type ProjectRole,
   boundProjectRole,
   ceilingScopes,
+  highestProjectRole,
   intersectScopes,
   roleAtLeast,
   roleFitsCeiling,
@@ -38,6 +39,7 @@ import * as MembershipService from "./MembershipService.ts";
 
 export const OWNER_PRINCIPAL_ID = PrincipalId.make("owner");
 const DEFAULT_INVITATION_TTL = Duration.days(7);
+const DEFAULT_LOGIN_CODE_TTL = Duration.minutes(15);
 const isAuthEnvironmentScope = Schema.is(AuthEnvironmentScope);
 
 export const InvitationInvalidReason = Schema.Literals([
@@ -45,6 +47,8 @@ export const InvitationInvalidReason = Schema.Literals([
   "not_found",
   "revoked",
   "invalid_display_name",
+  "principal_not_found",
+  "principal_inactive",
 ]);
 export type InvitationInvalidReason = typeof InvitationInvalidReason.Type;
 
@@ -64,6 +68,10 @@ export class InvitationInvalidError extends Schema.TaggedError<InvitationInvalid
         return "This invitation has been revoked.";
       case "invalid_display_name":
         return "A non-empty display name is required.";
+      case "principal_not_found":
+        return "The target member was not found.";
+      case "principal_inactive":
+        return "This member account is not active.";
     }
   }
 }
@@ -165,6 +173,15 @@ export interface IssueInvitationInput {
   readonly audit?: InvitationAuditContext;
 }
 
+export interface IssueLoginInput {
+  readonly principalId: PrincipalId;
+  readonly createdBy?: PrincipalId;
+  /** Resolved session actor when called from HTTP, preserving any session binding limits. */
+  readonly actor?: ProjectAccess.AccessActor;
+  readonly ttl?: Duration.Duration;
+  readonly audit?: InvitationAuditContext;
+}
+
 export interface IssuedInvitation {
   readonly invitation: Invitation;
   readonly code: string;
@@ -172,7 +189,7 @@ export interface IssuedInvitation {
 
 export interface ConsumeInvitationInput {
   readonly code: string;
-  readonly displayName: string;
+  readonly displayName?: string;
   readonly audit?: InvitationAuditContext;
 }
 
@@ -199,6 +216,11 @@ export type IssueInvitationError =
   | InvitationForbiddenError
   | InvitationRateLimitedError
   | InvitationInternalError;
+export type IssueLoginError =
+  | InvitationInvalidError
+  | InvitationForbiddenError
+  | InvitationRateLimitedError
+  | InvitationInternalError;
 export type ConsumeInvitationError =
   | InvitationInvalidError
   | InvitationExpiredError
@@ -213,6 +235,9 @@ export class InvitationService extends Context.Service<
     readonly issue: (
       input: IssueInvitationInput,
     ) => Effect.Effect<IssuedInvitation, IssueInvitationError>;
+    readonly issueLogin: (
+      input: PrincipalId | IssueLoginInput,
+    ) => Effect.Effect<IssuedInvitation, IssueLoginError>;
     readonly consume: (
       input: ConsumeInvitationInput,
     ) => Effect.Effect<ConsumedInvitation, ConsumeInvitationError>;
@@ -391,6 +416,7 @@ const make = Effect.gen(function* () {
       kind,
       role: input.role,
       projectId: input.projectId,
+      principalId: null,
       ceiling: [...effectiveCeiling],
       createdBy: input.createdBy,
       createdAt,
@@ -402,11 +428,140 @@ const make = Effect.gen(function* () {
     return { invitation, code } satisfies IssuedInvitation;
   });
 
-  const consume = Effect.fn("InvitationService.consume")(function* (input: ConsumeInvitationInput) {
-    const displayName = input.displayName.trim();
-    if (displayName.length === 0) {
-      return yield* new InvitationInvalidError({ reason: "invalid_display_name" });
+  const issueLogin = Effect.fn("InvitationService.issueLogin")(function* (
+    rawInput: PrincipalId | IssueLoginInput,
+  ) {
+    const input: IssueLoginInput =
+      typeof rawInput === "string"
+        ? { principalId: rawInput, createdBy: OWNER_PRINCIPAL_ID }
+        : rawInput;
+    const createdBy = input.createdBy ?? input.actor?.principalId ?? OWNER_PRINCIPAL_ID;
+    const actor = yield* resolveActor(createdBy, input.actor, "issueLogin");
+
+    if (!actor.isOwner && actor.principalId !== input.principalId) {
+      return yield* new InvitationForbiddenError({ reason: "not_authorized" });
     }
+
+    const maybePrincipal = yield* principals
+      .get(input.principalId)
+      .pipe(
+        Effect.mapError((cause) => new InvitationInternalError({ operation: "issueLogin", cause })),
+      );
+    if (Option.isNone(maybePrincipal)) {
+      return yield* new InvitationInvalidError({ reason: "principal_not_found" });
+    }
+    const targetPrincipal = maybePrincipal.value;
+    if (targetPrincipal.status !== "active") {
+      return yield* new InvitationInvalidError({ reason: "principal_inactive" });
+    }
+
+    const canIssue = yield* membershipService
+      .canIssueInvite(createdBy)
+      .pipe(
+        Effect.mapError((cause) => new InvitationInternalError({ operation: "issueLogin", cause })),
+      );
+    if (!canIssue) {
+      return yield* new InvitationRateLimitedError({ principalId: createdBy });
+    }
+
+    const targetMemberships = yield* memberships
+      .listForPrincipal(targetPrincipal.id)
+      .pipe(
+        Effect.mapError((cause) => new InvitationInternalError({ operation: "issueLogin", cause })),
+      );
+    const activeRoles = targetMemberships
+      .filter((row) => row.state === "active")
+      .map((row) => row.role);
+    const role: ProjectRole =
+      targetPrincipal.kind === "owner" ? "owner" : (highestProjectRole(activeRoles) ?? "viewer");
+    const ceiling =
+      targetPrincipal.kind === "owner"
+        ? [...AuthAdministrativeClientScopes]
+        : [...targetPrincipal.ceiling];
+
+    const id = InvitationId.make(
+      yield* random
+        .uuidV4()
+        .pipe(
+          Effect.mapError(
+            (cause) => new InvitationInternalError({ operation: "issueLogin", cause }),
+          ),
+        ),
+    );
+    const { code, tokenHash } = yield* codes
+      .generate()
+      .pipe(
+        Effect.mapError((cause) => new InvitationInternalError({ operation: "issueLogin", cause })),
+      );
+
+    const now = yield* DateTime.now;
+    const createdAt = DateTime.formatIso(now);
+    const expiresAt = DateTime.formatIso(
+      DateTime.addDuration(now, input.ttl ?? DEFAULT_LOGIN_CODE_TTL),
+    );
+
+    yield* invitations
+      .create({
+        id,
+        tokenHash,
+        email: targetPrincipal.email,
+        kind: "staff",
+        role,
+        projectId: null,
+        principalId: targetPrincipal.id,
+        ceiling,
+        createdBy,
+        createdAt,
+        expiresAt,
+      })
+      .pipe(
+        Effect.mapError((cause) => new InvitationInternalError({ operation: "issueLogin", cause })),
+      );
+
+    yield* auditEvents
+      .append({
+        at: createdAt,
+        actorPrincipalId: createdBy,
+        actorSessionId: input.audit?.sessionId ?? null,
+        action: "invitation.created",
+        resourceType: "invitation",
+        resourceId: id,
+        projectId: null,
+        ip: input.audit?.ip ?? null,
+        userAgent: input.audit?.userAgent ?? null,
+        outcome: "allow",
+        metadata: {
+          kind: "staff",
+          role,
+          projectId: null,
+          principalId: targetPrincipal.id,
+          login: true,
+        },
+      })
+      .pipe(
+        Effect.mapError((cause) => new InvitationInternalError({ operation: "issueLogin", cause })),
+      );
+
+    const invitation: Invitation = {
+      id,
+      email: targetPrincipal.email,
+      kind: "staff",
+      role,
+      projectId: null,
+      principalId: targetPrincipal.id,
+      ceiling,
+      createdBy,
+      createdAt,
+      expiresAt,
+      acceptedAt: null,
+      revokedAt: null,
+    };
+
+    return { invitation, code } satisfies IssuedInvitation;
+  });
+
+  const consume = Effect.fn("InvitationService.consume")(function* (input: ConsumeInvitationInput) {
+    const trimmedDisplayName = input.displayName?.trim() ?? "";
     const canonical = InvitationCodes.normalizeInvitationCode(input.code);
     if (canonical === undefined) {
       return yield* new InvitationInvalidError({ reason: "malformed_code" });
@@ -452,6 +607,67 @@ const make = Effect.gen(function* () {
           }
 
           const invitation = consumed.value;
+          const existingPrincipalId = invitation.principalId ?? null;
+          if (existingPrincipalId !== null) {
+            const maybePrincipal = yield* principals
+              .get(existingPrincipalId)
+              .pipe(
+                Effect.mapError(
+                  (cause) => new InvitationInternalError({ operation: "consume", cause }),
+                ),
+              );
+            if (Option.isNone(maybePrincipal)) {
+              return yield* new InvitationInvalidError({ reason: "principal_not_found" });
+            }
+            const principal = maybePrincipal.value;
+            if (principal.status !== "active") {
+              return yield* new InvitationInvalidError({ reason: "principal_inactive" });
+            }
+
+            const principalMemberships = yield* memberships
+              .listForPrincipal(principal.id)
+              .pipe(
+                Effect.mapError(
+                  (cause) => new InvitationInternalError({ operation: "consume", cause }),
+                ),
+              );
+
+            yield* auditEvents
+              .append({
+                at: nowIso,
+                actorPrincipalId: principal.id,
+                actorSessionId: input.audit?.sessionId ?? null,
+                action: "invitation.accepted",
+                resourceType: "invitation",
+                resourceId: invitation.id,
+                projectId: invitation.projectId,
+                ip: input.audit?.ip ?? null,
+                userAgent: input.audit?.userAgent ?? null,
+                outcome: "allow",
+                metadata: {
+                  principalId: principal.id,
+                  role: invitation.role,
+                  projectId: invitation.projectId,
+                  login: true,
+                },
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) => new InvitationInternalError({ operation: "consume", cause }),
+                ),
+              );
+
+            return {
+              invitation,
+              principal,
+              memberships: principalMemberships,
+            } satisfies ConsumedInvitation;
+          }
+
+          if (trimmedDisplayName.length === 0) {
+            return yield* new InvitationInvalidError({ reason: "invalid_display_name" });
+          }
+
           const principalId = PrincipalId.make(
             yield* random
               .uuidV4()
@@ -469,7 +685,7 @@ const make = Effect.gen(function* () {
             .create({
               id: principalId,
               kind: invitation.kind === "client" ? "external" : "member",
-              displayName,
+              displayName: trimmedDisplayName,
               email: invitation.email,
               status: "active",
               ceiling: [...principalCeiling],
@@ -534,7 +750,7 @@ const make = Effect.gen(function* () {
           const principal: Principal = {
             id: principalId,
             kind: invitation.kind === "client" ? "external" : "member",
-            displayName,
+            displayName: trimmedDisplayName,
             email: invitation.email,
             status: "active",
             ceiling: [...principalCeiling],
@@ -671,6 +887,7 @@ const make = Effect.gen(function* () {
 
   return InvitationService.of({
     issue,
+    issueLogin,
     consume,
     listPending,
     revoke,

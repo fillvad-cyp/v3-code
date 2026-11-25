@@ -8,7 +8,7 @@ import {
   ClientWebDeployment,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
-import { ProjectRole, SessionBinding, SessionBindingKind } from "./membership.ts";
+import { Principal, ProjectRole, SessionBinding, SessionBindingKind } from "./membership.ts";
 import { RuntimeMode } from "./providerPolicy.ts";
 
 export const ServerAuthPolicy = Schema.Literals([
@@ -212,6 +212,19 @@ export const AuthBrowserSessionResult = Schema.Struct({
   role: Schema.optionalKey(ProjectRole),
 });
 export type AuthBrowserSessionResult = typeof AuthBrowserSessionResult.Type;
+
+export const AuthInvitationSessionResult = Schema.Struct({
+  authenticated: Schema.Literal(true),
+  token: TrimmedNonEmptyString,
+  expiresAt: Schema.DateTimeUtc,
+  ...authScopeResponseFields,
+  sessionMethod: ServerAuthSessionMethod,
+  binding_kind: SessionBindingKind,
+  binding: SessionBinding,
+  role: Schema.optionalKey(ProjectRole),
+  principal: Principal,
+});
+export type AuthInvitationSessionResult = typeof AuthInvitationSessionResult.Type;
 
 export const AuthClientMetadataDeviceType = Schema.Literals([
   "desktop",
@@ -502,7 +515,9 @@ export const AuthRevokePairingLinkInput = Schema.Struct({
 export type AuthRevokePairingLinkInput = typeof AuthRevokePairingLinkInput.Type;
 
 export const AuthRevokeClientSessionInput = Schema.Struct({
-  sessionId: AuthSessionId,
+  sessionId: Schema.optionalKey(AuthSessionId),
+  /** Revoke the caller's own session (sign out) without requiring access:write. */
+  current: Schema.optionalKey(Schema.Boolean),
 });
 export type AuthRevokeClientSessionInput = typeof AuthRevokeClientSessionInput.Type;
 
@@ -552,6 +567,10 @@ export const AuthSessionState = Schema.Struct({
   permissions: authScopeResponseFields.permissions,
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
+  principal: Schema.optionalKey(Principal),
+  binding_kind: Schema.optionalKey(SessionBindingKind),
+  binding: Schema.optionalKey(SessionBinding),
+  role: Schema.optionalKey(ProjectRole),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;
 

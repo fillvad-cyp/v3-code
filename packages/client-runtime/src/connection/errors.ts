@@ -237,6 +237,14 @@ export function mapRemoteEnvironmentError(
   const unreachableHop = connectionMethod === "relay" ? "tunnel" : "server";
   const via = connectionMethod === "relay" ? "relay" : "direct";
   switch (error._tag) {
+    case "EnvironmentHttpBadRequestError":
+    case "EnvironmentHttpConflictError":
+      return new ConnectionBlockedError({
+        reason: "authentication",
+        detail: error.message,
+        hop: "server",
+        via,
+      });
     case "EnvironmentAuthInvalidError":
       return new ConnectionBlockedError({
         reason: "authentication",

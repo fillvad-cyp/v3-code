@@ -2,19 +2,27 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { EnvironmentAuthInvalidError } from "@t3tools/contracts";
+import {
+  EnvironmentAuthInvalidError,
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpConflictError,
+} from "@t3tools/contracts";
 import {
   bootstrapRemoteBearerSession,
   exchangeRemoteDpopAccessToken,
   issueRemoteDpopWebSocketTicket,
   issueRemoteWebSocketTicket,
+  loginRemoteInvitationCode,
   resolveRemoteDpopWebSocketConnectionUrl,
   resolveRemoteWebSocketConnectionUrl,
+  revokeRemoteCurrentSession,
 } from "./remote.ts";
 import * as ClientCapabilities from "../platform/capabilities.ts";
 import * as RpcHttp from "../rpc/http.ts";
 
 const isEnvironmentAuthInvalidError = Schema.is(EnvironmentAuthInvalidError);
+const isEnvironmentHttpBadRequestError = Schema.is(EnvironmentHttpBadRequestError);
+const isEnvironmentHttpConflictError = Schema.is(EnvironmentHttpConflictError);
 
 type FetchCall = readonly [input: RequestInfo | URL, init: RequestInit];
 
@@ -340,6 +348,105 @@ describe("remote environment authorization", () => {
       expect(url.searchParams.get("clientDevice")).toBeNull();
       expect(url.toString()).not.toContain("user_connect");
       expect(url.toString()).not.toContain("device-1");
+    }),
+  );
+
+  it.effect("logs in with an invitation code and returns the bearer token and principal", () =>
+    Effect.gen(function* () {
+      const fetch = recordedFetch(
+        Response.json({
+          authenticated: true,
+          token: "member-bearer-token",
+          expiresAt: "2026-12-25T12:00:00.000Z",
+          scopes: ["orchestration:read", "orchestration:operate"],
+          permissions: ["orchestration:read", "orchestration:operate", "filesystem:read"],
+          sessionMethod: "bearer-access-token",
+          binding_kind: "principal",
+          binding: { _tag: "principal" },
+          role: "developer",
+          principal: {
+            id: "principal-1",
+            kind: "member",
+            displayName: "Ada Lovelace",
+            email: null,
+            status: "active",
+            ceiling: ["orchestration:read", "orchestration:operate", "filesystem:read"],
+            accessRevision: 1,
+            createdAt: "2026-11-25T12:00:00.000Z",
+            updatedAt: "2026-11-25T12:00:00.000Z",
+            removedAt: null,
+          },
+        }),
+      );
+
+      const session = yield* loginRemoteInvitationCode({
+        httpBaseUrl: "https://remote.example.com/",
+        code: "ABCD-EFGH-JKLM",
+      }).pipe(provideRemoteHttp(fetch.fetchFn));
+
+      expectFetchCall(fetch.calls, 1, {
+        url: "https://remote.example.com/api/auth/invitations/login",
+        method: "POST",
+        body: JSON.stringify({ code: "ABCD-EFGH-JKLM" }),
+      });
+      expect(session.token).toBe("member-bearer-token");
+      expect(session.binding_kind).toBe("principal");
+      expect(session.role).toBe("developer");
+      expect(session.principal.displayName).toBe("Ada Lovelace");
+    }),
+  );
+
+  it.effect("revives typed 400/409 errors from remote invitation login", () =>
+    Effect.gen(function* () {
+      const fetch = recordedFetch(
+        Response.json(
+          {
+            _tag: "EnvironmentHttpBadRequestError",
+            message: "This invitation has expired.",
+          },
+          { status: 400 },
+        ),
+        Response.json(
+          {
+            _tag: "EnvironmentHttpConflictError",
+            message: "This invitation has already been used.",
+          },
+          { status: 409 },
+        ),
+      );
+
+      const expiredError = yield* loginRemoteInvitationCode({
+        httpBaseUrl: "https://remote.example.com/",
+        code: "EXPI-REDC-ODEE",
+      }).pipe(provideRemoteHttp(fetch.fetchFn), Effect.flip);
+      expect(isEnvironmentHttpBadRequestError(expiredError)).toBe(true);
+      expect(expiredError.message).toBe("This invitation has expired.");
+
+      const replayError = yield* loginRemoteInvitationCode({
+        httpBaseUrl: "https://remote.example.com/",
+        code: "USED-CODE-1234",
+      }).pipe(provideRemoteHttp(fetch.fetchFn), Effect.flip);
+      expect(isEnvironmentHttpConflictError(replayError)).toBe(true);
+      expect(replayError.message).toBe("This invitation has already been used.");
+    }),
+  );
+
+  it.effect("revokes the current session on sign out", () =>
+    Effect.gen(function* () {
+      const fetch = recordedFetch(Response.json({ revoked: true }));
+
+      const result = yield* revokeRemoteCurrentSession({
+        httpBaseUrl: "https://remote.example.com/",
+        bearerToken: "member-bearer-token",
+      }).pipe(provideRemoteHttp(fetch.fetchFn));
+
+      expect(result).toEqual({ revoked: true });
+      expectFetchCall(fetch.calls, 1, {
+        url: "https://remote.example.com/api/auth/clients/revoke",
+        method: "POST",
+        headers: { authorization: "Bearer member-bearer-token" },
+        body: JSON.stringify({ current: true }),
+      });
     }),
   );
 });

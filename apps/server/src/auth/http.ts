@@ -4,10 +4,11 @@ import {
   AuthAccessReadScope,
   AuthAccessTokenType,
   AuthAccessWriteScope,
+  AuthAdministrativeClientScopes,
   AuthEnvironmentScope,
   AuthStandardClientScopes,
   AuthGrantScope,
-  type AuthBrowserSessionResult,
+  type AuthInvitationSessionResult,
   EnvironmentAuthInvalidError,
   type EnvironmentAuthInvalidReason,
   EnvironmentConnectApprovalPendingError,
@@ -26,8 +27,10 @@ import {
   EnvironmentScopeRequiredError,
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
+  highestProjectRole,
   intersectScopes,
   mcpClientScopes,
+  type ProjectRole,
   roleScopes,
 } from "@t3tools/contracts";
 import type { DpopFailureReason } from "@t3tools/contracts";
@@ -335,6 +338,67 @@ export const layer = HttpApiBuilder.group(
           }),
         );
 
+    const issueInvitationSession = Effect.fnUntraced(function* (input: {
+      readonly accepted: InvitationService.ConsumedInvitation;
+      readonly method: "browser-session-cookie" | "bearer-access-token";
+      readonly request: HttpServerRequest.HttpServerRequest;
+      readonly clientMetadata: ReturnType<typeof deriveAuthClientMetadata>;
+    }) {
+      const { accepted, method, request, clientMetadata } = input;
+      const principalCeiling = accepted.principal.ceiling.filter(isAuthEnvironmentScope);
+      let scopes: ReadonlyArray<AuthEnvironmentScope>;
+      let role: ProjectRole | undefined;
+      if (accepted.principal.kind === "owner") {
+        scopes = AuthAdministrativeClientScopes;
+        role = "owner";
+      } else if ((accepted.invitation.principalId ?? null) !== null) {
+        const activeRoles = accepted.memberships
+          .filter((membership) => membership.state === "active")
+          .map((membership) => membership.role);
+        const roleScopeUnion = [
+          ...new Set(activeRoles.flatMap((activeRole) => roleScopes(activeRole))),
+        ];
+        scopes =
+          roleScopeUnion.length > 0
+            ? intersectScopes(roleScopeUnion, principalCeiling)
+            : intersectScopes(roleScopes(accepted.invitation.role), principalCeiling);
+        role = highestProjectRole(activeRoles) ?? accepted.invitation.role;
+      } else {
+        scopes = intersectScopes(roleScopes(accepted.invitation.role), principalCeiling);
+        role = accepted.invitation.role;
+      }
+      const binding = { _tag: "principal" as const };
+      const issued = yield* serverAuth
+        .issuePrincipalSession({
+          principalId: accepted.principal.id,
+          binding,
+          scopes,
+          method,
+          client: {
+            ...clientMetadata,
+            label: accepted.principal.displayName,
+          },
+        })
+        .pipe(
+          Effect.catch((error) =>
+            failEnvironmentInternal("browser_session_issuance_failed", error),
+          ),
+        );
+      yield* appendSessionCookie(request, sessions.cookieName, issued.token, issued.expiresAt);
+      yield* appendCredentialResponseHeaders;
+      return {
+        authenticated: true,
+        token: issued.token,
+        expiresAt: issued.expiresAt,
+        ...authScopeResponse(issued.scopes),
+        sessionMethod: issued.method,
+        binding_kind: "principal",
+        binding,
+        ...(role !== undefined ? { role } : {}),
+        principal: accepted.principal,
+      } satisfies AuthInvitationSessionResult;
+    });
+
     return handlers
       .handle(
         "session",
@@ -590,7 +654,27 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.auth.revokeClient")(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
-            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const session = yield* EnvironmentAuthenticatedPrincipal;
+            if (args.payload.current === true) {
+              const revoked = yield* serverAuth.revokeSession(session.sessionId);
+              const request = yield* HttpServerRequest.HttpServerRequest;
+              const expiredCookies = yield* Effect.fromResult(
+                Cookies.expireCookie(
+                  Cookies.empty,
+                  sessions.cookieName,
+                  sessionCookieOptions(request),
+                ),
+              ).pipe(Effect.catch(() => failEnvironmentInternal("browser_session_cookie_failed")));
+              yield* HttpEffect.appendPreResponseHandler((_request, response) =>
+                Effect.succeed(HttpServerResponse.mergeCookies(response, expiredCookies)),
+              );
+              yield* appendCredentialResponseHeaders;
+              return { revoked };
+            }
+            if (args.payload.sessionId === undefined) {
+              return yield* failEnvironmentInvalidRequest("invalid_command");
+            }
+            yield* requireEnvironmentScope(AuthAccessWriteScope);
             const revoked = yield* serverAuth.revokeClientSession(
               session.sessionId,
               args.payload.sessionId,
@@ -663,42 +747,12 @@ export const layer = HttpApiBuilder.group(
                 userAgent: clientMetadata.userAgent ?? null,
               },
             });
-            const principalCeiling = accepted.principal.ceiling.filter(isAuthEnvironmentScope);
-            const scopes = intersectScopes(roleScopes(accepted.invitation.role), principalCeiling);
-            const binding = { _tag: "principal" as const };
-            const issued = yield* sessions
-              .issue({
-                method: "browser-session-cookie",
-                subject: `principal:${accepted.principal.id}`,
-                scopes,
-                principalId: accepted.principal.id,
-                binding,
-                client: {
-                  ...clientMetadata,
-                  label: accepted.principal.displayName,
-                },
-              })
-              .pipe(
-                Effect.catch((error) =>
-                  failEnvironmentInternal("browser_session_issuance_failed", error),
-                ),
-              );
-            yield* appendSessionCookie(
+            return yield* issueInvitationSession({
+              accepted,
+              method: "browser-session-cookie",
               request,
-              sessions.cookieName,
-              issued.token,
-              issued.expiresAt,
-            );
-            yield* appendCredentialResponseHeaders;
-            return {
-              authenticated: true,
-              ...authScopeResponse(issued.scopes),
-              sessionMethod: issued.method,
-              expiresAt: DateTime.toUtc(issued.expiresAt),
-              binding_kind: "principal",
-              binding,
-              role: accepted.invitation.role,
-            } satisfies AuthBrowserSessionResult;
+              clientMetadata,
+            });
           },
           Effect.catchTags({
             InvitationInvalidError: (error) =>
@@ -709,6 +763,39 @@ export const layer = HttpApiBuilder.group(
               Effect.fail(new EnvironmentHttpConflictError({ message: error.message })),
             InvitationInternalError: (error) =>
               failEnvironmentInternal("browser_session_issuance_failed", error),
+          }),
+        ),
+      )
+      .handle(
+        "loginInvitation",
+        Effect.fn("environment.auth.loginInvitation")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const clientMetadata = deriveAuthClientMetadata({ request });
+            const accepted = yield* invitations.consume({
+              code: args.payload.code,
+              audit: {
+                ip: clientMetadata.ipAddress ?? null,
+                userAgent: clientMetadata.userAgent ?? null,
+              },
+            });
+            return yield* issueInvitationSession({
+              accepted,
+              method: "bearer-access-token",
+              request,
+              clientMetadata,
+            });
+          },
+          Effect.catchTags({
+            InvitationInvalidError: (error) =>
+              Effect.fail(new EnvironmentHttpBadRequestError({ message: error.message })),
+            InvitationExpiredError: (error) =>
+              Effect.fail(new EnvironmentHttpBadRequestError({ message: error.message })),
+            InvitationAlreadyUsedError: (error) =>
+              Effect.fail(new EnvironmentHttpConflictError({ message: error.message })),
+            InvitationInternalError: (error) =>
+              failEnvironmentInternal("access_token_issuance_failed", error),
           }),
         ),
       )

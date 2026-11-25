@@ -510,6 +510,7 @@
   "93e37fedae7eaa5b": "T3 Code on {host} was too busy to answer.",
   "5c5941732d5dfac6": "The pairing details are invalid.",
   "b8ca23ad7dda376e": "That address reaches {host}, a different machine. Add it as its own environment instead.",
+  "d075e109b5a21c40": "Enter a login code to continue.",
   "0c0150a90b582a7a": "The environment URL is invalid.",
   "693cb5c4fb40f109": "Only saved bearer environments can be edited.",
   "5f5844b910cb1544": "The saved bearer credential is unavailable.",
@@ -3187,6 +3188,28 @@
   "49e3cf16b3ac3e5f": "Access",
   "9699d255b374e215": "What it may do",
   "86f5769278f5fa4d": "Beyond read only, it can start, message and stop threads, and none of them can run with more than the mode you pick.",
+  "1b9fda6296b3d704": "Sign-in failed.",
+  "5cb9336f416cf8b2": "Sign in to {environment}",
+  "94558950f40cc75f": "Sign in to this environment",
+  "46fd1af6924ef2a4": "Enter your one-time login code to start a session.",
+  "2baec6c1271a2342": "Paste or type your one-time login code",
+  "ded2c1b352def757": "Signing in...",
+  "4681c4c9541539a4": "Sign in",
+  "0528294df7656322": [
+    "Host:",
+    " ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
+  ],
+  "f3c2d0defe06d0bc": "Login code",
+  "0b546cff8fdd5357": "Ask the environment owner for a new one-time login code if yours has expired.",
   "4f3982f640dfed5b": "This link adds a backend to this browser. Continue only if you trust it.",
   "41b32a424841adb7": "This pairing link has an invalid backend host.",
   "ec2a82b05e616aa0": "This pairing link is missing its backend host or token.",
@@ -3213,19 +3236,6 @@
   "8049e9ba2e8b4867": "Pairing token",
   "5b173e2cff60d31b": "Using iPhone or mobile? Pin this app to your Home Screen first so your paired session stays inside the app.",
   "86783d423df150c6": "How to pin",
-  "0528294df7656322": [
-    "Host:",
-    " ",
-    {
-      "t": "span",
-      "i": 1,
-      "c": {
-        "i": 2,
-        "k": "_gt_value_2",
-        "v": "v"
-      }
-    }
-  ],
   "ff5f1c260e87ecde": "Verify the backend is reachable from this browser, supports CORS for hosted clients, and is served over HTTPS when opening this page from HTTPS.",
   "984c25ffcae69300": "Add backend",
   "08570ee0982df89d": "Pairing...",
@@ -5940,7 +5950,6 @@
   "82e9b02a3e95e425": "Turn on: {agent}",
   "72fc7ba5bac9e666": "Update",
   "a91e7d543039be52": "Set up: {agent}",
-  "4681c4c9541539a4": "Sign in",
   "8d712e3b01096e79": "Details",
   "c193540d6298ce6a": "Set up",
   "2ca89fd7bbd7ea94": "This connection cannot control terminals.",
@@ -7914,7 +7923,6 @@
   "d41bfe2d12bb84e3": "Retry connection",
   "54e19e5408c831c7": "Open ChatGPT sign-in",
   "cf215059a6af6964": "Open sign-in page",
-  "ded2c1b352def757": "Signing in...",
   "ec921e74dbd3d95e": "ChatGPT sign-in redirect URL",
   "eb7c76d051ea05f0": "Paste the URL from the sign-in tab",
   "9b5fbf1553719ccf": "Having trouble signing in?",
@@ -10080,8 +10088,43 @@
     },
     " and will be unset. The secrets themselves are untouched."
   ],
+  "83ce5ef1a3e36282": "Could not sign out",
+  "32fb403d56d6a040": "Could not sign out.",
+  "d7558ce48bab6fba": "Signing out…",
+  "a656dc69a38a3639": "Sign out",
   "910a79263d640e22": "Allowed",
   "43e5c059e5308eee": "Not granted",
+  "ed32768c406291db": [
+    "Signed in as ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    },
+    " (",
+    {
+      "i": 3,
+      "k": "_gt_value_3",
+      "v": "v"
+    },
+    ")"
+  ],
+  "7dcb88d47fbe469a": [
+    "Signed in as ",
+    {
+      "t": "span",
+      "i": 1,
+      "c": {
+        "i": 2,
+        "k": "_gt_value_2",
+        "v": "v"
+      }
+    }
+  ],
   "32659cddbd37d220": "These permissions apply to your active route. Other routes may have different permissions.",
   "26fa470bd81ee396": "These permissions apply to this client’s current connection.",
   "059f7301895a5c0d": "Repository conventions",

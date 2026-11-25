@@ -13,6 +13,7 @@ import {
   AuthAccessTokenResult,
   AuthBrowserSessionRequest,
   AuthBrowserSessionResult,
+  AuthInvitationSessionResult,
   AuthCreatePairingCredentialInput,
   AuthMcpApprovalDecisionRequest,
   AuthMcpApprovalDetails,
@@ -61,6 +62,7 @@ import {
   InvitationAcceptInput,
   InvitationCreateInput,
   InvitationCreateResult,
+  InvitationLoginInput,
   InvitationRevokeResult,
   MemberRemoveResult,
   MemberUpdateInput,
@@ -439,6 +441,7 @@ const EnvironmentPairingCredentialErrors = [
   ...EnvironmentScopedOperationErrors,
 ] as const;
 const EnvironmentSessionRevokeErrors = [
+  EnvironmentRequestInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentOperationForbiddenError,
   EnvironmentInternalError,
@@ -746,7 +749,14 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
   .add(
     HttpApiEndpoint.post("acceptInvitation", "/api/auth/invitations/accept", {
       payload: InvitationAcceptInput,
-      success: AuthBrowserSessionResult,
+      success: AuthInvitationSessionResult,
+      error: EnvironmentInvitationAcceptErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("loginInvitation", "/api/auth/invitations/login", {
+      payload: InvitationLoginInput,
+      success: AuthInvitationSessionResult,
       error: EnvironmentInvitationAcceptErrors,
     }),
   )
