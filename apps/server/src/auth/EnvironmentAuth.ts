@@ -16,6 +16,8 @@ import {
   type AuthPairingCredentialResult,
   type AuthSessionId,
   type AuthSessionState,
+  type PrincipalId,
+  type SessionBinding,
   authScopeResponse,
   type ServerAuthDescriptor,
   type ServerAuthSessionMethod,
@@ -113,6 +115,10 @@ export interface AuthenticatedSession {
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
   readonly expiresAt?: DateTime.DateTime;
+  /** Absent on a single-owner server; otherwise the principal the session was issued for. */
+  readonly principalId?: PrincipalId;
+  /** Absent means `environment`; only a principal or projects binding narrows a session. */
+  readonly binding?: SessionBinding;
 }
 
 const serverAuthInternalErrorContext = {
@@ -849,6 +855,8 @@ export const make = Effect.gen(function* () {
         scopes: session.scopes,
         ...(session.proofKeyThumbprint ? { proofKeyThumbprint: session.proofKeyThumbprint } : {}),
         ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
+        ...(session.principalId !== undefined ? { principalId: session.principalId } : {}),
+        ...(session.binding !== undefined ? { binding: session.binding } : {}),
       })),
     );
 
@@ -1621,6 +1629,8 @@ export const make = Effect.gen(function* () {
               ? { proofKeyThumbprint: session.proofKeyThumbprint }
               : {}),
             ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
+            ...(session.principalId !== undefined ? { principalId: session.principalId } : {}),
+            ...(session.binding !== undefined ? { binding: session.binding } : {}),
           };
         }
       }

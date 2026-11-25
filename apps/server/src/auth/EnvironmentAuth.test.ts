@@ -4,6 +4,8 @@ import {
   authScopeResponse,
   AuthAdministrativeClientScopes,
   connectDeviceVerificationCode,
+  PrincipalId,
+  ProjectId,
 } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
@@ -1202,6 +1204,43 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
       }).pipe(
         Effect.provide(layerEnvironmentAuth({ desktopBootstrapToken: "desktop-bootstrap-token" })),
       ),
+    );
+
+    it.effect("propagates principalId and binding onto authenticated HTTP and WS sessions", () =>
+      Effect.gen(function* () {
+        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+        const sessions = yield* SessionStore.SessionStore;
+        const ownerId = PrincipalId.make("owner");
+        const binding = {
+          _tag: "projects" as const,
+          projects: [{ projectId: ProjectId.make("web"), role: "viewer" as const }],
+        };
+        const issued = yield* sessions.issue({
+          method: "bearer-access-token",
+          subject: "member-login",
+          principalId: ownerId,
+          binding,
+        });
+
+        const httpSession = yield* serverAuth.authenticateHttpRequest(
+          makeBearerRequest(issued.token),
+        );
+        expect(httpSession.principalId).toBe(ownerId);
+        expect(httpSession.binding).toEqual(binding);
+
+        const wsTicket = yield* serverAuth.issueWebSocketTicket(httpSession, { use: "rpc" });
+        const wsSession = yield* serverAuth.authenticateWebSocketUpgrade(
+          {
+            method: "GET",
+            url: `/ws?wsTicket=${Redacted.value(wsTicket.ticket)}`,
+            cookies: {},
+            headers: { host: "127.0.0.1:13773" },
+          } as never,
+          "rpc",
+        );
+        expect(wsSession.principalId).toBe(ownerId);
+        expect(wsSession.binding).toEqual(binding);
+      }).pipe(Effect.provide(layerEnvironmentAuth())),
     );
   },
 );

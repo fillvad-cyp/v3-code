@@ -50,9 +50,11 @@ import {
 import {
   DpopFailureReason,
   AuthSessionId,
+  PrincipalId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import type { SessionBinding } from "./membership.ts";
 import {
   CloudSpeechApiKey,
   CloudSpeechError,
@@ -273,7 +275,11 @@ export class EnvironmentInternalError extends Schema.TaggedError<EnvironmentInte
   }
 }
 
-export const EnvironmentResourceNotFoundReason = Schema.Literals(["thread_not_found"]);
+export const EnvironmentResourceNotFoundReason = Schema.Literals([
+  "thread_not_found",
+  // A resource of another principal, answered as absent so its id does not leak.
+  "resource_not_found",
+]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
 export class EnvironmentResourceNotFoundError extends Schema.TaggedError<EnvironmentResourceNotFoundError>()(
@@ -435,6 +441,10 @@ export interface EnvironmentSessionPrincipalShape {
   readonly scopes: ReadonlySet<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
   readonly expiresAt?: DateTime.DateTime;
+  /** Absent on a single-owner server; otherwise the principal the session was issued for. */
+  readonly principalId?: PrincipalId;
+  /** Absent means `environment`; only a principal or projects binding narrows a session. */
+  readonly binding?: SessionBinding;
 }
 
 export class EnvironmentAuthenticatedPrincipal extends Context.Service<

@@ -226,6 +226,10 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   issueLinkedThreads: Schema.optionalKey(Schema.Boolean),
   /** Keeps more than one account per standalone issue tracker; older servers keep one. */
   issueTrackerAccounts: Schema.optionalKey(Schema.Boolean),
+  /** Serves the member and invitation methods; absent on single-owner servers. */
+  members: Schema.optionalKey(Schema.Boolean),
+  audit: Schema.optionalKey(Schema.Boolean),
+  projectSecrets: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 

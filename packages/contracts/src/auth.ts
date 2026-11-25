@@ -8,6 +8,7 @@ import {
   ClientWebDeployment,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import { ProjectRole, SessionBinding, SessionBindingKind } from "./membership.ts";
 import { RuntimeMode } from "./providerPolicy.ts";
 
 export const ServerAuthPolicy = Schema.Literals([
@@ -190,9 +191,10 @@ export const ServerAuthDescriptor = Schema.Struct({
   sessionCookieName: TrimmedNonEmptyString,
   /** Older servers omit this and authorize self-updates with orchestration:operate. */
   serverUpdateScope: Schema.optionalKey(Schema.Literal(AuthEnvironmentMaintainScope)),
+  /** Older servers are single-owner; the switch to multi-user is off until an owner enables it. */
+  authMode: Schema.optionalKey(Schema.Literals(["single-owner", "multi-user"])),
 });
 export type ServerAuthDescriptor = typeof ServerAuthDescriptor.Type;
-
 export const AuthBrowserSessionRequest = Schema.Struct({
   credential: TrimmedNonEmptyString,
 });
@@ -203,6 +205,11 @@ export const AuthBrowserSessionResult = Schema.Struct({
   ...authScopeResponseFields,
   sessionMethod: ServerAuthSessionMethod,
   expiresAt: Schema.DateTimeUtc,
+  /** Older servers omit the binding; an absent one behaves as `environment`. */
+  binding_kind: Schema.optionalKey(SessionBindingKind),
+  binding: Schema.optionalKey(SessionBinding),
+  /** The role the credential carries on its projects. */
+  role: Schema.optionalKey(ProjectRole),
 });
 export type AuthBrowserSessionResult = typeof AuthBrowserSessionResult.Type;
 
@@ -331,6 +338,10 @@ export const AuthPairingCredentialResult = Schema.Struct({
   purpose: Schema.optionalKey(Schema.Literal("peer-link")),
   /** Set when the code approves one agent sign-in at this level. Older servers omit it. */
   access: Schema.optionalKey(AuthMcpClientAccess),
+  /** Older servers omit the binding; an absent one behaves as `environment`. */
+  binding_kind: Schema.optionalKey(SessionBindingKind),
+  binding: Schema.optionalKey(SessionBinding),
+  role: Schema.optionalKey(ProjectRole),
 });
 export type AuthPairingCredentialResult = typeof AuthPairingCredentialResult.Type;
 
@@ -376,6 +387,10 @@ export const AuthPairingLink = Schema.Struct({
   expiresAt: Schema.DateTimeUtc,
   /** Set while a T3 Connect device waits for approval. Older servers never send it. */
   connectDeviceRequest: Schema.optionalKey(AuthConnectDeviceRequest),
+  /** Older servers omit the binding; an absent one behaves as `environment`. */
+  binding_kind: Schema.optionalKey(SessionBindingKind),
+  binding: Schema.optionalKey(SessionBinding),
+  role: Schema.optionalKey(ProjectRole),
 });
 export type AuthPairingLink = typeof AuthPairingLink.Type;
 

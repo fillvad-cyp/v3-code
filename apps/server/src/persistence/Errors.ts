@@ -117,5 +117,13 @@ export type AuthSessionRepositoryError = PersistenceSqlError | PersistenceDecode
 export type PullRequestFilesViewedRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type IssueTrackerBindingsRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type PullRequestReviewGuideRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type PrincipalRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type MembershipRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type InvitationRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type ApiTokenRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type AuditEventRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type ProjectQuotaRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type MemberLimitsRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type SessionPrincipalRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 
 export type ProjectionRepositoryError = PersistenceSqlError | PersistenceDecodeError;

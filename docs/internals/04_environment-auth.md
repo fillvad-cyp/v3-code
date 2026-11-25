@@ -5,6 +5,11 @@ credentials belong to a separate trust boundary, described in [T3 Connect](./06_
 token is never an environment login. See [SECURITY.md](../../SECURITY.md) for the overall threat
 model.
 
+Scopes authorize methods environment-wide. Per-principal identity, project roles and the
+`environment`/`principal`/`projects` session bindings are in
+[Multi-user](./18_multi-user.md); their records and contracts exist without changing the scope
+model above.
+
 ## Scoped sessions and delegation
 
 - **Narrowing only.** Pairing delegates a set of scopes. Exchanging a bootstrap credential can
