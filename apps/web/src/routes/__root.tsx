@@ -39,6 +39,7 @@ import { ThemeEditorHost } from "../components/settings/ThemeEditorHost";
 import { HomeScreenInstallPromptHost } from "../components/pwa/HomeScreenInstallPrompt";
 import { PrivacyLockOverlayHost } from "../components/pwa/PrivacyLockOverlay";
 import { usePrivacyShieldStore } from "../lib/privacyShield";
+import { isPopoutWindowRuntime } from "../lib/threadPopout";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { Button } from "../components/ui/button";
 import { StandalonePage, StandalonePageHeader } from "../components/ui/standalone-page";
@@ -160,6 +161,7 @@ function RootRouteView() {
 
 function RootRouteBranch() {
   const pathname = useLocation({ select: (location) => location.pathname });
+  const [isPopoutWindow] = useState(isPopoutWindowRuntime);
   const { authGateState } = Route.useRouteContext();
   const primaryEnvironmentAuthenticated = authGateState.status === "authenticated";
   // A sync IPC read; the setting only changes across a relaunch.
@@ -196,23 +198,23 @@ function RootRouteBranch() {
   // first-run gate and the event router, whose first navigation would leave the page.
   const appHosts = (
     <>
-      {primaryEnvironmentAuthenticated || localEnvironmentDisabled ? (
+      {!isPopoutWindow && (primaryEnvironmentAuthenticated || localEnvironmentDisabled) ? (
         <>
           <DesktopAppActivationCoordinator />
           <DesktopWebLinkCoordinator />
         </>
       ) : null}
-      {isElectron ? <RunningThreadKeepAlive /> : null}
+      {!isPopoutWindow && isElectron ? <RunningThreadKeepAlive /> : null}
       <RelayClientInstallDialog />
       <ConnectOnboardingDialog />
       <SshPasswordPromptDialog />
-      <SnapShotCoordinator />
+      {!isPopoutWindow ? <SnapShotCoordinator /> : null}
       <ReopenClosedViewShortcut />
       <ConfirmDialogHost />
       <CustomSnoozeDialogHost />
       <GuestShareDialogHost />
-      <ProjectCloneToastCoordinator />
-      <ConnectDeviceApprovalCoordinator />
+      {!isPopoutWindow ? <ProjectCloneToastCoordinator /> : null}
+      {!isPopoutWindow ? <ConnectDeviceApprovalCoordinator /> : null}
       <AddProjectToMachineDialogHost />
       <UseInAnotherAppDialogHost />
       {import.meta.env.DEV && primaryEnvironmentAuthenticated ? <DevReplayHost /> : null}
@@ -221,7 +223,7 @@ function RootRouteBranch() {
   const appShell = (
     <CommandPalette>
       {/* Setup starts with an empty workspace, so the Welcome page has no thread list. */}
-      <AppSidebarLayout showSidebar={!isWelcome}>
+      <AppSidebarLayout showSidebar={!isWelcome} popoutMode={isPopoutWindow}>
         <Outlet />
       </AppSidebarLayout>
     </CommandPalette>
@@ -242,7 +244,7 @@ function RootRouteBranch() {
         >
           {appHosts}
           {primaryEnvironmentAuthenticated ? (
-            <EventRouter skipInitialBootstrapNavigation={returningFromWelcome} />
+            <EventRouter skipInitialBootstrapNavigation={returningFromWelcome || isPopoutWindow} />
           ) : null}
           {appShell}
         </FirstRunGate>

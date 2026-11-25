@@ -172,6 +172,7 @@ import {
   resolveThreadRouteTarget,
 } from "../threadRoutes";
 import type { SidebarThreadSummary } from "../types";
+import { openThreadInPopoutWindow, shouldPopoutOnThreadClick } from "../lib/threadPopout";
 import { cn } from "~/lib/utils";
 import { ProjectEnvironmentBadge } from "./ProjectEnvironmentBadge";
 import { ProjectRowActions } from "./ProjectComboboxRow";
@@ -1614,7 +1615,35 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
     const isMac = isMacPlatform(navigator.platform);
     const isModClick = isMac ? event.metaKey : event.ctrlKey;
     const threadKey = scopedThreadKey(threadRef);
-    if (isModClick) {
+    const hasSelection = useThreadSelectionStore.getState().hasSelection();
+    if (
+      shouldPopoutOnThreadClick({
+        isMac,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+        shiftKey: event.shiftKey,
+        altKey: event.altKey,
+        hasSelection,
+      })
+    ) {
+      event.preventDefault();
+      const title = threadByKeyRef.current.get(threadKey)?.title;
+      void openThreadInPopoutWindow(threadRef, { title }).then((opened) => {
+        if (!opened) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "error",
+              title: gt("Could not open chat window"),
+              ...(isElectron
+                ? {}
+                : { description: gt("Allow pop-ups for this site and try again.") }),
+            }),
+          );
+        }
+      });
+      return;
+    }
+    if (isModClick || event.altKey) {
       event.preventDefault();
       toggleThreadSelection(threadKey);
       return;
@@ -2765,6 +2794,21 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
           return;
         }
         switch (clicked.value) {
+          case "open-in-new-window": {
+            const opened = await openThreadInPopoutWindow(threadRef, { title: thread.title });
+            if (!opened) {
+              toastManager.add(
+                stackedThreadToast({
+                  type: "error",
+                  title: gt("Could not open chat window"),
+                  ...(isElectron
+                    ? {}
+                    : { description: gt("Allow pop-ups for this site and try again.") }),
+                }),
+              );
+            }
+            return;
+          }
           case "filter-by-project":
             if (threadProjectGroup) {
               setProjectScopeKeys(

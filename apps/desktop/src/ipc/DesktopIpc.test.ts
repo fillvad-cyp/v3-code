@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { assert, it } from "@effect/vitest";
 import { vi } from "vite-plus/test";
@@ -9,9 +10,14 @@ vi.mock("electron", () => ({}));
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopIpc from "./DesktopIpc.ts";
 
-it.effect("answers only the main window's top frame", () =>
+it.effect("answers only trusted app windows' top frames", () =>
   Effect.gen(function* () {
     const mainFrame = {};
+    const popoutFrame = {};
+    const mainWin = { webContents: { id: 1, mainFrame } } as unknown as Electron.BrowserWindow;
+    const popoutWin = {
+      webContents: { id: 3, mainFrame: popoutFrame },
+    } as unknown as Electron.BrowserWindow;
     const invoke = new Map<string, DesktopIpc.DesktopIpcHandleListener>();
     const sync = new Map<string, DesktopIpc.DesktopIpcSyncListener>();
     const ipc = yield* DesktopIpc.DesktopIpc.pipe(
@@ -24,9 +30,14 @@ it.effect("answers only the main window's top frame", () =>
         }).pipe(
           Layer.provide(
             Layer.mock(ElectronWindow.ElectronWindow, {
-              main: Effect.succeedSome({
-                webContents: { id: 1, mainFrame },
-              } as unknown as Electron.BrowserWindow),
+              trustedAppWindowForSender: (senderId, senderFrame) =>
+                Effect.succeed(
+                  senderId === 1 && senderFrame === mainFrame
+                    ? Option.some(mainWin)
+                    : senderId === 3 && senderFrame === popoutFrame
+                      ? Option.some(popoutWin)
+                      : Option.none(),
+                ),
             }),
           ),
         ),
@@ -44,7 +55,9 @@ it.effect("answers only the main window's top frame", () =>
 
     const senders = {
       app: { sender: { id: 1 }, senderFrame: mainFrame },
+      popout: { sender: { id: 3 }, senderFrame: popoutFrame },
       appSubframe: { sender: { id: 1 }, senderFrame: {} },
+      popoutSubframe: { sender: { id: 3 }, senderFrame: {} },
       previewGuest: { sender: { id: 2 }, senderFrame: {} },
     };
     const results: Record<string, unknown> = {};
@@ -60,7 +73,9 @@ it.effect("answers only the main window's top frame", () =>
     }
     assert.deepEqual(results, {
       app: ["secret", "secret"],
+      popout: ["secret", "secret"],
       appSubframe: ["rejected", undefined],
+      popoutSubframe: ["rejected", undefined],
       previewGuest: ["rejected", undefined],
     });
   }),

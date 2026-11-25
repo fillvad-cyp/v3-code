@@ -99,6 +99,8 @@ function layerElectronWindow(window: ReturnType<typeof makeTestWindow>["window"]
       focusedMainOrFirst: Effect.succeedSome(window as Electron.BrowserWindow),
       setMain: () => Effect.void,
       clearMain: () => Effect.void,
+      registerAppWindow: () => Effect.void,
+      trustedAppWindowForSender: () => Effect.succeedSome(window as Electron.BrowserWindow),
       prepareReveal: () => Effect.succeed(false),
       reveal: () => Effect.void,
       sendAll: () => Effect.void,

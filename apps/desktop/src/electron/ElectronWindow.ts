@@ -120,6 +120,11 @@ export class ElectronWindow extends Context.Service<
     readonly focusedMainOrFirst: Effect.Effect<Option.Option<Electron.BrowserWindow>>;
     readonly setMain: (window: Electron.BrowserWindow) => Effect.Effect<void>;
     readonly clearMain: (window: Option.Option<Electron.BrowserWindow>) => Effect.Effect<void>;
+    readonly registerAppWindow: (window: Electron.BrowserWindow) => Effect.Effect<void>;
+    readonly trustedAppWindowForSender: (
+      senderId: number,
+      senderFrame: unknown,
+    ) => Effect.Effect<Option.Option<Electron.BrowserWindow>>;
     readonly prepareReveal: (window: Electron.BrowserWindow) => Effect.Effect<boolean>;
     readonly reveal: (window: Electron.BrowserWindow) => Effect.Effect<void>;
     readonly sendAll: (channel: string, ...args: readonly unknown[]) => Effect.Effect<void>;
@@ -147,6 +152,7 @@ export const make = Effect.gen(function* () {
   const captureRevealWindows = new Set<number>();
   yield* Effect.addFinalizer(() => Effect.sync(() => windowsForegroundFocus?.close()));
   const mainWindowRef = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+  const trustedAppWindows = new Set<Electron.BrowserWindow>();
   const auxiliaryWindows = new WeakSet<Electron.BrowserWindow>();
   const titleBarOverlayWindows = new WeakSet<Electron.BrowserWindow>();
 
@@ -270,6 +276,46 @@ export const make = Effect.gen(function* () {
         return Option.none();
       });
     }),
+    registerAppWindow: Effect.fn("ElectronWindow.registerAppWindow")(function (window) {
+      return Effect.sync(() => {
+        trustedAppWindows.add(window);
+        window.once("closed", () => {
+          trustedAppWindows.delete(window);
+        });
+      });
+    }),
+    trustedAppWindowForSender: Effect.fn("ElectronWindow.trustedAppWindowForSender")(
+      function* (senderId, senderFrame) {
+        if (senderFrame === null || senderFrame === undefined) {
+          return Option.none<Electron.BrowserWindow>();
+        }
+        const matchesSender = (candidate: Electron.BrowserWindow): boolean => {
+          const contents = candidate.webContents;
+          if (typeof contents.isDestroyed === "function" && contents.isDestroyed()) {
+            return false;
+          }
+          return (
+            contents.id === senderId &&
+            contents.mainFrame != null &&
+            contents.mainFrame === senderFrame
+          );
+        };
+        const main = yield* liveMain;
+        if (Option.isSome(main) && matchesSender(main.value)) {
+          return main;
+        }
+        for (const candidate of trustedAppWindows) {
+          if (yield* isWindowDestroyed(candidate)) {
+            trustedAppWindows.delete(candidate);
+            continue;
+          }
+          if (matchesSender(candidate)) {
+            return Option.some(candidate);
+          }
+        }
+        return Option.none<Electron.BrowserWindow>();
+      },
+    ),
     prepareReveal: Effect.fn("ElectronWindow.prepareReveal")(function (window) {
       return Effect.promise(async () => {
         if (platform !== "win32" || window.isDestroyed()) {

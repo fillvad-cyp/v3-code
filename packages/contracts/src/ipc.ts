@@ -1108,6 +1108,12 @@ export const DesktopAppleSpeechTranscribeInputSchema = Schema.Struct({
 export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access"]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
+export const DesktopThreadPopoutInputSchema = Schema.Struct({
+  routePath: Schema.String.check(Schema.isTrimmed()).check(Schema.isNonEmpty()),
+  title: Schema.optional(Schema.String),
+});
+export type DesktopThreadPopoutInput = typeof DesktopThreadPopoutInputSchema.Type;
+
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
   /** `null` until the desktop host has read the login shell's environment; ask again later. */
@@ -1206,6 +1212,8 @@ export interface DesktopBridge {
   cancelProviderAuthCallback: (authorizationUrl: string) => Promise<void>;
   startFileDrag: (input: { environmentId: EnvironmentId; path: string }) => Promise<boolean>;
   openExternal: (url: string) => Promise<boolean>;
+  /** Opens a chat thread route in a dedicated secondary desktop window, or focuses its existing pop-out. */
+  openThreadPopoutWindow?: (input: DesktopThreadPopoutInput) => Promise<boolean>;
   /** Reads http(s) media in the main process, outside renderer CORS and CSP; null on network failure. */
   readMedia: (url: string) => Promise<DesktopMediaRead | null>;
   openSystemSettings: (pane: SystemSettingsPane) => Promise<boolean>;

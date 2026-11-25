@@ -27,6 +27,8 @@ import {
 import { titleRegenerationToast } from "../components/threadTitleRegenerationToast";
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { copyThreadReference } from "../lib/copyThreadReference";
+import { isElectron } from "../env";
+import { openThreadInPopoutWindow } from "../lib/threadPopout";
 import { m } from "../i18n/messages";
 import { threadChipCopyTarget } from "@t3tools/client-runtime/thread-reference";
 import { threadEnvironment } from "../state/threads";
@@ -200,6 +202,21 @@ export function useThreadActionMenu(input: {
         case "find":
           onFind?.(threadRef);
           return;
+        case "open-in-new-window": {
+          const opened = await openThreadInPopoutWindow(threadRef, { title: thread.title });
+          if (!opened) {
+            toastManager.add(
+              stackedThreadToast({
+                type: "error",
+                title: m(msg("Could not open chat window")),
+                ...(isElectron
+                  ? {}
+                  : { description: m(msg("Allow pop-ups for this site and try again.")) }),
+              }),
+            );
+          }
+          return;
+        }
         case "project-settings": {
           const project = projects.find(
             (candidate) =>

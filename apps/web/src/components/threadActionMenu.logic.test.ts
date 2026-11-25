@@ -88,4 +88,11 @@ describe("buildThreadActionMenuItems", () => {
     const items = buildThreadActionMenuItems({ ...baseState, canRename: false });
     expect(items.filter((item) => item.disabled).map((item) => item.id)).toEqual(["rename"]);
   });
+
+  it("includes open in new window even for read-only connections", () => {
+    const items = buildThreadActionMenuItems({ ...baseState, canOperate: false });
+    const popoutItem = items.find((item) => item.id === "open-in-new-window");
+    expect(popoutItem).toBeDefined();
+    expect(popoutItem?.disabled).not.toBe(true);
+  });
 });

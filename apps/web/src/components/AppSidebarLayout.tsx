@@ -420,9 +420,11 @@ function SidebarControl({ showSidebar }: { readonly showSidebar: boolean }) {
 export function AppSidebarLayout({
   children,
   showSidebar = true,
+  popoutMode = false,
 }: {
   children: ReactNode;
   showSidebar?: boolean;
+  popoutMode?: boolean;
 }) {
   const gt = useGT();
   const sidebarArea = workspaceAreaProps("sidebar", 0, gt("Threads"));
@@ -470,7 +472,8 @@ export function AppSidebarLayout({
       <SidebarProvider
         className="h-dvh! min-h-0!"
         data-panel-animations={routePanelAnimationsActive ? "true" : "false"}
-        storageKey="chat_thread_sidebar_open"
+        defaultOpen={!popoutMode}
+        {...(popoutMode ? {} : { storageKey: "chat_thread_sidebar_open" })}
         style={sidebarProviderStyle}
       >
         {showSidebar ? (

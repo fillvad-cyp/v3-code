@@ -222,4 +222,43 @@ describe("ElectronWindow", () => {
       assert.isTrue(current._tag === "Some" && current.value === ordinary);
     }).pipe(Effect.provide(layerTest)),
   );
+
+  it.effect("trusts registered secondary app windows until closed and rejects subframes", () =>
+    Effect.gen(function* () {
+      const electronWindow = yield* ElectronWindow.ElectronWindow;
+      const mainFrame = {};
+      const popoutFrame = {};
+      let closedHandler: (() => void) | undefined;
+      const main = {
+        isDestroyed: () => false,
+        webContents: { id: 10, mainFrame },
+      } as unknown as Electron.BrowserWindow;
+      const popout = {
+        isDestroyed: () => false,
+        webContents: { id: 20, mainFrame: popoutFrame },
+        once: (event: string, listener: () => void) => {
+          if (event === "closed") closedHandler = listener;
+        },
+      } as unknown as Electron.BrowserWindow;
+
+      yield* electronWindow.setMain(main);
+      yield* electronWindow.registerAppWindow(popout);
+
+      const resolvedMain = yield* electronWindow.trustedAppWindowForSender(10, mainFrame);
+      const resolvedPopout = yield* electronWindow.trustedAppWindowForSender(20, popoutFrame);
+      const resolvedSubframe = yield* electronWindow.trustedAppWindowForSender(20, {});
+      const resolvedNullFrame = yield* electronWindow.trustedAppWindowForSender(20, null);
+      const resolvedGuest = yield* electronWindow.trustedAppWindowForSender(99, popoutFrame);
+
+      assert.isTrue(resolvedMain._tag === "Some" && resolvedMain.value === main);
+      assert.isTrue(resolvedPopout._tag === "Some" && resolvedPopout.value === popout);
+      assert.isTrue(resolvedSubframe._tag === "None");
+      assert.isTrue(resolvedNullFrame._tag === "None");
+      assert.isTrue(resolvedGuest._tag === "None");
+
+      closedHandler?.();
+      const afterClose = yield* electronWindow.trustedAppWindowForSender(20, popoutFrame);
+      assert.isTrue(afterClose._tag === "None");
+    }).pipe(Effect.provide(layerTest)),
+  );
 });

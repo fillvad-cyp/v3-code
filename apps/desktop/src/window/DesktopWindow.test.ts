@@ -318,6 +318,8 @@ function layerTest(input: {
         : Effect.succeedSome(input.focusedWindow),
     setMain: (window) => Ref.set(input.mainWindow, Option.some(window)),
     clearMain: () => Ref.set(input.mainWindow, Option.none()),
+    registerAppWindow: () => Effect.void,
+    trustedAppWindowForSender: () => Ref.get(input.mainWindow),
     prepareReveal: () => Effect.succeed(false),
     reveal: (window) => Effect.sync(() => input.onReveal?.(window)),
     sendAll: () => Effect.void,
@@ -449,6 +451,8 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
       focusedMainOrFirst: currentMainOrFirst,
       setMain: (window) => Ref.set(mainWindow, Option.some(window)),
       clearMain: () => Ref.set(mainWindow, Option.none()),
+      registerAppWindow: () => Effect.void,
+      trustedAppWindowForSender: () => Ref.get(mainWindow),
       prepareReveal: () => Effect.succeed(false),
       reveal: (window) => Ref.update(revealedWindows, (windows) => [...windows, window]),
       sendAll: () => Effect.void,
@@ -1816,6 +1820,63 @@ describe("DesktopWindow", () => {
         assert.equal(yield* Ref.get(createCount), 1);
         assert.equal(fakeWindow.send.mock.calls.length, 0);
         assert.equal(onReveal.mock.calls.length, 0);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("opens a thread pop-out window once and focuses it on repeat calls", () =>
+    Effect.gen(function* () {
+      const popoutWindow = makeFakeBrowserWindow();
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const onReveal = vi.fn();
+      const layer = layerTest({
+        window: popoutWindow.window,
+        createCount,
+        mainWindow,
+        onReveal,
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+
+        assert.isFalse(
+          yield* desktopWindow.openThreadPopout({ routePath: "https://evil.example/phish" }),
+        );
+        assert.isFalse(yield* desktopWindow.openThreadPopout({ routePath: "/../settings" }));
+        assert.equal(yield* Ref.get(createCount), 0);
+
+        const firstOpen = yield* desktopWindow.openThreadPopout({
+          routePath: "/local/thread-42",
+          title: "Fix auth",
+        });
+        assert.isTrue(firstOpen);
+        assert.equal(yield* Ref.get(createCount), 1);
+        assert.deepEqual(popoutWindow.loadURL.mock.calls, [
+          ["v3code-dev://app/#/local/thread-42?popout=1"],
+        ]);
+
+        const secondOpen = yield* desktopWindow.openThreadPopout({
+          routePath: "/local/thread-42",
+          title: "Fix auth",
+        });
+        assert.isTrue(secondOpen);
+        assert.equal(yield* Ref.get(createCount), 1);
+        assert.equal(onReveal.mock.calls.length, 1);
+
+        popoutWindow.windowListeners.get("closed")?.();
+        const thirdOpen = yield* desktopWindow.openThreadPopout({
+          routePath: "/local/thread-42",
+        });
+        assert.isTrue(thirdOpen);
+        assert.equal(yield* Ref.get(createCount), 2);
+
+        popoutWindow.webContentsListeners.get("render-process-gone")?.({}, { reason: "crashed" });
+        const fourthOpen = yield* desktopWindow.openThreadPopout({
+          routePath: "/ssh%3Abox%2F1/thread-42",
+        });
+        assert.isTrue(fourthOpen);
+        assert.equal(yield* Ref.get(createCount), 3);
       }).pipe(Effect.provide(layer));
     }),
   );

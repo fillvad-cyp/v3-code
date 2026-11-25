@@ -49,6 +49,7 @@ import { syncBrowserChromeTheme } from "./hooks/useTheme";
 import { startThreadVisitedMigration } from "./hooks/useThreadVisitedMigration";
 import { installDesktopPasteAsText } from "./lib/desktopPasteAsText";
 import { startPrivacyShieldService } from "./lib/privacyShield";
+import { isPopoutWindowRuntime } from "./lib/threadPopout";
 import { startPwaInstallService } from "./lib/pwaInstall";
 import {
   syncDocumentElectronPlatformClasses,
@@ -287,10 +288,13 @@ export function startAppServices(): AppRouter {
   startBrowserChromeThemeSync(router);
   startDefaultThemeAdoption();
   startModelPreferencesMigration();
-  startAgentOpenedPreviews();
-  if (isElectron) startElectronBrowserHost();
-  startPreviewTitleRecording();
-  startBrowserProfileReporting();
+  const isPopoutWindow = isPopoutWindowRuntime();
+  if (!isPopoutWindow) {
+    startAgentOpenedPreviews();
+    if (isElectron) startElectronBrowserHost();
+    startPreviewTitleRecording();
+    startBrowserProfileReporting();
+  }
   installChatRouteCommands(router);
   installCommandPaletteCommands(router);
   registerOpenFavoriteEditorCommand();
@@ -319,9 +323,11 @@ export function startAppServices(): AppRouter {
   startHostFreezeToasts();
   startLegacyThreadMigrationToast();
   startPermissionUpdateNotices(router);
-  startThreadNotifications(appAtomRegistry, router);
-  startGuideRunNotifications(appAtomRegistry, router);
-  if (isElectron) startDesktopUpdateLaunchNotice();
+  if (!isPopoutWindow) {
+    startThreadNotifications(appAtomRegistry, router);
+    startGuideRunNotifications(appAtomRegistry, router);
+    if (isElectron) startDesktopUpdateLaunchNotice();
+  }
 
   return router;
 }

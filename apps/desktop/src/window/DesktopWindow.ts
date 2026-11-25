@@ -91,6 +91,29 @@ const TITLEBAR_COLOR = "#01000000"; // #00000000 does not work correctly on Linu
 const TITLEBAR_LIGHT_SYMBOL_COLOR = "#1f2937";
 const TITLEBAR_DARK_SYMBOL_COLOR = "#f8fafc";
 const MAIN_WINDOW_BOUNDS_PERSIST_DEBOUNCE_MS = 500;
+const THREAD_POPOUT_DEFAULT_SIZE = { width: 960, height: 760 } as const;
+const THREAD_POPOUT_MIN_SIZE = { width: 480, height: 420 } as const;
+const THREAD_POPOUT_CASCADE_STEP_PX = 28;
+const THREAD_POPOUT_ROUTE_PATTERN = /^\/[A-Za-z0-9._~:%-]+\/[A-Za-z0-9._~:%-]+$/;
+const THREAD_POPOUT_MAX_ROUTE_LENGTH = 512;
+
+function isValidThreadPopoutRoutePath(routePath: string): boolean {
+  if (routePath.length === 0 || routePath.length > THREAD_POPOUT_MAX_ROUTE_LENGTH) {
+    return false;
+  }
+  if (!THREAD_POPOUT_ROUTE_PATTERN.test(routePath)) {
+    return false;
+  }
+  const segments = routePath.slice(1).split("/");
+  return segments.every((segment) => {
+    try {
+      const decoded = decodeURIComponent(segment);
+      return decoded.length > 0 && decoded !== "." && decoded !== "..";
+    } catch {
+      return false;
+    }
+  });
+}
 const DEVELOPMENT_LOAD_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
 const RENDERER_RECOVERY_RELOAD_DELAY_MS = 500;
 const RENDERER_RECOVERY_MAX_ATTEMPTS = 3;
@@ -147,6 +170,10 @@ export class DesktopWindow extends Context.Service<
     readonly zoomMain: (direction: MainWindowZoomDirection) => Effect.Effect<void>;
     readonly runMainContentsCommand: (command: MainWindowContentsCommand) => Effect.Effect<void>;
     readonly syncAppearance: Effect.Effect<void>;
+    readonly openThreadPopout: (input: {
+      readonly routePath: string;
+      readonly title?: string | undefined;
+    }) => Effect.Effect<boolean, DesktopWindowError>;
   }
 >()("@t3tools/desktop/window/DesktopWindow") {}
 
@@ -405,12 +432,162 @@ export const make = Effect.gen(function* () {
   const runFork = Effect.runForkWith(context);
   const runPromise = Effect.runPromiseWith(context);
   const mainWindowMutex = yield* Semaphore.make(1);
+  const popoutWindowMutex = yield* Semaphore.make(1);
   const pendingMainReveals = new WeakMap<Electron.BrowserWindow, Effect.Effect<void>>();
   const revealMain = Effect.fn("desktop.window.revealMain")((window: Electron.BrowserWindow) =>
     Effect.suspend(() => pendingMainReveals.get(window) ?? electronWindow.reveal(window)),
   );
   let flushMainWindowBounds: Effect.Effect<void> = Effect.void;
-  let remoteRequestHeaderOwner: Electron.BrowserWindow | null = null;
+  const popoutWindows = new Map<string, Electron.BrowserWindow>();
+  const activeAppWebContentsIds = new Set<number>();
+  let detachSharedRemoteRequestHeaders: (() => void) | null = null;
+  const attachRemoteRequestHeadersForWindow = (
+    window: Electron.BrowserWindow,
+    webContentsId: number,
+  ): void => {
+    activeAppWebContentsIds.add(webContentsId);
+    if (detachSharedRemoteRequestHeaders !== null) return;
+    detachSharedRemoteRequestHeaders = installMainWindowRemoteRequestHeaderPolicy(
+      window.webContents.session,
+      {
+        desktopOrigin: getDesktopOrigin(environment.isDevelopment),
+        mainWebContentsId: webContentsId,
+        isAppWebContentsId: (id) => activeAppWebContentsIds.has(id),
+        clerkFrontendApiHostname: DesktopClerk.desktopClerkFrontendApiHostname,
+        devServerOrigin: Option.getOrUndefined(
+          Option.map(environment.devServerUrl, (url) => url.origin),
+        ),
+        isDevelopment: environment.isDevelopment,
+      },
+    );
+  };
+  const detachRemoteRequestHeadersForWindow = (webContentsId: number): void => {
+    activeAppWebContentsIds.delete(webContentsId);
+    if (activeAppWebContentsIds.size === 0 && detachSharedRemoteRequestHeaders !== null) {
+      const detach = detachSharedRemoteRequestHeaders;
+      detachSharedRemoteRequestHeaders = null;
+      detach();
+    }
+  };
+  const contextMenuContents = new WeakSet<Electron.WebContents>();
+
+  const installContextMenu = (
+    ownerWindow: Electron.BrowserWindow,
+    contents: Electron.WebContents,
+    isBrowserContents = false,
+  ): void => {
+    if (contextMenuContents.has(contents)) return;
+    contextMenuContents.add(contents);
+    contents.on("context-menu", (event, params) => {
+      event.preventDefault();
+      if (contents.isDestroyed() || ownerWindow.isDestroyed()) return;
+      // Right-clicking a guest may leave native editing roles targeting the host renderer.
+      contents.focus();
+
+      const menuTemplate: Electron.MenuItemConstructorOptions[] = [];
+
+      if (isBrowserContents) {
+        menuTemplate.push(
+          {
+            label: m(msg("Reload")),
+            click: () => {
+              if (!contents.isDestroyed()) contents.reload();
+            },
+          },
+          { type: "separator" },
+        );
+      }
+
+      if (params.misspelledWord) {
+        for (const suggestion of params.dictionarySuggestions.slice(0, 5)) {
+          menuTemplate.push({
+            label: suggestion,
+            click: () => {
+              if (!contents.isDestroyed()) contents.replaceMisspelling(suggestion);
+            },
+          });
+        }
+        if (params.dictionarySuggestions.length === 0) {
+          menuTemplate.push({ label: m(msg("No suggestions")), enabled: false });
+        }
+        menuTemplate.push({ type: "separator" });
+      }
+
+      if (Option.isSome(ElectronShell.parseSafeExternalUrl(params.linkURL))) {
+        menuTemplate.push(
+          {
+            label: m(msg("Copy Link")),
+            click: () => {
+              void runPromise(electronShell.copyText(params.linkURL));
+            },
+          },
+          { type: "separator" },
+        );
+      }
+
+      const mailtoAddress = parseMailtoAddress(params.linkURL);
+      if (Option.isSome(mailtoAddress)) {
+        menuTemplate.push(
+          {
+            label: m(msg("Copy Email Address")),
+            click: () => {
+              void runPromise(electronShell.copyText(mailtoAddress.value));
+            },
+          },
+          { type: "separator" },
+        );
+      }
+
+      if (params.mediaType === "image") {
+        menuTemplate.push({
+          label: m(msg("Copy Image")),
+          click: () => {
+            void runPromise(
+              Effect.tryPromise({
+                try: () => copyContextMenuImage(contents, params),
+                catch: (cause) => new ContextMenuImageCopyError({ cause }),
+              }).pipe(Effect.catch(() => logWindowWarning("failed to copy context-menu image"))),
+            );
+          },
+        });
+        menuTemplate.push({ type: "separator" });
+      }
+
+      menuTemplate.push(
+        {
+          role: "cut",
+          label: m(msg("Cut", { $context: "Edit menu item" })),
+          enabled: params.editFlags.canCut,
+        },
+        {
+          role: "copy",
+          label: m(msg("Copy", { $context: "Edit menu item" })),
+          enabled: params.editFlags.canCopy,
+        },
+        {
+          role: "paste",
+          label: m(msg("Paste", { $context: "Edit menu item" })),
+          enabled: params.editFlags.canPaste,
+        },
+        {
+          role: "selectAll",
+          label: m(msg("Select All", { $context: "Edit menu item" })),
+          enabled: params.editFlags.canSelectAll,
+        },
+      );
+
+      void runPromise(
+        electronMenu.popupTemplate({
+          window: ownerWindow,
+          template: menuTemplate,
+          ...(params.frame ? { frame: params.frame } : {}),
+        }),
+      );
+    });
+    contents.on("did-create-window", (popup) => {
+      installContextMenu(popup, popup.webContents, isBrowserContents);
+    });
+  };
 
   const dismissConnectingSplash = Effect.gen(function* () {
     const splash = yield* Ref.getAndSet(splashWindowRef, Option.none());
@@ -650,124 +827,6 @@ export const make = Effect.gen(function* () {
       }
     });
 
-    const contextMenuContents = new WeakSet<Electron.WebContents>();
-    const installContextMenu = (
-      ownerWindow: Electron.BrowserWindow,
-      contents: Electron.WebContents,
-      isBrowserContents = false,
-    ): void => {
-      if (contextMenuContents.has(contents)) return;
-      contextMenuContents.add(contents);
-      contents.on("context-menu", (event, params) => {
-        event.preventDefault();
-        if (contents.isDestroyed() || ownerWindow.isDestroyed()) return;
-        // Right-clicking a guest may leave native editing roles targeting the host renderer.
-        contents.focus();
-
-        const menuTemplate: Electron.MenuItemConstructorOptions[] = [];
-
-        if (isBrowserContents) {
-          menuTemplate.push(
-            {
-              label: m(msg("Reload")),
-              click: () => {
-                if (!contents.isDestroyed()) contents.reload();
-              },
-            },
-            { type: "separator" },
-          );
-        }
-
-        if (params.misspelledWord) {
-          for (const suggestion of params.dictionarySuggestions.slice(0, 5)) {
-            menuTemplate.push({
-              label: suggestion,
-              click: () => {
-                if (!contents.isDestroyed()) contents.replaceMisspelling(suggestion);
-              },
-            });
-          }
-          if (params.dictionarySuggestions.length === 0) {
-            menuTemplate.push({ label: m(msg("No suggestions")), enabled: false });
-          }
-          menuTemplate.push({ type: "separator" });
-        }
-
-        if (Option.isSome(ElectronShell.parseSafeExternalUrl(params.linkURL))) {
-          menuTemplate.push(
-            {
-              label: m(msg("Copy Link")),
-              click: () => {
-                void runPromise(electronShell.copyText(params.linkURL));
-              },
-            },
-            { type: "separator" },
-          );
-        }
-
-        const mailtoAddress = parseMailtoAddress(params.linkURL);
-        if (Option.isSome(mailtoAddress)) {
-          menuTemplate.push(
-            {
-              label: m(msg("Copy Email Address")),
-              click: () => {
-                void runPromise(electronShell.copyText(mailtoAddress.value));
-              },
-            },
-            { type: "separator" },
-          );
-        }
-
-        if (params.mediaType === "image") {
-          menuTemplate.push({
-            label: m(msg("Copy Image")),
-            click: () => {
-              void runPromise(
-                Effect.tryPromise({
-                  try: () => copyContextMenuImage(contents, params),
-                  catch: (cause) => new ContextMenuImageCopyError({ cause }),
-                }).pipe(Effect.catch(() => logWindowWarning("failed to copy context-menu image"))),
-              );
-            },
-          });
-          menuTemplate.push({ type: "separator" });
-        }
-
-        menuTemplate.push(
-          {
-            role: "cut",
-            label: m(msg("Cut", { $context: "Edit menu item" })),
-            enabled: params.editFlags.canCut,
-          },
-          {
-            role: "copy",
-            label: m(msg("Copy", { $context: "Edit menu item" })),
-            enabled: params.editFlags.canCopy,
-          },
-          {
-            role: "paste",
-            label: m(msg("Paste", { $context: "Edit menu item" })),
-            enabled: params.editFlags.canPaste,
-          },
-          {
-            role: "selectAll",
-            label: m(msg("Select All", { $context: "Edit menu item" })),
-            enabled: params.editFlags.canSelectAll,
-          },
-        );
-
-        void runPromise(
-          electronMenu.popupTemplate({
-            window: ownerWindow,
-            template: menuTemplate,
-            ...(params.frame ? { frame: params.frame } : {}),
-          }),
-        );
-      });
-      contents.on("did-create-window", (popup) => {
-        installContextMenu(popup, popup.webContents, isBrowserContents);
-      });
-    };
     installContextMenu(window, window.webContents);
     window.webContents.on("did-attach-webview", (_event, contents) => {
       installContextMenu(window, contents, true);
@@ -782,13 +841,20 @@ export const make = Effect.gen(function* () {
       }
       return { action: "deny" };
     });
-    window.webContents.session.setSpellCheckerEnabled(false);
-    const sanitizedUserAgent = window.webContents
-      .getUserAgent()
-      .replace(/\s*(?:T3Code|V3Code|Electron)\/[^\s]+/gi, "")
-      .trim();
-    if (sanitizedUserAgent.length > 0) {
-      window.webContents.setUserAgent(sanitizedUserAgent);
+    if (typeof window.webContents.session.setSpellCheckerEnabled === "function") {
+      window.webContents.session.setSpellCheckerEnabled(false);
+    }
+    if (
+      typeof window.webContents.getUserAgent === "function" &&
+      typeof window.webContents.setUserAgent === "function"
+    ) {
+      const sanitizedUserAgent = window.webContents
+        .getUserAgent()
+        .replace(/\s*(?:T3Code|V3Code|Electron)\/[^\s]+/gi, "")
+        .trim();
+      if (sanitizedUserAgent.length > 0) {
+        window.webContents.setUserAgent(sanitizedUserAgent);
+      }
     }
     const allowedPermissions = new Set<string>([
       "media",
@@ -1062,21 +1128,10 @@ export const make = Effect.gen(function* () {
       void runPromise(revealWhenReady);
     });
 
-    // Desktop IPC only answers the main window, so register it before its renderer can call in.
+    // Desktop IPC only answers registered app windows, so register main before its renderer can call in.
     yield* electronWindow.setMain(window);
-    remoteRequestHeaderOwner = window;
-    const detachRemoteRequestHeaders = installMainWindowRemoteRequestHeaderPolicy(
-      window.webContents.session,
-      {
-        desktopOrigin: getDesktopOrigin(environment.isDevelopment),
-        mainWebContentsId: window.webContents.id,
-        clerkFrontendApiHostname: DesktopClerk.desktopClerkFrontendApiHostname,
-        devServerOrigin: Option.getOrUndefined(
-          Option.map(environment.devServerUrl, (url) => url.origin),
-        ),
-        isDevelopment: environment.isDevelopment,
-      },
-    );
+    const mainWebContentsId = window.webContents.id;
+    attachRemoteRequestHeadersForWindow(window, mainWebContentsId);
     loadApplication();
     if (environment.isDevelopment) {
       window.webContents.openDevTools({ mode: "detach" });
@@ -1086,10 +1141,7 @@ export const make = Effect.gen(function* () {
       if (!backendHasStarted) mainClosedDuringStartup = true;
       clearDevelopmentLoadRetry();
       clearBoundsPersist();
-      if (remoteRequestHeaderOwner === window) {
-        remoteRequestHeaderOwner = null;
-        detachRemoteRequestHeaders();
-      }
+      detachRemoteRequestHeadersForWindow(mainWebContentsId);
       void runPromise(electronWindow.clearMain(Option.some(window)));
     });
 
@@ -1296,6 +1348,234 @@ export const make = Effect.gen(function* () {
         syncWindowAppearance(window, titleBarOverlay, shouldUseDarkColors, environment.platform),
       );
     }).pipe(Effect.withSpan("desktop.window.syncAppearance")),
+    openThreadPopout: Effect.fn("desktop.window.openThreadPopout")(function* ({
+      routePath,
+      title,
+    }) {
+      if (yield* Ref.get(desktopState.quitting)) return false;
+      if (!isValidThreadPopoutRoutePath(routePath)) return false;
+
+      const existing = popoutWindows.get(routePath);
+      if (existing !== undefined && !existing.isDestroyed()) {
+        yield* electronWindow.reveal(existing);
+        return true;
+      }
+      popoutWindows.delete(routePath);
+
+      const applicationUrl = getDesktopUrl(environment.isDevelopment);
+      const iconPaths = yield* assets.iconPaths;
+      const iconOption = getIconOption(iconPaths, environment.platform);
+      const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
+      const anchor = yield* electronWindow.focusedMainOrFirst;
+      const cascadeIndex = popoutWindows.size % 6;
+      const cascadeOffset = (cascadeIndex + 1) * THREAD_POPOUT_CASCADE_STEP_PX;
+      const anchorBounds =
+        Option.isSome(anchor) && !anchor.value.isDestroyed() ? anchor.value.getBounds() : null;
+      const position =
+        anchorBounds !== null
+          ? { x: anchorBounds.x + cascadeOffset, y: anchorBounds.y + cascadeOffset }
+          : {};
+      const cleanTitle = title?.trim();
+      const popoutTitle =
+        cleanTitle && cleanTitle.length > 0
+          ? `${cleanTitle} - ${environment.displayName}`
+          : environment.displayName;
+
+      const popout = yield* electronWindow.create(
+        {
+          ...THREAD_POPOUT_DEFAULT_SIZE,
+          ...position,
+          minWidth: THREAD_POPOUT_MIN_SIZE.width,
+          minHeight: THREAD_POPOUT_MIN_SIZE.height,
+          show: false,
+          autoHideMenuBar: true,
+          ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
+          backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
+          ...iconOption,
+          title: popoutTitle,
+          ...getWindowTitleBarOptions(shouldUseDarkColors, environment.platform),
+          webPreferences: {
+            preload: environment.preloadPath,
+            backgroundThrottling: false,
+            contextIsolation: true,
+            nodeIntegration: false,
+            sandbox: true,
+            spellcheck: false,
+            webviewTag: true,
+            disableHtmlFullscreenWindowResize: true,
+          },
+        },
+        { auxiliary: true },
+      );
+
+      if (yield* Ref.get(desktopState.quitting)) {
+        yield* electronWindow.destroyAll;
+        return false;
+      }
+
+      const popoutWebContentsId = popout.webContents.id;
+      yield* electronWindow.registerAppWindow(popout);
+      popoutWindows.set(routePath, popout);
+      attachRemoteRequestHeadersForWindow(popout, popoutWebContentsId);
+      if (environment.platform === "darwin") {
+        popout.setAutoHideCursor(false);
+      }
+
+      const cleanupPopout = () => {
+        if (popoutWindows.get(routePath) === popout) {
+          popoutWindows.delete(routePath);
+        }
+        detachRemoteRequestHeadersForWindow(popoutWebContentsId);
+      };
+
+      popout.webContents.on("will-attach-webview", (event, webPreferences, params) => {
+        if (
+          typeof params.partition !== "string" ||
+          !previewManager.isBrowserPartition(params.partition)
+        ) {
+          event.preventDefault();
+          return;
+        }
+        webPreferences.sandbox = true;
+        webPreferences.nodeIntegration = false;
+        webPreferences.nodeIntegrationInSubFrames = false;
+        webPreferences.contextIsolation = true;
+        webPreferences.disableHtmlFullscreenWindowResize = true;
+        if (previewPasskeys.bridgeEnabled) {
+          webPreferences.additionalArguments = [
+            ...(webPreferences.additionalArguments ?? []),
+            PASSKEY_BRIDGE_ARGUMENT,
+          ];
+        }
+        if (!primaryPaste.enabled) {
+          webPreferences.additionalArguments = [
+            ...(webPreferences.additionalArguments ?? []),
+            PRIMARY_PASTE_DISABLED_ARGUMENT,
+          ];
+        }
+      });
+
+      installContextMenu(popout, popout.webContents);
+      popout.webContents.on("did-attach-webview", (_event, contents) => {
+        installContextMenu(popout, contents, true);
+        void runPromise(previewManager.prepareWebview(contents));
+      });
+      popout.webContents.setWindowOpenHandler(({ url }) => {
+        if (Option.isSome(ElectronShell.parseWebExternalUrl(url))) {
+          void runPromise(electronShell.openExternal(url));
+        }
+        return { action: "deny" };
+      });
+      if (
+        typeof popout.webContents.getUserAgent === "function" &&
+        typeof popout.webContents.setUserAgent === "function"
+      ) {
+        const sanitizedUserAgent = popout.webContents
+          .getUserAgent()
+          .replace(/\s*(?:T3Code|V3Code|Electron)\/[^\s]+/gi, "")
+          .trim();
+        if (sanitizedUserAgent.length > 0) {
+          popout.webContents.setUserAgent(sanitizedUserAgent);
+        }
+      }
+      popout.webContents.on("will-navigate", (event, url) => {
+        if (isSameOriginRendererNavigation({ applicationUrl, navigationUrl: url })) {
+          return;
+        }
+        event.preventDefault();
+        if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
+          void runPromise(electronShell.openExternal(url));
+        }
+      });
+      const popoutQuitShortcutHandler = makeQuitShortcutHandler({
+        platform: environment.platform,
+        getMode: () =>
+          runPromise(
+            Effect.map(
+              clientSettings.get,
+              Option.match({
+                onNone: () => DEFAULT_CLIENT_SETTINGS.confirmQuit,
+                onSome: (settings) => settings.confirmQuit,
+              }),
+            ),
+          ),
+        notify: (hint) => {
+          if (!popout.isDestroyed()) {
+            popout.webContents.send(QUIT_SHORTCUT_CHANNEL, hint);
+          }
+        },
+        concealWindow: () => concealPendingQuitWindow(popout),
+        quit: () => {
+          void runPromise(electronApp.quit);
+        },
+      });
+      popout.webContents.on("before-input-event", (event, keyInput) => {
+        popoutQuitShortcutHandler(event, keyInput);
+        if (popout.isDestroyed()) return;
+        const modifier = environment.platform === "darwin" ? keyInput.meta : keyInput.control;
+        if (
+          keyInput.type === "keyDown" &&
+          !keyInput.isAutoRepeat &&
+          modifier &&
+          !keyInput.alt &&
+          !keyInput.shift &&
+          keyInput.key.toLowerCase() === "w"
+        ) {
+          event.preventDefault();
+          popout.close();
+        }
+      });
+      popout.webContents.on("zoom-changed", (_event, direction) => {
+        if (popout.isDestroyed()) return;
+        runFork(zoomWindow(popout, direction));
+      });
+      popout.webContents.on("render-process-gone", () => {
+        cleanupPopout();
+        if (!popout.isDestroyed()) {
+          popout.close();
+        }
+      });
+      popout.on("page-title-updated", (event, nextTitle) => {
+        if (nextTitle.trim() !== "") return;
+        event.preventDefault();
+        popout.setTitle(popoutTitle);
+      });
+      if (environment.platform === "darwin") {
+        popout.on("enter-full-screen", () => {
+          popout.webContents.send(WINDOW_FULLSCREEN_STATE_CHANNEL, true);
+        });
+        popout.on("leave-full-screen", () => {
+          syncMacosWindowButtons(popout);
+          popout.webContents.send(WINDOW_FULLSCREEN_STATE_CHANNEL, false);
+        });
+      }
+      popout.webContents.on("did-finish-load", () => {
+        if (environment.platform === "darwin") syncMacosWindowButtons(popout);
+      });
+
+      const revealSubscribers: RevealSubscription[] = [
+        (fire) => popout.once("ready-to-show", fire),
+      ];
+      if (environment.platform === "linux") {
+        revealSubscribers.push((fire) => popout.webContents.once("did-finish-load", fire));
+      }
+      bindFirstRevealTrigger(revealSubscribers, () => {
+        void runPromise(
+          Effect.gen(function* () {
+            if (popout.isDestroyed() || (yield* Ref.get(desktopState.quitting))) return;
+            popout.webContents.setBackgroundThrottling(true);
+            yield* electronWindow.reveal(popout);
+          }),
+        );
+      });
+
+      popout.on("closed", cleanupPopout);
+
+      const popoutUrl = `${applicationUrl}#${routePath}?popout=1`;
+      void popout.loadURL(popoutUrl).catch(() => undefined);
+      yield* logWindowInfo("thread pop-out window created", { routePath });
+      return true;
+    }, popoutWindowMutex.withPermits(1)),
   });
 });
 

@@ -76,6 +76,8 @@ function layerElectronWindow(destroyAll: Effect.Effect<void> = Effect.void) {
     focusedMainOrFirst: Effect.die("unexpected focused window read"),
     setMain: () => Effect.void,
     clearMain: () => Effect.void,
+    registerAppWindow: () => Effect.void,
+    trustedAppWindowForSender: () => Effect.succeedNone,
     prepareReveal: () => Effect.succeed(false),
     reveal: () => Effect.void,
     sendAll: () => Effect.void,
@@ -106,6 +108,7 @@ function layerDesktopWindow(
     zoomMain: () => Effect.void,
     runMainContentsCommand: () => Effect.void,
     syncAppearance: Effect.void,
+    openThreadPopout: () => Effect.succeed(false),
   });
 }
 

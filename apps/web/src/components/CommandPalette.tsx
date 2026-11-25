@@ -66,6 +66,7 @@ import {
   CheckIcon,
   ChevronRightIcon,
   CornerLeftUpIcon,
+  ExternalLinkIcon,
   FileSearchIcon,
   FolderGit2Icon,
   FolderIcon,
@@ -112,6 +113,7 @@ import { copyThreadReference } from "../lib/copyThreadReference";
 import { isElectron } from "../env";
 import { isStandaloneDisplayMode, openPwaInstallPrompt } from "../lib/pwaInstall";
 import { executePanicWipe, lockPrivacyScreen } from "../lib/privacyShield";
+import { openThreadInPopoutWindow } from "../lib/threadPopout";
 import { ensureLocalApi } from "../localApi";
 import {
   queueWorkspaceFocusFromPalette,
@@ -1425,6 +1427,30 @@ function OpenCommandPaletteDialog(props: {
       shortcutCommand: "chat.find",
       run: async () => {
         openThreadFind(activeThreadKey);
+      },
+    });
+  }
+
+  if (paletteRouteTarget?.kind === "server") {
+    const targetRef = paletteRouteTarget.threadRef;
+    const targetTitle = activeThread?.title;
+    actionItems.push({
+      kind: "action",
+      value: "open-current-thread-in-new-window",
+      title: gt("Open current thread in new window"),
+      searchTerms: ["popout", "pop out", "new window", "detach", "floating", "window"],
+      icon: <ExternalLinkIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        const opened = await openThreadInPopoutWindow(targetRef, { title: targetTitle });
+        if (!opened) {
+          toastManager.add({
+            type: "error",
+            title: gt("Could not open chat window"),
+            ...(isElectron
+              ? {}
+              : { description: gt("Allow pop-ups for this site and try again.") }),
+          });
+        }
       },
     });
   }
