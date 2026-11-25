@@ -187,10 +187,14 @@ import * as EnvironmentAuthPolicy from "./auth/EnvironmentAuthPolicy.ts";
 import * as ProjectAccess from "./access/ProjectAccess.ts";
 import * as ResourceResolver from "./access/ResourceResolver.ts";
 import * as InvitationService from "./identity/InvitationService.ts";
+import * as MembershipService from "./identity/MembershipService.ts";
+import * as ApiTokens from "./persistence/ApiTokens.ts";
 import * as AuditEvents from "./persistence/AuditEvents.ts";
 import * as Invitations from "./persistence/Invitations.ts";
+import * as MemberLimits from "./persistence/MemberLimits.ts";
 import * as Principals from "./persistence/Principals.ts";
 import * as Memberships from "./persistence/Memberships.ts";
+import * as SessionPrincipals from "./persistence/SessionPrincipals.ts";
 import * as CloudHttp from "./cloud/http.ts";
 import * as GuestHttp from "./guest/http.ts";
 import * as PrivacyHttp from "./privacy/http.ts";
@@ -590,6 +594,9 @@ const layerIdentityRepositories = Layer.mergeAll(
   Memberships.layer,
   Invitations.layer,
   AuditEvents.layer,
+  ApiTokens.layer,
+  MemberLimits.layer,
+  SessionPrincipals.layer,
 ).pipe(Layer.provide(layerPersistence));
 
 const layerAccess = Layer.merge(
@@ -600,11 +607,22 @@ const layerAccess = Layer.merge(
   ),
 );
 
-const layerIdentity = InvitationService.layer.pipe(
+const layerMembership = MembershipService.layer.pipe(
   Layer.provideMerge(layerIdentityRepositories),
   Layer.provide(layerAccess),
+  Layer.provide(layerAuth),
   Layer.provide(layerPersistence),
-  Layer.provide(ServerSecretStore.layer),
+);
+
+const layerIdentity = Layer.merge(
+  layerMembership,
+  InvitationService.layer.pipe(
+    Layer.provideMerge(layerIdentityRepositories),
+    Layer.provide(layerMembership),
+    Layer.provide(layerAccess),
+    Layer.provide(layerPersistence),
+    Layer.provide(ServerSecretStore.layer),
+  ),
 );
 
 const layerCloudManagedEndpointRuntime = Layer.mergeAll(

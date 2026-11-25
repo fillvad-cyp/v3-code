@@ -30,10 +30,14 @@ import { makeDpopKey } from "./dpop.testkit.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerHttp from "../http.ts";
 import * as InvitationService from "../identity/InvitationService.ts";
+import * as MembershipService from "../identity/MembershipService.ts";
+import * as ApiTokens from "../persistence/ApiTokens.ts";
 import * as AuditEvents from "../persistence/AuditEvents.ts";
 import * as Invitations from "../persistence/Invitations.ts";
+import * as MemberLimits from "../persistence/MemberLimits.ts";
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
+import * as SessionPrincipals from "../persistence/SessionPrincipals.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
@@ -60,13 +64,23 @@ const layerIdentityRepositories = Layer.mergeAll(
   Memberships.layer,
   Invitations.layer,
   AuditEvents.layer,
+  ApiTokens.layer,
+  MemberLimits.layer,
+  SessionPrincipals.layer,
+);
+const layerAccess = ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories));
+const layerMembership = MembershipService.layer.pipe(
+  Layer.provide(layerAccess),
+  Layer.provide(layerIdentityRepositories),
 );
 const layerIdentity = Layer.mergeAll(
   InvitationService.layer.pipe(
-    Layer.provide(ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories))),
+    Layer.provide(layerMembership),
+    Layer.provide(layerAccess),
     Layer.provide(layerIdentityRepositories),
   ),
-  ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories)),
+  layerMembership,
+  layerAccess,
   layerIdentityRepositories,
 );
 const notLinked: EnvironmentCloudLinkStateResult = {

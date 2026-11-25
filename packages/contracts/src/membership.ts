@@ -246,3 +246,17 @@ export const MemberWithMemberships = Schema.Struct({
   memberships: Schema.Array(ProjectMembership),
 });
 export type MemberWithMemberships = typeof MemberWithMemberships.Type;
+
+export const MemberUpdateInput = Schema.Struct({
+  projectId: Schema.optionalKey(ProjectId),
+  role: Schema.optionalKey(ProjectRole),
+  state: Schema.optionalKey(Schema.Literals(["active", "suspended"])),
+  ceiling: Schema.optionalKey(PrincipalCeilingTemplate),
+});
+export type MemberUpdateInput = typeof MemberUpdateInput.Type;
+
+export const MemberRemoveResult = Schema.Struct({
+  removed: Schema.Boolean,
+  promotedOwner: Schema.optionalKey(Schema.Boolean),
+});
+export type MemberRemoveResult = typeof MemberRemoveResult.Type;

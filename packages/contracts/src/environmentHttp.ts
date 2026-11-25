@@ -62,6 +62,8 @@ import {
   InvitationCreateInput,
   InvitationCreateResult,
   InvitationRevokeResult,
+  MemberRemoveResult,
+  MemberUpdateInput,
   MemberWithMemberships,
   type SessionBinding,
 } from "./membership.ts";
@@ -289,6 +291,8 @@ export const EnvironmentResourceNotFoundReason = Schema.Literals([
   "thread_not_found",
   // A resource of another principal, answered as absent so its id does not leak.
   "resource_not_found",
+  "member_not_found",
+  "membership_not_found",
 ]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
@@ -386,6 +390,20 @@ export class EnvironmentHttpConflictError extends Schema.TaggedError<Environment
   }
 }
 
+export class EnvironmentHttpTooManyRequestsError extends Schema.TaggedError<EnvironmentHttpTooManyRequestsError>()(
+  "EnvironmentHttpTooManyRequestsError",
+  {
+    message: Schema.String,
+  },
+  { httpApiStatus: 429 },
+) {
+  [HttpServerRespondable.symbol]() {
+    return HttpServerResponse.schemaJson(EnvironmentHttpTooManyRequestsError)(this, {
+      status: 429,
+    });
+  }
+}
+
 export class EnvironmentCloudEndpointUnavailableError extends Schema.TaggedError<EnvironmentCloudEndpointUnavailableError>()(
   "EnvironmentCloudEndpointUnavailableError",
   {
@@ -433,11 +451,19 @@ const EnvironmentInvitationAcceptErrors = [
 const EnvironmentInvitationManageErrors = [
   EnvironmentHttpBadRequestError,
   EnvironmentHttpForbiddenError,
+  EnvironmentHttpTooManyRequestsError,
   EnvironmentScopeRequiredError,
   EnvironmentInternalError,
 ] as const;
 const EnvironmentInvitationListErrors = [
   EnvironmentHttpForbiddenError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentMemberManageErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentResourceNotFoundError,
   EnvironmentScopeRequiredError,
   EnvironmentInternalError,
 ] as const;
@@ -756,6 +782,24 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       headers: OptionalBearerHeaders,
       success: Schema.Array(MemberWithMemberships),
       error: EnvironmentInvitationListErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.patch("updateMember", "/api/auth/members/:principalId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ principalId: PrincipalId }),
+      payload: MemberUpdateInput,
+      success: MemberWithMemberships,
+      error: EnvironmentMemberManageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("removeMember", "/api/auth/members/:principalId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ principalId: PrincipalId }),
+      query: Schema.Struct({ projectId: Schema.optionalKey(ProjectId) }),
+      success: MemberRemoveResult,
+      error: EnvironmentMemberManageErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 

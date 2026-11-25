@@ -101,6 +101,10 @@ export class InvitationRepository extends Context.Service<
       email: string,
       revokedAt: EpochMillis,
     ) => Effect.Effect<number, InvitationRepositoryError>;
+    readonly countCreatedBySince: (
+      createdBy: PrincipalId,
+      since: EpochMillis,
+    ) => Effect.Effect<number, InvitationRepositoryError>;
   }
 >()("v3code/persistence/Invitations/InvitationRepository") {}
 
@@ -212,6 +216,17 @@ const make = Effect.gen(function* () {
       `,
   });
 
+  const countCreatedRowsBySince = SqlSchema.findAll({
+    Request: Schema.Struct({ createdBy: PrincipalId, since: EpochMillis }),
+    Result: Schema.Struct({ count: Schema.Number }),
+    execute: ({ createdBy, since }) =>
+      sql`
+        SELECT COUNT(*) AS "count"
+        FROM invitations
+        WHERE created_by = ${createdBy} AND created_at > ${since}
+      `,
+  });
+
   return InvitationRepository.of({
     create: Effect.fn("InvitationRepository.create")((input) =>
       createRow(input).pipe(
@@ -253,6 +268,12 @@ const make = Effect.gen(function* () {
           Effect.mapError(toSqlOrDecodeError("revokePendingInvitations", "Invitation")),
           Effect.map((rows) => rows.length),
         ),
+    ),
+    countCreatedBySince: Effect.fn("InvitationRepository.countCreatedBySince")((createdBy, since) =>
+      countCreatedRowsBySince({ createdBy, since }).pipe(
+        Effect.mapError(toSqlOrDecodeError("countCreatedInvitations", "InvitationCount")),
+        Effect.map((rows) => rows[0]?.count ?? 0),
+      ),
     ),
   } satisfies InvitationRepository["Service"]);
 });

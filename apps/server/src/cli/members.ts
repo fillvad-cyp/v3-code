@@ -20,10 +20,14 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as InvitationService from "../identity/InvitationService.ts";
+import * as MembershipService from "../identity/MembershipService.ts";
+import * as ApiTokens from "../persistence/ApiTokens.ts";
 import * as AuditEvents from "../persistence/AuditEvents.ts";
 import * as Invitations from "../persistence/Invitations.ts";
+import * as MemberLimits from "../persistence/MemberLimits.ts";
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
+import * as SessionPrincipals from "../persistence/SessionPrincipals.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { type CliAuthLocationFlags, projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 import * as RunningServer from "./runningServer.ts";
@@ -71,14 +75,22 @@ const makeLocalMembersLayer = () => {
     Memberships.layer,
     Invitations.layer,
     AuditEvents.layer,
+    ApiTokens.layer,
+    MemberLimits.layer,
+    SessionPrincipals.layer,
   );
   const access = ProjectAccess.layer.pipe(Layer.provide(repos));
+  const membershipService = MembershipService.layer.pipe(
+    Layer.provide(access),
+    Layer.provide(repos),
+  );
   const invitationService = InvitationService.layer.pipe(
+    Layer.provide(membershipService),
     Layer.provide(access),
     Layer.provide(repos),
     Layer.provide(ServerSecretStore.layer),
   );
-  return Layer.mergeAll(invitationService, repos).pipe(
+  return Layer.mergeAll(invitationService, membershipService, repos).pipe(
     // Built after acquireServerOwnership; layerCliConfig would contend with this process's own lock.
     Layer.provide(SqlitePersistence.layerConfig),
   );

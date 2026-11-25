@@ -34,6 +34,7 @@ import * as Invitations from "../persistence/Invitations.ts";
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
 import * as InvitationCodes from "./InvitationCodes.ts";
+import * as MembershipService from "./MembershipService.ts";
 
 export const OWNER_PRINCIPAL_ID = PrincipalId.make("owner");
 const DEFAULT_INVITATION_TTL = Duration.days(7);
@@ -123,6 +124,17 @@ export class InvitationForbiddenError extends Schema.TaggedError<InvitationForbi
   }
 }
 
+export class InvitationRateLimitedError extends Schema.TaggedError<InvitationRateLimitedError>()(
+  "InvitationRateLimitedError",
+  {
+    principalId: PrincipalId,
+  },
+) {
+  override get message(): string {
+    return "Invitation rate limit exceeded. Try again later.";
+  }
+}
+
 export class InvitationInternalError extends Schema.TaggedError<InvitationInternalError>()(
   "InvitationInternalError",
   {
@@ -183,7 +195,10 @@ export interface RevokeInvitationInput {
   readonly audit?: InvitationAuditContext;
 }
 
-export type IssueInvitationError = InvitationForbiddenError | InvitationInternalError;
+export type IssueInvitationError =
+  | InvitationForbiddenError
+  | InvitationRateLimitedError
+  | InvitationInternalError;
 export type ConsumeInvitationError =
   | InvitationInvalidError
   | InvitationExpiredError
@@ -239,6 +254,7 @@ const make = Effect.gen(function* () {
   const memberships = yield* Memberships.MembershipRepository;
   const auditEvents = yield* AuditEvents.AuditEventRepository;
   const projectAccess = yield* ProjectAccess.ProjectAccess;
+  const membershipService = yield* MembershipService.MembershipService;
   const codes = yield* InvitationCodes.make();
 
   const resolveActor = Effect.fnUntraced(function* (
@@ -307,6 +323,13 @@ const make = Effect.gen(function* () {
       if (!roleFitsCeiling(effectiveCeiling, input.role)) {
         return yield* new InvitationForbiddenError({ reason: "ceiling_exceeds_issuer" });
       }
+    }
+
+    const canIssue = yield* membershipService
+      .canIssueInvite(input.createdBy)
+      .pipe(Effect.mapError((cause) => new InvitationInternalError({ operation: "issue", cause })));
+    if (!canIssue) {
+      return yield* new InvitationRateLimitedError({ principalId: input.createdBy });
     }
 
     const id = InvitationId.make(

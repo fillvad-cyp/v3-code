@@ -17,14 +17,20 @@ import * as TestClock from "effect/testing/TestClock";
 
 import * as ProjectAccess from "../access/ProjectAccess.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ApiTokens from "../persistence/ApiTokens.ts";
 import * as AuditEvents from "../persistence/AuditEvents.ts";
 import * as Invitations from "../persistence/Invitations.ts";
+import * as MemberLimits from "../persistence/MemberLimits.ts";
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
+import * as SessionPrincipals from "../persistence/SessionPrincipals.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as InvitationCodes from "./InvitationCodes.ts";
 import * as InvitationService from "./InvitationService.ts";
+import * as MembershipService from "./MembershipService.ts";
 
 const OWNER = InvitationService.OWNER_PRINCIPAL_ID;
 const PROJECT_A = ProjectId.make("project-a");
@@ -33,19 +39,33 @@ const PROJECT_B = ProjectId.make("project-b");
 const makeTestLayer = () => {
   const config = ServerConfig.layerTest(process.cwd(), { prefix: "t3-invitation-service-test-" });
   const secrets = ServerSecretStore.layer.pipe(Layer.provide(config));
+  const sessions = SessionStore.layer.pipe(
+    Layer.provide(ServerEnvironment.layerIdentity),
+    Layer.provide(secrets),
+    Layer.provide(config),
+  );
   const repos = Layer.mergeAll(
     Principals.layer,
     Memberships.layer,
     Invitations.layer,
     AuditEvents.layer,
+    ApiTokens.layer,
+    MemberLimits.layer,
+    SessionPrincipals.layer,
   );
   const access = ProjectAccess.layer.pipe(Layer.provide(repos));
+  const membershipService = MembershipService.layer.pipe(
+    Layer.provide(access),
+    Layer.provide(repos),
+    Layer.provide(sessions),
+  );
   const service = InvitationService.layer.pipe(
+    Layer.provide(membershipService),
     Layer.provide(access),
     Layer.provide(repos),
     Layer.provide(secrets),
   );
-  return Layer.mergeAll(service, access, repos, secrets).pipe(
+  return Layer.mergeAll(service, membershipService, access, repos, secrets, sessions).pipe(
     Layer.provideMerge(Sqlite.layerMemory),
     Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );

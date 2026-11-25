@@ -28,10 +28,14 @@ import * as ProjectAccess from "../access/ProjectAccess.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as InvitationService from "../identity/InvitationService.ts";
+import * as MembershipService from "../identity/MembershipService.ts";
+import * as ApiTokens from "../persistence/ApiTokens.ts";
 import * as AuditEvents from "../persistence/AuditEvents.ts";
 import * as Invitations from "../persistence/Invitations.ts";
+import * as MemberLimits from "../persistence/MemberLimits.ts";
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
+import * as SessionPrincipals from "../persistence/SessionPrincipals.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import { makeDpopKey } from "./dpop.testkit.ts";
@@ -68,13 +72,23 @@ const layerIdentityRepositories = Layer.mergeAll(
   Memberships.layer,
   Invitations.layer,
   AuditEvents.layer,
+  ApiTokens.layer,
+  MemberLimits.layer,
+  SessionPrincipals.layer,
+);
+const layerAccess = ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories));
+const layerMembership = MembershipService.layer.pipe(
+  Layer.provide(layerAccess),
+  Layer.provide(layerIdentityRepositories),
 );
 const layerIdentity = Layer.mergeAll(
   InvitationService.layer.pipe(
-    Layer.provide(ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories))),
+    Layer.provide(layerMembership),
+    Layer.provide(layerAccess),
     Layer.provide(layerIdentityRepositories),
   ),
-  ProjectAccess.layer.pipe(Layer.provide(layerIdentityRepositories)),
+  layerMembership,
+  layerAccess,
   layerIdentityRepositories,
 );
 const layerRoutes = HttpApiBuilder.layer(AuthTestApi).pipe(
@@ -96,6 +110,12 @@ const encodeJson = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const postJson = (path: string, body: unknown, headers?: Readonly<Record<string, string>>) =>
   new Request(`http://127.0.0.1${path}`, {
     method: "POST",
+    headers: { "content-type": "application/json", ...headers },
+    body: encodeJson(body),
+  });
+const patchJson = (path: string, body: unknown, headers?: Readonly<Record<string, string>>) =>
+  new Request(`http://127.0.0.1${path}`, {
+    method: "PATCH",
     headers: { "content-type": "application/json", ...headers },
     body: encodeJson(body),
   });
@@ -500,6 +520,333 @@ it.effect(
               ),
             );
             expect(revokedAccept.status).toBe(400);
+          }),
+        (environment) => Effect.promise(() => environment.dispose()),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.effect(
+  "manages members via PATCH and DELETE /api/auth/members/:principalId with 400/403/404 enforcement",
+  () =>
+    Effect.gen(function* () {
+      const random = yield* SecureRandom.SecureRandom;
+      let capturedSessions: SessionStore.SessionStore["Service"] | undefined;
+      const captureSessionsLayer = Layer.effectDiscard(
+        SessionStore.SessionStore.pipe(
+          Effect.tap((sessions) =>
+            Effect.sync(() => {
+              capturedSessions = sessions;
+            }),
+          ),
+        ),
+      );
+      const testLayer = captureSessionsLayer.pipe(
+        Layer.provideMerge(layerRoutes),
+        Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      );
+      const requestContext = Context.make(SecureRandom.SecureRandom, random);
+
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => HttpRouter.toWebHandler(testLayer, { disableLogger: true })),
+        (environment) =>
+          Effect.gen(function* () {
+            const devResponse = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/browser-session", { credential: DEV_TOKEN }),
+                requestContext,
+              ),
+            );
+            expect(devResponse.status).toBe(200);
+            const ownerCookie =
+              devResponse.headers
+                .getSetCookie()
+                .find((cookie) => cookie.startsWith("t3_dev_session_"))
+                ?.split(";", 1)[0] ?? "";
+
+            const projectA = ProjectId.make("project-alpha");
+            const projectB = ProjectId.make("project-beta");
+
+            const inviteAndAccept = (
+              role: "admin" | "developer" | "operator" | "viewer",
+              projectId: ProjectId,
+              displayName: string,
+            ) =>
+              Effect.gen(function* () {
+                const createResp = yield* Effect.promise(() =>
+                  environment.handler(
+                    postJson(
+                      "/api/auth/invitations",
+                      { kind: "staff", role, projectId },
+                      { cookie: ownerCookie },
+                    ),
+                    requestContext,
+                  ),
+                );
+                expect(createResp.status).toBe(200);
+                const created = (yield* Effect.promise(() => createResp.json())) as {
+                  code: string;
+                };
+                const acceptResp = yield* Effect.promise(() =>
+                  environment.handler(
+                    postJson("/api/auth/invitations/accept", {
+                      code: created.code,
+                      displayName,
+                    }),
+                    requestContext,
+                  ),
+                );
+                expect(acceptResp.status).toBe(200);
+                const cookie = acceptResp.headers
+                  .getSetCookie()
+                  .find((entry) => entry.startsWith("t3_session_"))!
+                  .split(";", 1)[0]!;
+                const token = cookie.slice(cookie.indexOf("=") + 1);
+                const verified = yield* capturedSessions!.verify(token);
+                return { principalId: verified.principalId!, cookie };
+              });
+
+            const adminA = yield* inviteAndAccept("admin", projectA, "Admin A");
+            const devA = yield* inviteAndAccept("developer", projectA, "Dev A");
+            const devB = yield* inviteAndAccept("developer", projectB, "Dev B");
+
+            // 400 when role/state is sent without projectId or when body is empty.
+            const missingProjectResp = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(
+                  `/api/auth/members/${devA.principalId}`,
+                  { role: "operator" },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(missingProjectResp.status).toBe(400);
+
+            const emptyPatchResp = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(`/api/auth/members/${devA.principalId}`, {}, { cookie: ownerCookie }),
+                requestContext,
+              ),
+            );
+            expect(emptyPatchResp.status).toBe(400);
+
+            // Developer lacks access:write and gets 403 on PATCH and DELETE.
+            const devPatchResp = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(
+                  `/api/auth/members/${adminA.principalId}`,
+                  { projectId: projectA, role: "viewer" },
+                  { cookie: devA.cookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(devPatchResp.status).toBe(403);
+
+            const devDeleteResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(
+                  `http://127.0.0.1/api/auth/members/${adminA.principalId}?projectId=${projectA}`,
+                  {
+                    method: "DELETE",
+                    headers: { cookie: devA.cookie },
+                  },
+                ),
+                requestContext,
+              ),
+            );
+            expect(devDeleteResp.status).toBe(403);
+
+            // Project A admin updates Dev A role and state on Project A.
+            const adminPatchResp = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(
+                  `/api/auth/members/${devA.principalId}`,
+                  { projectId: projectA, role: "operator", state: "suspended" },
+                  { cookie: adminA.cookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(adminPatchResp.status).toBe(200);
+            const updatedByAdmin = (yield* Effect.promise(() => adminPatchResp.json())) as {
+              principal: { id: string; accessRevision: number };
+              memberships: Array<{ projectId: string; role: string; state: string }>;
+            };
+            expect(updatedByAdmin.principal.accessRevision).toBeGreaterThanOrEqual(2);
+            expect(updatedByAdmin.memberships).toEqual([
+              expect.objectContaining({
+                projectId: projectA,
+                role: "operator",
+                state: "suspended",
+              }),
+            ]);
+
+            // Project A admin cannot set ceiling (owner-only -> 403) or manage Project B (403).
+            const adminCeilingResp = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(
+                  `/api/auth/members/${devA.principalId}`,
+                  { ceiling: "restricted" },
+                  { cookie: adminA.cookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(adminCeilingResp.status).toBe(403);
+
+            const adminOtherProjectResp = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(
+                  `/api/auth/members/${devB.principalId}`,
+                  { projectId: projectB, role: "viewer" },
+                  { cookie: adminA.cookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(adminOtherProjectResp.status).toBe(403);
+
+            // Project A admin cannot remove a whole principal (owner-only -> 403).
+            const adminDeletePrincipalResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/api/auth/members/${devA.principalId}`, {
+                  method: "DELETE",
+                  headers: { cookie: adminA.cookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(adminDeletePrincipalResp.status).toBe(403);
+
+            // Owner lowers Dev A's ceiling to restricted, then attempting developer role fails with 403.
+            const ownerCeilingResp = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(
+                  `/api/auth/members/${devA.principalId}`,
+                  { ceiling: "restricted" },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(ownerCeilingResp.status).toBe(200);
+            const afterCeiling = (yield* Effect.promise(() => ownerCeilingResp.json())) as {
+              principal: { ceiling: Array<string> };
+            };
+            expect(afterCeiling.principal.ceiling).toEqual([...ceilingScopes("restricted")]);
+
+            const exceedCeilingResp = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(
+                  `/api/auth/members/${devA.principalId}`,
+                  { projectId: projectA, role: "developer" },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(exceedCeilingResp.status).toBe(403);
+
+            // 404 for unknown principal or missing membership.
+            const missingPrincipalPatch = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(
+                  "/api/auth/members/does-not-exist",
+                  { ceiling: "staff" },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(missingPrincipalPatch.status).toBe(404);
+            expect(yield* Effect.promise(() => missingPrincipalPatch.json())).toMatchObject({
+              reason: "member_not_found",
+            });
+
+            const missingMembershipDelete = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(
+                  `http://127.0.0.1/api/auth/members/${devA.principalId}?projectId=${projectB}`,
+                  {
+                    method: "DELETE",
+                    headers: { cookie: ownerCookie },
+                  },
+                ),
+                requestContext,
+              ),
+            );
+            expect(missingMembershipDelete.status).toBe(404);
+            expect(yield* Effect.promise(() => missingMembershipDelete.json())).toMatchObject({
+              reason: "membership_not_found",
+            });
+
+            // Removing the last active admin of Project A promotes owner to admin.
+            const removeLastAdminResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(
+                  `http://127.0.0.1/api/auth/members/${adminA.principalId}?projectId=${projectA}`,
+                  {
+                    method: "DELETE",
+                    headers: { cookie: ownerCookie },
+                  },
+                ),
+                requestContext,
+              ),
+            );
+            expect(removeLastAdminResp.status).toBe(200);
+            expect(yield* Effect.promise(() => removeLastAdminResp.json())).toEqual({
+              removed: true,
+              promotedOwner: true,
+            });
+
+            // Owner cannot delete the owner principal (403).
+            const deleteOwnerResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/members/owner", {
+                  method: "DELETE",
+                  headers: { cookie: ownerCookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(deleteOwnerResp.status).toBe(403);
+
+            // Owner deletes Dev A principal -> 200 and Dev A's session is revoked (401).
+            const deleteDevResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/api/auth/members/${devA.principalId}`, {
+                  method: "DELETE",
+                  headers: { cookie: ownerCookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(deleteDevResp.status).toBe(200);
+            expect(yield* Effect.promise(() => deleteDevResp.json())).toEqual({ removed: true });
+
+            const revokedSessionCheck = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/members", {
+                  headers: { cookie: devA.cookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(revokedSessionCheck.status).toBe(401);
+
+            // Deleting an already-removed principal returns 404.
+            const deleteAgainResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/api/auth/members/${devA.principalId}`, {
+                  method: "DELETE",
+                  headers: { cookie: ownerCookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(deleteAgainResp.status).toBe(404);
           }),
         (environment) => Effect.promise(() => environment.dispose()),
       );
