@@ -447,6 +447,7 @@ describe("ResourceResolver", () => {
                 removedAt: null,
               });
             },
+            getAccessStatus: () => Effect.succeedSome({ status: "active", accessRevision: 0 }),
             getByEmail: () => Effect.die("unused"),
             list: Effect.die("unused"),
             create: () => Effect.die("unused"),

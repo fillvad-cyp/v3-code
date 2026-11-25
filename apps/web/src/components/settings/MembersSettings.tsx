@@ -187,35 +187,26 @@ function MembersSettingsContent({ environmentId }: { readonly environmentId: Env
 
   const handleTogglePrincipalSuspend = async (member: MemberWithMemberships) => {
     if (!canUpdateMembers) return;
-    const activeMemberships = member.memberships.filter((entry) => entry.state === "active");
-    const suspendedMemberships = member.memberships.filter((entry) => entry.state === "suspended");
-    const shouldSuspend = activeMemberships.length > 0;
-    const targets = shouldSuspend ? activeMemberships : suspendedMemberships;
-    if (targets.length === 0) return;
-
-    const nextState = shouldSuspend ? "suspended" : "active";
+    if (member.principal.status !== "active" && member.principal.status !== "suspended") return;
+    const nextState = member.principal.status === "suspended" ? "active" : "suspended";
     setMutationError(null);
     setBusyPrincipalId(member.principal.id);
-    for (const membership of targets) {
-      const result = await updateMember({
-        environmentId,
-        input: {
-          principalId: member.principal.id,
-          patch: { projectId: membership.projectId, state: nextState },
-        },
-      });
-      if (result._tag === "Failure") {
-        setBusyPrincipalId(null);
-        if (!isAtomCommandInterrupted(result)) {
-          const error = squashAtomCommandFailure(result);
-          setMutationError(formatMembershipErrorMessage(error, resolveMessage));
-        }
-        refreshMembers();
-        return;
-      }
-    }
+    const result = await updateMember({
+      environmentId,
+      input: {
+        principalId: member.principal.id,
+        patch: { state: nextState },
+      },
+    });
     setBusyPrincipalId(null);
-    refreshMembers();
+    if (result._tag === "Success") {
+      refreshMembers();
+      return;
+    }
+    if (!isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      setMutationError(formatMembershipErrorMessage(error, resolveMessage));
+    }
   };
 
   const handleConfirmRemovePrincipal = async () => {
@@ -349,15 +340,12 @@ function MembersSettingsContent({ environmentId }: { readonly environmentId: Env
             const isSelf = session.data?.principal?.id === member.principal.id;
             const isBusy = busyPrincipalId === member.principal.id;
             const ceilingTemplate = inferCeilingTemplate(member.principal.ceiling);
-            const activeCount = member.memberships.filter(
-              (entry) => entry.state === "active",
-            ).length;
-            const suspendedCount = member.memberships.filter(
-              (entry) => entry.state === "suspended",
-            ).length;
+            const isSuspended = member.principal.status === "suspended";
             const canToggleSuspend =
-              canUpdateMembers && !isOwnerPrincipal && (activeCount > 0 || suspendedCount > 0);
-            const suspendActionIsSuspend = activeCount > 0;
+              canUpdateMembers &&
+              !isOwnerPrincipal &&
+              (member.principal.status === "active" || isSuspended);
+            const suspendActionIsSuspend = !isSuspended;
 
             return (
               <div key={member.principal.id} className={ITEM_ROW_CLASSNAME}>

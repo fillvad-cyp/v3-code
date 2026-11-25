@@ -361,4 +361,21 @@ describe("MembersSettings environment screen gating", () => {
     expect(html).toContain("Enabled");
     expect(html).toMatch(/aria-label="Multi-user mode"[^>]*aria-disabled="true"|disabled=""/);
   });
+
+  it("renders Suspend for active principals and Reactivate for suspended principals even with no project memberships", () => {
+    setup({
+      members: [
+        { principal: ownerPrincipal, memberships: [] },
+        { principal: devPrincipal, memberships: [] },
+        {
+          principal: { ...adminPrincipal, status: "suspended" },
+          memberships: [],
+        },
+      ],
+    });
+    const html = renderHtml(<MembersSettings environmentId={envId} />);
+
+    expect(html).toContain(">Suspend<");
+    expect(html).toContain(">Reactivate<");
+  });
 });

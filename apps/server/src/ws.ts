@@ -24,6 +24,7 @@ import * as Path from "effect/Path";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Socket from "effect/socket/Socket";
 import * as Stream from "effect/Stream";
 import { rpcInitialItems } from "./rpcInitialItems.ts";
 import { subscribeChatGptHandoff } from "./provider/CodexChatGptHandoff.ts";
@@ -146,6 +147,7 @@ import {
   dedupeShellEnrichment,
   domainEventProjectId,
   filterShellStream,
+  filterShellStreamItem,
   loadOlderSettledThreadsPage,
   loadShellSnapshotParts,
   shellStreamItemFromEnrichmentRefresh,
@@ -1099,8 +1101,16 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
   },
 );
 
+class ShellAccessRefreshError<E> {
+  readonly _tag = "ShellAccessRefreshError";
+  readonly error: E;
+  constructor(error: E) {
+    this.error = error;
+  }
+}
+
 export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subscribeShell")(
-  function* (input: {
+  function* <RefreshError = never>(input: {
     readonly afterSequence?: number;
     readonly httpSnapshotFallback?: true;
     readonly knownProjectIdentities?: string;
@@ -1108,6 +1118,10 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     readonly omitIdleSubagents?: boolean;
     readonly omitOlderSettled?: boolean;
     readonly allowedProjectIds?: ReadonlySet<string> | undefined;
+    readonly refreshAllowedProjectIds?: Effect.Effect<
+      ReadonlySet<string> | undefined,
+      RefreshError
+    >;
   }) {
     const sql = yield* SqlClient.SqlClient;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
@@ -1115,7 +1129,16 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projects = yield* ProjectStore.ProjectStoreV2;
     const projectService = yield* ProjectService.ProjectService;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
-    const allowedProjectIds = input.allowedProjectIds;
+    const staticAllowedProjectIds = input.allowedProjectIds;
+    const resolveAllowedProjectIds: Effect.Effect<
+      ReadonlySet<string> | undefined,
+      ShellAccessRefreshError<RefreshError>
+    > = input.refreshAllowedProjectIds !== undefined
+      ? Effect.mapError(
+          input.refreshAllowedProjectIds,
+          (error) => new ShellAccessRefreshError(error),
+        )
+      : Effect.succeed(staticAllowedProjectIds);
     let subagentThreadIds = new Set<string>();
     const knownThreadProjects = new Map<string, string>();
     const accessibleThreadIds = new Set<string>();
@@ -1123,16 +1146,17 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       if (!shouldPublishShellApplicationEvent(stored, subagentThreadIds)) {
         return false;
       }
-      if (allowedProjectIds === undefined) {
+      // Dynamic access streams refresh per batch/emission so membership changes take effect live.
+      if (input.refreshAllowedProjectIds !== undefined || staticAllowedProjectIds === undefined) {
         return true;
       }
       if ("aggregateKind" in stored) {
-        return allowedProjectIds.has(stored.aggregateId);
+        return staticAllowedProjectIds.has(stored.aggregateId);
       }
       const directProjectId = domainEventProjectId(stored.event);
       if (directProjectId !== undefined) {
         knownThreadProjects.set(stored.event.threadId, directProjectId);
-        if (allowedProjectIds.has(directProjectId)) {
+        if (staticAllowedProjectIds.has(directProjectId)) {
           accessibleThreadIds.add(stored.event.threadId);
           return true;
         }
@@ -1140,7 +1164,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         return false;
       }
       const knownProjectId = knownThreadProjects.get(stored.event.threadId);
-      if (knownProjectId !== undefined && !allowedProjectIds.has(knownProjectId)) {
+      if (knownProjectId !== undefined && !staticAllowedProjectIds.has(knownProjectId)) {
         return false;
       }
       return true;
@@ -1149,6 +1173,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const enrichmentChanges = yield* projectEnrichment.subscribeChanges;
     const loadProjectMetadataSnapshot = Effect.fn("ws.orchestrationV2.loadProjectMetadataSnapshot")(
       function* (snapshotSequence: number) {
+        const allowedProjectIds = yield* resolveAllowedProjectIds;
         const allProjects = yield* projects.listShells();
         const visibleProjects =
           allowedProjectIds === undefined
@@ -1168,6 +1193,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       },
     );
     const loadSnapshot = Effect.fn("ws.orchestrationV2.loadShellSnapshot")(function* () {
+      const allowedProjectIds = yield* resolveAllowedProjectIds;
       const forSubscriber = yield* loadSubscriberShellSnapshot({
         sql,
         listShellIndex: threadManagement.listActiveShellIndex(),
@@ -1203,6 +1229,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     });
     const projectItem = Effect.fn("ws.orchestrationV2.projectShellItem")(function* (
       stored: Extract<ShellApplicationEvent, { readonly aggregateKind: "project" }>,
+      allowedProjectIds: ReadonlySet<string> | undefined,
     ) {
       if (allowedProjectIds !== undefined && !allowedProjectIds.has(stored.aggregateId)) {
         return null;
@@ -1232,6 +1259,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projectShellItems = Effect.fn("ws.orchestrationV2.projectShellItems")(function* (
       events: ReadonlyArray<ShellApplicationEvent>,
     ) {
+      const allowedProjectIds = yield* resolveAllowedProjectIds;
       const coalesced = coalesceShellApplicationEvents(events);
       const threadIds = coalesced.flatMap((stored) =>
         "aggregateKind" in stored ? [] : [stored.event.threadId],
@@ -1256,7 +1284,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         (stored) =>
           Effect.gen(function* () {
             if ("aggregateKind" in stored) {
-              return yield* projectItem(stored);
+              return yield* projectItem(stored, allowedProjectIds);
             }
             const threadId = stored.event.threadId;
             const shell =
@@ -1271,8 +1299,15 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
                   return null;
                 }
                 accessibleThreadIds.add(shell.id);
-              } else if (!accessibleThreadIds.has(threadId)) {
-                return null;
+              } else {
+                const knownProjectId = knownThreadProjects.get(threadId);
+                if (
+                  (knownProjectId !== undefined && !allowedProjectIds.has(knownProjectId)) ||
+                  !accessibleThreadIds.has(threadId)
+                ) {
+                  accessibleThreadIds.delete(threadId);
+                  return null;
+                }
               }
             }
             return shellStreamItemFromThreadShell({ stored, shell });
@@ -1306,6 +1341,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       Stream.groupedWithin(64, Duration.millis(25)),
       Stream.mapEffect((changes) =>
         Effect.gen(function* () {
+          const allowedProjectIds = yield* resolveAllowedProjectIds;
           const identities = new Map(
             Array.from(changes, (change) => [
               change.workspaceRoot,
@@ -1445,23 +1481,46 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         enrichment: enrichmentRefreshes,
       });
     }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new OrchestrationV2GetShellSnapshotError({
-            message: "Failed to prepare the application shell stream",
-            cause,
-          }),
+      Effect.mapError((cause): OrchestrationV2GetShellSnapshotError | RefreshError =>
+        cause instanceof ShellAccessRefreshError
+          ? cause.error
+          : new OrchestrationV2GetShellSnapshotError({
+              message: "Failed to prepare the application shell stream",
+              cause,
+            }),
       ),
     );
 
-    return filterShellStream(stream, allowedProjectIds, accessibleThreadIds).pipe(
+    const baseStream: Stream.Stream<OrchestrationV2ShellStreamItem, unknown> = stream;
+    const filteredStream: Stream.Stream<OrchestrationV2ShellStreamItem, unknown> =
+      input.refreshAllowedProjectIds !== undefined
+        ? baseStream.pipe(
+            Stream.mapEffect((item) =>
+              Effect.gen(function* () {
+                const currentAllowed = yield* resolveAllowedProjectIds;
+                if (item.kind === "thread.removed" && currentAllowed !== undefined) {
+                  const knownProjectId = knownThreadProjects.get(item.threadId);
+                  if (knownProjectId !== undefined && !currentAllowed.has(knownProjectId)) {
+                    accessibleThreadIds.delete(item.threadId);
+                    return null;
+                  }
+                }
+                return filterShellStreamItem(item, currentAllowed, accessibleThreadIds);
+              }),
+            ),
+            Stream.flatMap((item) => Stream.fromIterable(item === null ? [] : [item])),
+          )
+        : filterShellStream(baseStream, staticAllowedProjectIds, accessibleThreadIds);
+
+    return filteredStream.pipe(
       dedupeShellEnrichment,
-      Stream.mapError(
-        (cause) =>
-          new OrchestrationV2GetShellSnapshotError({
-            message: "Failed while streaming the application shell",
-            cause,
-          }),
+      Stream.mapError((cause): OrchestrationV2GetShellSnapshotError | RefreshError =>
+        cause instanceof ShellAccessRefreshError
+          ? cause.error
+          : new OrchestrationV2GetShellSnapshotError({
+              message: "Failed while streaming the application shell",
+              cause,
+            }),
       ),
     );
   },
@@ -1474,22 +1533,50 @@ export const layerWsRpc = (
   reportProfiles: ServerBrowser.ProfileReporter,
   settingsClient: { readonly secretReferences: boolean },
   currentActor?: ProjectAccess.AccessActor,
+  accessGate?: RpcAuthorization.RpcAccessGate,
 ) =>
   Layer.effectContext(
     Effect.gen(function* () {
       const currentSessionId = currentSession.sessionId;
-      const allowedProjectIds: ReadonlySet<string> | undefined =
+      const staticAllowedProjectIds: ReadonlySet<string> | undefined =
         currentActor !== undefined
           ? ProjectAccess.accessibleProjectIdsForActor(currentActor)
           : boundProjectIds(currentSession.binding);
-      const narrowedProjectIds = (
+      const readCurrentActor: Effect.Effect<ProjectAccess.AccessActor | undefined> =
+        accessGate !== undefined ? accessGate.getActor : Effect.succeed(currentActor);
+      const readAllowedProjectIds: Effect.Effect<ReadonlySet<string> | undefined> =
+        accessGate !== undefined
+          ? Effect.map(accessGate.getActor, ProjectAccess.accessibleProjectIdsForActor)
+          : Effect.succeed(staticAllowedProjectIds);
+      const narrowProjectIds = (
         requested: ReadonlyArray<ProjectId> | undefined,
+        allowedProjectIds: ReadonlySet<string> | undefined,
       ): ReadonlyArray<ProjectId> | undefined => {
         if (allowedProjectIds === undefined) return requested;
         if (requested === undefined) {
           return Array.from(allowedProjectIds, (projectId) => ProjectId.make(projectId));
         }
         return requested.filter((projectId) => allowedProjectIds.has(projectId));
+      };
+      const guardThreadStream = <A, E, R>(
+        threadId: ThreadId,
+        stream: Stream.Stream<A, E, R>,
+        extractProjectId?: (item: A) => string | undefined,
+      ): Stream.Stream<A, E | EnvironmentAuthorizationError, R> => {
+        if (accessGate === undefined) return stream;
+        let cachedProjectId: string | undefined;
+        return stream.pipe(
+          Stream.mapEffect((item) =>
+            Effect.gen(function* () {
+              const candidate = cachedProjectId ?? extractProjectId?.(item);
+              const resolved = yield* accessGate.checkThreadStreamAccess(threadId, candidate);
+              if (resolved !== undefined) {
+                cachedProjectId = resolved;
+              }
+              return item;
+            }),
+          ),
+        );
       };
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -2010,6 +2097,7 @@ export const layerWsRpc = (
       const assertAccessibleCwd = Effect.fn("ws.access.assertAccessibleCwd")(function* (
         cwd: string,
       ) {
+        const allowedProjectIds = yield* readAllowedProjectIds;
         if (allowedProjectIds === undefined) return;
         const resolveCandidate = (value: string) => {
           const lexical = path.resolve(value);
@@ -2054,6 +2142,7 @@ export const layerWsRpc = (
       });
 
       const getOrchestrationV2ArchivedShellSnapshot = Effect.gen(function* () {
+        const allowedProjectIds = yield* readAllowedProjectIds;
         const { threads, projects, snapshotSequence } = yield* loadShellSnapshotParts({
           sql,
           readThreads: threadManagement.readShellSnapshot({ location: "archive" }),
@@ -2110,12 +2199,8 @@ export const layerWsRpc = (
       );
 
       const mutateProject = Effect.fn("ws.projects.mutate")(function* (mutation: ProjectMutation) {
-        return yield* mutateProjectWithClone(
-          projectService,
-          projectCloneTracker,
-          mutation,
-          currentActor,
-        );
+        const actor = yield* readCurrentActor;
+        return yield* mutateProjectWithClone(projectService, projectCloneTracker, mutation, actor);
       });
 
       const handlers = ServerWsRpcGroup.of({
@@ -2234,83 +2319,118 @@ export const layerWsRpc = (
           threadManagement
             .searchThreadStream(input)
             .pipe(Stream.mapError((cause) => new OrchestrationV2SearchThreadError({ cause }))),
-        [ORCHESTRATION_V2_WS_METHODS.searchThreads]: (input) => {
-          const projectIds = narrowedProjectIds(input.projectIds);
-          return ThreadSearch.searchThreadsWithOlderSettledRows({
-            request: projectIds === undefined ? input : { ...input, projectIds },
-            search: threadSearch.search,
-            searchOlderSettled: threadSearch.searchOlderSettled,
-            sql,
-            readThreads: (threadIds) =>
-              threadManagement.readShellSnapshot({ location: "active", threadIds }),
-            latestSequence: applicationEvents.latestApplicationSequence,
-          }).pipe(
-            Effect.mapError(
-              (cause) =>
-                new OrchestrationSearchThreadsError({
-                  message: "Failed to search threads",
-                  cause,
-                }),
-            ),
-          );
-        },
+        [ORCHESTRATION_V2_WS_METHODS.searchThreads]: (input) =>
+          Effect.flatMap(readAllowedProjectIds, (allowedProjectIds) => {
+            const projectIds = narrowProjectIds(input.projectIds, allowedProjectIds);
+            return ThreadSearch.searchThreadsWithOlderSettledRows({
+              request: projectIds === undefined ? input : { ...input, projectIds },
+              search: threadSearch.search,
+              searchOlderSettled: threadSearch.searchOlderSettled,
+              sql,
+              readThreads: (threadIds) =>
+                threadManagement.readShellSnapshot({ location: "active", threadIds }),
+              latestSequence: applicationEvents.latestApplicationSequence,
+            }).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationSearchThreadsError({
+                    message: "Failed to search threads",
+                    cause,
+                  }),
+              ),
+            );
+          }),
         [ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot]: (_input) =>
           getOrchestrationV2ArchivedShellSnapshot,
         [ORCHESTRATION_V2_WS_METHODS.getThreadFamily]: (input) =>
           readOmittableShellRows({ familyOf: input.threadId }, "Failed to load the thread family"),
         [ORCHESTRATION_V2_WS_METHODS.getThreadLinkMetadata]: (input) =>
-          threadManagement.getThreadLinkMetadata(input.threadIds).pipe(
-            Effect.map((metadata) =>
-              allowedProjectIds === undefined
-                ? metadata
-                : Object.fromEntries(
-                    Object.entries(metadata).filter(
-                      ([, entry]) =>
-                        entry.projectId !== null && allowedProjectIds.has(entry.projectId),
+          Effect.flatMap(readAllowedProjectIds, (allowedProjectIds) =>
+            threadManagement.getThreadLinkMetadata(input.threadIds).pipe(
+              Effect.map((metadata) =>
+                allowedProjectIds === undefined
+                  ? metadata
+                  : Object.fromEntries(
+                      Object.entries(metadata).filter(
+                        ([, entry]) =>
+                          entry.projectId !== null && allowedProjectIds.has(entry.projectId),
+                      ),
                     ),
-                  ),
-            ),
-            Effect.mapError(
-              (cause) =>
-                new OrchestrationV2GetShellSnapshotError({
-                  message: "Failed to load thread link metadata",
-                  cause,
-                }),
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationV2GetShellSnapshotError({
+                    message: "Failed to load thread link metadata",
+                    cause,
+                  }),
+              ),
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.getThreadTitles]: (input) =>
-          (allowedProjectIds === undefined
-            ? threadManagement.getThreadTitles(input.threadIds)
-            : threadManagement.getThreadLinkMetadata(input.threadIds).pipe(
-                Effect.map((metadata) =>
-                  Object.fromEntries(
-                    Object.entries(metadata)
-                      .filter(
-                        ([, entry]) =>
-                          entry.projectId !== null && allowedProjectIds.has(entry.projectId),
-                      )
-                      .map(([threadId, entry]) => [threadId, entry.title]),
+          Effect.flatMap(readAllowedProjectIds, (allowedProjectIds) =>
+            (allowedProjectIds === undefined
+              ? threadManagement.getThreadTitles(input.threadIds)
+              : threadManagement.getThreadLinkMetadata(input.threadIds).pipe(
+                  Effect.map((metadata) =>
+                    Object.fromEntries(
+                      Object.entries(metadata)
+                        .filter(
+                          ([, entry]) =>
+                            entry.projectId !== null && allowedProjectIds.has(entry.projectId),
+                        )
+                        .map(([threadId, entry]) => [threadId, entry.title]),
+                    ),
                   ),
-                ),
-              )
-          ).pipe(
-            Effect.mapError(
-              (cause) =>
-                new OrchestrationV2GetShellSnapshotError({
-                  message: "Failed to load thread titles",
-                  cause,
-                }),
+                )
+            ).pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationV2GetShellSnapshotError({
+                    message: "Failed to load thread titles",
+                    cause,
+                  }),
+              ),
             ),
           ),
-        [ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads]: (input) => {
-          const projectIds = narrowedProjectIds(input.projectIds);
-          if (projectIds !== undefined && projectIds.length === 0) {
-            return applicationEvents.latestApplicationSequence.pipe(
-              Effect.map((snapshotSequence) => ({
-                snapshotSequence,
-                threads: [],
-                counts: [],
-              })),
+        [ORCHESTRATION_V2_WS_METHODS.getOlderSettledThreads]: (input) =>
+          Effect.flatMap(readAllowedProjectIds, (allowedProjectIds) => {
+            const projectIds = narrowProjectIds(input.projectIds, allowedProjectIds);
+            if (projectIds !== undefined && projectIds.length === 0) {
+              return applicationEvents.latestApplicationSequence.pipe(
+                Effect.map((snapshotSequence) => ({
+                  snapshotSequence,
+                  threads: [],
+                  counts: [],
+                })),
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationV2GetShellSnapshotError({
+                      message: "Failed to load older settled threads",
+                      cause,
+                    }),
+                ),
+              );
+            }
+            return loadOlderSettledThreadsPage({
+              sql,
+              listThreads: threadManagement.listOlderSettledThreads(
+                projectIds === undefined ? input : { ...input, projectIds },
+              ),
+              readThreads: (threadIds) =>
+                threadManagement.readShellSnapshot({ location: "active", threadIds }),
+              latestSequence: applicationEvents.latestApplicationSequence,
+            }).pipe(
+              Effect.map((page) =>
+                allowedProjectIds === undefined
+                  ? page
+                  : {
+                      ...page,
+                      threads: page.threads.filter((thread) =>
+                        allowedProjectIds.has(thread.projectId),
+                      ),
+                      counts: page.counts.filter((entry) => allowedProjectIds.has(entry.projectId)),
+                    },
+              ),
               Effect.mapError(
                 (cause) =>
                   new OrchestrationV2GetShellSnapshotError({
@@ -2319,47 +2439,20 @@ export const layerWsRpc = (
                   }),
               ),
             );
-          }
-          return loadOlderSettledThreadsPage({
-            sql,
-            listThreads: threadManagement.listOlderSettledThreads(
-              projectIds === undefined ? input : { ...input, projectIds },
-            ),
-            readThreads: (threadIds) =>
-              threadManagement.readShellSnapshot({ location: "active", threadIds }),
-            latestSequence: applicationEvents.latestApplicationSequence,
-          }).pipe(
-            Effect.map((page) =>
-              allowedProjectIds === undefined
-                ? page
-                : {
-                    ...page,
-                    threads: page.threads.filter((thread) =>
-                      allowedProjectIds.has(thread.projectId),
-                    ),
-                    counts: page.counts.filter((entry) => allowedProjectIds.has(entry.projectId)),
-                  },
-            ),
-            Effect.mapError(
-              (cause) =>
-                new OrchestrationV2GetShellSnapshotError({
-                  message: "Failed to load older settled threads",
-                  cause,
-                }),
-            ),
-          );
-        },
+          }),
         [ORCHESTRATION_V2_WS_METHODS.getWorktreeThreadIds]: (input) =>
-          readOmittableShellRows(
-            { worktreePath: input.worktreePath },
-            "Failed to load the worktree's threads",
-          ).pipe(
-            Effect.map(({ threads }) => ({
-              threadIds: (allowedProjectIds === undefined
-                ? threads
-                : threads.filter((thread) => allowedProjectIds.has(thread.projectId))
-              ).map((thread) => thread.id),
-            })),
+          Effect.flatMap(readAllowedProjectIds, (allowedProjectIds) =>
+            readOmittableShellRows(
+              { worktreePath: input.worktreePath },
+              "Failed to load the worktree's threads",
+            ).pipe(
+              Effect.map(({ threads }) => ({
+                threadIds: (allowedProjectIds === undefined
+                  ? threads
+                  : threads.filter((thread) => allowedProjectIds.has(thread.projectId))
+                ).map((thread) => thread.id),
+              })),
+            ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.getThreadProjection]: (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
@@ -2535,20 +2628,43 @@ export const layerWsRpc = (
           Stream.unwrap(
             subscribeOrchestrationV2Shell({
               ...input,
-              ...(allowedProjectIds === undefined ? {} : { allowedProjectIds }),
+              ...(accessGate !== undefined
+                ? {
+                    refreshAllowedProjectIds: accessGate
+                      .refreshForStream()
+                      .pipe(Effect.map(ProjectAccess.accessibleProjectIdsForActor)),
+                  }
+                : staticAllowedProjectIds === undefined
+                  ? {}
+                  : { allowedProjectIds: staticAllowedProjectIds }),
             }),
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input) =>
-          Stream.unwrap(
-            Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
-              Effect.andThen(threadViewers.view(input.threadId)),
-              Effect.andThen(subscribeOrchestrationV2Thread(input)),
+          guardThreadStream(
+            input.threadId,
+            Stream.unwrap(
+              Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
+                Effect.andThen(threadViewers.view(input.threadId)),
+                Effect.andThen(subscribeOrchestrationV2Thread(input)),
+              ),
             ),
+            (item) => {
+              if (item.kind === "snapshot") {
+                return item.projection.thread.projectId;
+              }
+              if (item.kind === "event") {
+                return domainEventProjectId(item.event);
+              }
+              return undefined;
+            },
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeCommandOutput]: (input) =>
-          Stream.unwrap(
-            Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
-              Effect.as(commandOutputHub.subscribe(input)),
+          guardThreadStream(
+            input.threadId,
+            Stream.unwrap(
+              Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
+                Effect.as(commandOutputHub.subscribe(input)),
+              ),
             ),
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribePromptSuggestion]: (input) =>
@@ -2982,11 +3098,8 @@ export const layerWsRpc = (
         [WS_METHODS.serverUpdateSettings]:
           /* Request instrumentation already owns the span; keep this helper in that context. */
           Effect.fnUntraced(function* ({ patch, providerInstanceMutation }) {
-            if (
-              patch.multiUser !== undefined &&
-              currentActor !== undefined &&
-              !currentActor.isOwner
-            ) {
+            const actor = yield* readCurrentActor;
+            if (patch.multiUser !== undefined && actor !== undefined && !actor.isOwner) {
               return yield* new EnvironmentAuthorizationError({
                 message: "Only the environment owner may change multi-user mode.",
                 ...authScopeRequiredResponse(AuthEnvironmentMaintainScope),
@@ -3209,16 +3322,19 @@ export const layerWsRpc = (
             ),
           ),
         [WS_METHODS.projectsCreateNew]: (input) =>
-          managedFolders
-            .createNamedProject({
-              ...input,
-              ...(currentActor === undefined ? {} : { actor: currentActor }),
-            })
-            .pipe(
-              Effect.mapError(
-                (cause) => new OrchestrationDispatchCommandError({ message: cause.message, cause }),
+          Effect.flatMap(readCurrentActor, (actor) =>
+            managedFolders
+              .createNamedProject({
+                ...input,
+                ...(actor === undefined ? {} : { actor }),
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationDispatchCommandError({ message: cause.message, cause }),
+                ),
               ),
-            ),
+          ),
         [WS_METHODS.projectsCreateFromThread]: (input) =>
           scratchThreadPromotion
             .promote(input)
@@ -3232,13 +3348,23 @@ export const layerWsRpc = (
         [WS_METHODS.projectCloneRetry]: (input) =>
           projectCloneTracker.retry(input.projectId).pipe(Effect.map((applied) => ({ applied }))),
         [WS_METHODS.subscribeProjectClones]: () =>
-          allowedProjectIds === undefined
-            ? projectCloneTracker.stream
-            : projectCloneTracker.stream.pipe(
-                Stream.map((clones) =>
-                  clones.filter((clone) => allowedProjectIds.has(clone.projectId)),
+          accessGate !== undefined
+            ? projectCloneTracker.stream.pipe(
+                Stream.mapEffect((clones) =>
+                  Effect.map(readAllowedProjectIds, (allowedProjectIds) =>
+                    allowedProjectIds === undefined
+                      ? clones
+                      : clones.filter((clone) => allowedProjectIds.has(clone.projectId)),
+                  ),
                 ),
-              ),
+              )
+            : staticAllowedProjectIds === undefined
+              ? projectCloneTracker.stream
+              : projectCloneTracker.stream.pipe(
+                  Stream.map((clones) =>
+                    clones.filter((clone) => staticAllowedProjectIds.has(clone.projectId)),
+                  ),
+                ),
         [WS_METHODS.sourceControlPublishRepository]: (input) =>
           sourceControlRepositories.publishRepository(input).pipe(
             // A failed push still leaves the new remote added.
@@ -3953,6 +4079,44 @@ export const WS_RPC_SERVER_OPTIONS = {
   disableFatalDefects: true,
 } as const;
 
+const withRevocationClose = (
+  socket: Socket.Socket,
+  state: {
+    readonly closeSocketRef: Ref.Ref<
+      ((code: RpcAuthorization.RevocationCloseCode, reason: string) => Effect.Effect<void>) | null
+    >;
+    readonly pendingCloseRef: Ref.Ref<{
+      readonly code: RpcAuthorization.RevocationCloseCode;
+      readonly reason: string;
+    } | null>;
+  },
+): Socket.Socket =>
+  Socket.make({
+    reader: socket.reader,
+    writer: Effect.gen(function* () {
+      const writer = yield* socket.writer;
+      const sendClose = (code: RpcAuthorization.RevocationCloseCode, reason: string) =>
+        writer.write(new Socket.CloseEvent(code, reason)).pipe(Effect.ignore);
+      yield* Ref.set(state.closeSocketRef, sendClose);
+      const pending = yield* Ref.get(state.pendingCloseRef);
+      if (pending !== null) {
+        yield* sendClose(pending.code, pending.reason);
+      }
+      return {
+        /* Per-frame guard shares the enclosing connection span. */
+        write: Effect.fnUntraced(function* (chunk) {
+          if ((yield* Ref.get(state.pendingCloseRef)) !== null) return;
+          return yield* writer.write(chunk);
+        }),
+        /* Per-batch guard shares the enclosing connection span. */
+        writeAll: Effect.fnUntraced(function* (chunks) {
+          if ((yield* Ref.get(state.pendingCloseRef)) !== null) return;
+          return yield* writer.writeAll(chunks);
+        }),
+      };
+    }),
+  });
+
 export const layer = Layer.unwrap(
   Effect.gen(function* () {
     const serverBrowser = yield* ServerBrowser.ServerBrowser;
@@ -4009,10 +4173,33 @@ export const layer = Layer.unwrap(
                 : failEnvironmentAuthInvalid("invalid_credential"),
           }),
         );
+        const actorRef = yield* Ref.make(actor);
+        const closeSocketRef = yield* Ref.make<
+          | ((code: RpcAuthorization.RevocationCloseCode, reason: string) => Effect.Effect<void>)
+          | null
+        >(null);
+        const pendingCloseRef = yield* Ref.make<{
+          readonly code: RpcAuthorization.RevocationCloseCode;
+          readonly reason: string;
+        } | null>(null);
+        const closeConnection = Effect.fn("ws.closeRevokedConnection")(function* (
+          code: RpcAuthorization.RevocationCloseCode,
+          reason: string,
+        ) {
+          const first = yield* Ref.modify(pendingCloseRef, (existing) =>
+            existing === null ? [true, { code, reason }] : [false, existing],
+          );
+          if (!first) return;
+          const closer = yield* Ref.get(closeSocketRef);
+          if (closer !== null) {
+            yield* closer(code, reason);
+          }
+        });
         const accessGate = RpcAuthorization.makeAccessGate({
-          actor,
+          actorRef,
           access: projectAccess,
           resolver: resourceResolver,
+          onRevoked: closeConnection,
         });
         // Desktop bootstrap sessions connect to their own backend, including same-machine WSL.
         if (session.subject === "desktop-bootstrap") {
@@ -4030,7 +4217,7 @@ export const layer = Layer.unwrap(
             Effect.provide(
               Layer.merge(
                 RpcAuthorization.layer(
-                  projectAccess.effectiveScopes(actor),
+                  session.scopes,
                   (method, payload) => {
                     // Anonymous product signal: the feature and its enum variant,
                     // credited to the connecting client's surface only.
@@ -4063,6 +4250,7 @@ export const layer = Layer.unwrap(
               reportProfiles,
               readSettingsClient(url.value),
               actor,
+              accessGate,
             ).pipe(
               Layer.provideMerge(RpcSerialization.layerJson),
               // Handler-context reporters see only request defects, not server-wide defects.
@@ -4120,9 +4308,15 @@ export const layer = Layer.unwrap(
             // wrapped through the request it reads.
             Object.create(request, {
               upgrade: {
-                value: Effect.map(request.upgrade, (socket) =>
-                  withSocketHeartbeat(splitFrames ? splitLargeSocketFrames(socket) : socket),
-                ),
+                value: Effect.map(request.upgrade, (socket) => {
+                  const guarded = withRevocationClose(socket, {
+                    closeSocketRef,
+                    pendingCloseRef,
+                  });
+                  return withSocketHeartbeat(
+                    splitFrames ? splitLargeSocketFrames(guarded) : guarded,
+                  );
+                }),
               },
             }),
           ),
@@ -4133,6 +4327,9 @@ export const layer = Layer.unwrap(
             Effect.raceFirst(
               framedRpcWebSocketHttpEffect,
               sessions.awaitInvalidation(session.sessionId, session.proofKeyThumbprint).pipe(
+                Effect.andThen(
+                  closeConnection(RpcAuthorization.WS_CLOSE_CODE_UNAUTHORIZED, "session_revoked"),
+                ),
                 Effect.as(HttpServerResponse.empty()),
                 Effect.catchTags({
                   SessionCredentialVerificationError: (error) =>

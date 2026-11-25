@@ -549,6 +549,18 @@ describe("MembersSettings (environment-level)", () => {
       }),
     );
 
+    // Owner suspends a multi-project member via a single principal-level PATCH (no projectId loop).
+    state.updateMember.mockClear();
+    await userEvent.click(page.getByRole("button", { name: "Suspend" }).last());
+    await vi.waitFor(() => expect(state.updateMember).toHaveBeenCalledTimes(1));
+    expect(state.updateMember).toHaveBeenCalledWith({
+      environmentId: envId,
+      input: {
+        principalId: devPrincipal.id,
+        patch: { state: "suspended" },
+      },
+    });
+
     // Owner removes whole principal without projectId.
     await userEvent.click(page.getByRole("button", { name: "Remove Alex Dev" }));
     await userEvent.click(page.getByRole("button", { name: "Remove", exact: true }));

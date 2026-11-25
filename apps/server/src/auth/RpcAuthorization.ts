@@ -38,6 +38,7 @@ import {
   intersectScopes,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Layer from "effect/Layer";
 import type * as RpcGroup from "effect/rpc/RpcGroup";
@@ -363,12 +364,31 @@ const requiredScopesForRpcCall = (
     : scopes;
 };
 
+export const WS_CLOSE_CODE_UNAUTHORIZED = 4401;
+const WS_CLOSE_CODE_FORBIDDEN = 4403;
+export type RevocationCloseCode =
+  | typeof WS_CLOSE_CODE_UNAUTHORIZED
+  | typeof WS_CLOSE_CODE_FORBIDDEN;
+
 export interface RpcAccessGate {
-  readonly actor: ProjectAccess.AccessActor;
+  readonly getActor: Effect.Effect<ProjectAccess.AccessActor>;
+  readonly refresh: () => Effect.Effect<
+    ProjectAccess.AccessActor,
+    ProjectForbiddenError | EnvironmentAuthorizationError
+  >;
+  readonly refreshForStream: () => Effect.Effect<
+    ProjectAccess.AccessActor,
+    EnvironmentAuthorizationError
+  >;
   readonly check: (
     method: string,
     payload: unknown,
+    actor?: ProjectAccess.AccessActor,
   ) => Effect.Effect<void, ProjectForbiddenError | EnvironmentAuthorizationError>;
+  readonly checkThreadStreamAccess: (
+    threadId: string,
+    knownProjectId?: string,
+  ) => Effect.Effect<string | undefined, EnvironmentAuthorizationError>;
 }
 
 /**
@@ -376,19 +396,117 @@ export interface RpcAccessGate {
  * project access. Owner and environment-binding actors pass without lookups;
  * missing threads pass through so snapshot handlers answer 404.
  */
-export function makeAccessGate(input: {
-  readonly actor: ProjectAccess.AccessActor;
-  readonly access: Pick<
-    ProjectAccess.ProjectAccess["Service"],
-    "accessibleProjectIds" | "assert" | "can"
-  >;
-  readonly resolver: Pick<
-    ResourceResolver.ResourceResolver["Service"],
-    "capabilityForRpcCall" | "resourcesForRpcCall" | "resolveThreadProject"
-  >;
-}): RpcAccessGate {
-  const check = Effect.fnUntraced(function* (method: string, payload: unknown) {
-    if (method === WS_METHODS.serverUpdateSettings && !input.actor.isOwner) {
+export function makeAccessGate(
+  input: (
+    | { readonly actor: ProjectAccess.AccessActor; readonly actorRef?: undefined }
+    | { readonly actorRef: Ref.Ref<ProjectAccess.AccessActor>; readonly actor?: undefined }
+  ) & {
+    readonly access: Pick<
+      ProjectAccess.ProjectAccess["Service"],
+      "accessibleProjectIds" | "assert" | "can"
+    > & {
+      readonly refresh?: ProjectAccess.ProjectAccess["Service"]["refresh"];
+    };
+    readonly resolver: Pick<
+      ResourceResolver.ResourceResolver["Service"],
+      "capabilityForRpcCall" | "resourcesForRpcCall" | "resolveThreadProject"
+    >;
+    readonly onRevoked?: (code: RevocationCloseCode, reason: string) => Effect.Effect<void>;
+  },
+): RpcAccessGate {
+  const getActor: Effect.Effect<ProjectAccess.AccessActor> =
+    input.actorRef !== undefined ? Ref.get(input.actorRef) : Effect.succeed(input.actor);
+  let hadAccessibleProjects = false;
+
+  const notifyRevoked = (code: RevocationCloseCode, reason: string): Effect.Effect<void> =>
+    input.onRevoked === undefined ? Effect.void : input.onRevoked(code, reason);
+
+  const refresh = Effect.fnUntraced(function* () {
+    const current = yield* getActor;
+    if (input.actorRef === undefined || input.access.refresh === undefined) {
+      return current;
+    }
+    const prevAccessible = input.access.accessibleProjectIds(current);
+    if (prevAccessible !== undefined && prevAccessible.size > 0) {
+      hadAccessibleProjects = true;
+    }
+    const refreshed = yield* input.access.refresh(current).pipe(
+      Effect.catchTags({
+        AccessResolveError: (error) =>
+          (error.reason === "repository_error"
+            ? Effect.void
+            : notifyRevoked(WS_CLOSE_CODE_UNAUTHORIZED, error.reason)
+          ).pipe(
+            Effect.andThen(
+              Effect.fail(
+                new EnvironmentAuthorizationError({
+                  message: error.message,
+                  ...authScopeRequiredResponse(AuthOrchestrationReadScope),
+                }),
+              ),
+            ),
+          ),
+      }),
+    );
+    if (refreshed !== current) {
+      yield* Ref.set(input.actorRef, refreshed);
+    }
+    const nextAccessible = input.access.accessibleProjectIds(refreshed);
+    if (nextAccessible !== undefined && nextAccessible.size > 0) {
+      hadAccessibleProjects = true;
+    }
+    if (hadAccessibleProjects && nextAccessible !== undefined && nextAccessible.size === 0) {
+      yield* notifyRevoked(WS_CLOSE_CODE_FORBIDDEN, "project_access_revoked");
+      return yield* new ProjectForbiddenError({
+        message: "No accessible projects remain for this session.",
+        projectId: ProjectId.make("environment"),
+        requiredPermission: "project:read",
+      });
+    }
+    return refreshed;
+  });
+
+  const refreshForStream = Effect.fnUntraced(function* () {
+    return yield* refresh().pipe(
+      Effect.catchTags({
+        project_forbidden: (error) =>
+          Effect.fail(
+            new EnvironmentAuthorizationError({
+              message: error.message,
+              ...authScopeRequiredResponse(AuthOrchestrationReadScope),
+            }),
+          ),
+      }),
+    );
+  });
+
+  const checkThreadStreamAccess = Effect.fnUntraced(function* (
+    threadId: string,
+    knownProjectId?: string,
+  ) {
+    const actor = yield* refreshForStream();
+    const accessibleIds = input.access.accessibleProjectIds(actor);
+    if (accessibleIds === undefined) {
+      return knownProjectId;
+    }
+    const projectId = knownProjectId ?? (yield* input.resolver.resolveThreadProject(threadId));
+    if (projectId !== undefined && !input.access.can(actor, projectId, "project:read")) {
+      yield* notifyRevoked(WS_CLOSE_CODE_FORBIDDEN, "resource_access_revoked");
+      return yield* new EnvironmentAuthorizationError({
+        message: "The authenticated session no longer has access to this thread.",
+        ...authScopeRequiredResponse(AuthOrchestrationReadScope),
+      });
+    }
+    return projectId;
+  });
+
+  const check = Effect.fnUntraced(function* (
+    method: string,
+    payload: unknown,
+    actorOverride?: ProjectAccess.AccessActor,
+  ) {
+    const actor = actorOverride ?? (yield* getActor);
+    if (method === WS_METHODS.serverUpdateSettings && !actor.isOwner) {
       const { patch } = decodeSettingsUpdate(payload);
       if (patch.multiUser !== undefined) {
         return yield* new EnvironmentAuthorizationError({
@@ -399,13 +517,13 @@ export function makeAccessGate(input: {
     }
     const capability = input.resolver.capabilityForRpcCall(method, payload);
     if (capability === undefined) return;
-    const accessibleIds = input.access.accessibleProjectIds(input.actor);
+    const accessibleIds = input.access.accessibleProjectIds(actor);
     if (accessibleIds === undefined) return;
     const resources = input.resolver.resourcesForRpcCall(method, payload);
 
     if (capability === "project:create" && resources?.projectId === undefined) {
       const canCreate = Array.from(accessibleIds).some((projectId) =>
-        input.access.can(input.actor, projectId, "project:create"),
+        input.access.can(actor, projectId, "project:create"),
       );
       if (!canCreate) {
         return yield* new ProjectForbiddenError({
@@ -420,24 +538,27 @@ export function makeAccessGate(input: {
     if (resources === undefined) return;
 
     if (resources.projectId !== undefined) {
-      yield* input.access.assert(input.actor, resources.projectId, capability);
+      yield* input.access.assert(actor, resources.projectId, capability);
     }
     if (resources.projectIds !== undefined) {
       for (const projectId of resources.projectIds) {
-        yield* input.access.assert(input.actor, projectId, capability);
+        yield* input.access.assert(actor, projectId, capability);
       }
     }
     if (resources.threadId !== undefined) {
       const threadProjectId = yield* input.resolver.resolveThreadProject(resources.threadId);
       if (threadProjectId !== undefined && threadProjectId !== resources.projectId) {
-        yield* input.access.assert(input.actor, threadProjectId, capability);
+        yield* input.access.assert(actor, threadProjectId, capability);
       }
     }
   });
 
   return {
-    actor: input.actor,
+    getActor,
+    refresh,
+    refreshForStream,
     check,
+    checkThreadStreamAccess,
   };
 }
 
@@ -452,15 +573,22 @@ export const layer = (
   access?: RpcAccessGate,
 ) =>
   Layer.succeed(RpcScopeAuthorization)((effect, { rpc, payload }) => {
-    const effectiveScopes =
-      access === undefined || access.actor.isOwner || access.actor.ceiling === undefined
-        ? scopes
-        : intersectScopes(scopes, access.actor.ceiling);
     const requiredScopes = requiredScopesForRpcCall(rpc._tag, payload);
-    const requiredScope = requiredScopes.find((scope) => !effectiveScopes.includes(scope));
-    if (requiredScope !== undefined) return Effect.fail(rpcAuthorizationError(requiredScope));
-    const authorized =
-      access === undefined ? effect : Effect.andThen(access.check(rpc._tag, payload), effect);
+    const authorize = Effect.gen(function* () {
+      const actor = access === undefined ? undefined : yield* access.refresh();
+      const effectiveScopes =
+        actor === undefined || actor.isOwner || actor.ceiling === undefined
+          ? scopes
+          : intersectScopes(scopes, actor.ceiling);
+      const requiredScope = requiredScopes.find((scope) => !effectiveScopes.includes(scope));
+      if (requiredScope !== undefined) {
+        return yield* rpcAuthorizationError(requiredScope);
+      }
+      if (access !== undefined) {
+        yield* access.check(rpc._tag, payload, actor);
+      }
+    });
+    const authorized = Effect.andThen(authorize, effect);
     return onAuthorized === undefined
       ? authorized
       : Effect.tap(authorized, () => onAuthorized(rpc._tag, payload));

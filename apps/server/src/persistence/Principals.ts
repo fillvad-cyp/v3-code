@@ -34,6 +34,12 @@ const PrincipalRow = Schema.Struct({
 });
 type PrincipalRow = typeof PrincipalRow.Type;
 
+const PrincipalAccessStatusRow = Schema.Struct({
+  status: PrincipalStatus,
+  accessRevision: Schema.Number,
+});
+type PrincipalAccessStatus = typeof PrincipalAccessStatusRow.Type;
+
 export const CredentialRecord = Schema.Struct({
   algo: Schema.String,
   salt: Schema.String,
@@ -80,6 +86,9 @@ export class PrincipalRepository extends Context.Service<
     readonly get: (
       id: PrincipalId,
     ) => Effect.Effect<Option.Option<Principal>, PrincipalRepositoryError>;
+    readonly getAccessStatus: (
+      id: PrincipalId,
+    ) => Effect.Effect<Option.Option<PrincipalAccessStatus>, PrincipalRepositoryError>;
     readonly getByEmail: (
       email: string,
     ) => Effect.Effect<Option.Option<Principal>, PrincipalRepositoryError>;
@@ -125,6 +134,17 @@ const make = Effect.gen(function* () {
     Request: PrincipalId,
     Result: PrincipalRow,
     execute: (id) => sql`${selectRow} WHERE id = ${id}`,
+  });
+
+  const getAccessStatusRow = SqlSchema.findOneOption({
+    Request: PrincipalId,
+    Result: PrincipalAccessStatusRow,
+    execute: (id) =>
+      sql`
+        SELECT status AS "status", access_revision AS "accessRevision"
+        FROM principals
+        WHERE id = ${id}
+      `,
   });
 
   const getRowByEmail = SqlSchema.findOneOption({
@@ -220,6 +240,11 @@ const make = Effect.gen(function* () {
   return PrincipalRepository.of({
     get: Effect.fn("PrincipalRepository.get")((id) =>
       getRow(id).pipe(Effect.mapError(toSqlOrDecodeError("getPrincipal", "Principal"))),
+    ),
+    getAccessStatus: Effect.fn("PrincipalRepository.getAccessStatus")((id) =>
+      getAccessStatusRow(id).pipe(
+        Effect.mapError(toSqlOrDecodeError("getPrincipalAccessStatus", "PrincipalAccessStatus")),
+      ),
     ),
     getByEmail: Effect.fn("PrincipalRepository.getByEmail")((email) =>
       getRowByEmail(email).pipe(

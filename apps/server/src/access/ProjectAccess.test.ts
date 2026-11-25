@@ -84,6 +84,17 @@ function makeAccessLayer(options: {
 
   const principalRepo = Layer.succeed(Principals.PrincipalRepository, {
     get: (id) => Effect.succeed(Option.fromNullishOr(principalMap.get(id))),
+    getAccessStatus: (id) => {
+      const principal = principalMap.get(id);
+      return Effect.succeed(
+        principal === undefined
+          ? Option.none()
+          : Option.some({
+              status: principal.status,
+              accessRevision: principal.accessRevision,
+            }),
+      );
+    },
     getByEmail: () => Effect.die("unused"),
     list: Effect.succeed([...principalMap.values()]),
     create: () => Effect.die("unused"),

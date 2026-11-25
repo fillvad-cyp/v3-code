@@ -124,7 +124,7 @@ export class MembershipInvalidInputError extends Schema.TaggedError<MembershipIn
       case "empty_update":
         return "At least one of role, state, or ceiling must be provided.";
       case "project_id_required":
-        return "projectId is required when updating membership role or state.";
+        return "projectId is required when updating membership role.";
     }
   }
 }
@@ -206,6 +206,17 @@ interface SuspendPrincipalResult {
   readonly revokedSessions: number;
 }
 
+interface ReactivatePrincipalInput {
+  readonly actor: ProjectAccess.AccessActor;
+  readonly principalId: PrincipalId;
+  readonly audit?: MembershipAuditContext;
+}
+
+interface ReactivatePrincipalResult {
+  readonly principal: Principal;
+  readonly reactivatedMemberships: number;
+}
+
 interface UpdateMemberInput {
   readonly actor: ProjectAccess.AccessActor;
   readonly principalId: PrincipalId;
@@ -257,6 +268,9 @@ export class MembershipService extends Context.Service<
     readonly suspendPrincipal: (
       input: SuspendPrincipalInput,
     ) => Effect.Effect<SuspendPrincipalResult, OwnerMutationError>;
+    readonly reactivatePrincipal: (
+      input: ReactivatePrincipalInput,
+    ) => Effect.Effect<ReactivatePrincipalResult, OwnerMutationError>;
     readonly updateMember: (
       input: UpdateMemberInput,
     ) => Effect.Effect<MemberWithMemberships, UpdateMemberError>;
@@ -1074,110 +1088,214 @@ const make = Effect.gen(function* () {
       );
   });
 
+  /* Shared transactional body for suspendPrincipal and updateMember. */
+  const suspendPrincipalTx = Effect.fnUntraced(function* (
+    input: SuspendPrincipalInput,
+    nowIso: string,
+  ) {
+    if (!input.actor.isOwner) {
+      return yield* new MembershipForbiddenError({ reason: "owner_required" });
+    }
+
+    const maybePrincipal = yield* principals
+      .get(input.principalId)
+      .pipe(
+        Effect.mapError(
+          (cause) => new MembershipInternalError({ operation: "suspendPrincipal", cause }),
+        ),
+      );
+    if (Option.isNone(maybePrincipal) || maybePrincipal.value.status === "removed") {
+      return yield* new MembershipNotFoundError({
+        resource: "principal",
+        principalId: input.principalId,
+      });
+    }
+    const targetPrincipal = maybePrincipal.value;
+    if (targetPrincipal.kind === "owner") {
+      return yield* new MembershipForbiddenError({ reason: "owner_protected" });
+    }
+
+    const principalMemberships = yield* memberships
+      .listForPrincipal(input.principalId)
+      .pipe(
+        Effect.mapError(
+          (cause) => new MembershipInternalError({ operation: "suspendPrincipal", cause }),
+        ),
+      );
+    let suspendedMemberships = 0;
+    for (const membership of principalMemberships) {
+      if (membership.state !== "removed" && membership.state !== "suspended") {
+        yield* memberships
+          .setState({
+            projectId: membership.projectId,
+            principalId: input.principalId,
+            state: "suspended",
+            updatedAt: nowIso,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) => new MembershipInternalError({ operation: "suspendPrincipal", cause }),
+            ),
+          );
+        suspendedMemberships += 1;
+      }
+    }
+
+    yield* principals
+      .update({
+        id: input.principalId,
+        status: "suspended",
+        updatedAt: nowIso,
+        bumpAccessRevision: true,
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) => new MembershipInternalError({ operation: "suspendPrincipal", cause }),
+        ),
+      );
+
+    yield* auditEvents
+      .append({
+        at: nowIso,
+        actorPrincipalId: actorPrincipalId(input.actor),
+        actorSessionId: actorSessionId(input.actor, input.audit),
+        action: "member.suspended",
+        resourceType: "principal",
+        resourceId: input.principalId,
+        projectId: null,
+        ip: input.audit?.ip ?? null,
+        userAgent: input.audit?.userAgent ?? null,
+        outcome: "allow",
+        metadata: {
+          principalId: input.principalId,
+          displayName: targetPrincipal.displayName,
+          suspendedMemberships,
+        },
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) => new MembershipInternalError({ operation: "suspendPrincipal", cause }),
+        ),
+      );
+
+    return {
+      principal: {
+        ...targetPrincipal,
+        status: "suspended",
+        accessRevision: targetPrincipal.accessRevision + 1,
+        updatedAt: nowIso,
+      } satisfies Principal,
+      suspendedMemberships,
+    };
+  });
+
+  /* Shared transactional body for reactivatePrincipal and updateMember. */
+  const reactivatePrincipalTx = Effect.fnUntraced(function* (
+    input: ReactivatePrincipalInput,
+    nowIso: string,
+  ) {
+    if (!input.actor.isOwner) {
+      return yield* new MembershipForbiddenError({ reason: "owner_required" });
+    }
+
+    const maybePrincipal = yield* principals
+      .get(input.principalId)
+      .pipe(
+        Effect.mapError(
+          (cause) => new MembershipInternalError({ operation: "reactivatePrincipal", cause }),
+        ),
+      );
+    if (Option.isNone(maybePrincipal) || maybePrincipal.value.status === "removed") {
+      return yield* new MembershipNotFoundError({
+        resource: "principal",
+        principalId: input.principalId,
+      });
+    }
+    const targetPrincipal = maybePrincipal.value;
+    if (targetPrincipal.kind === "owner") {
+      return yield* new MembershipForbiddenError({ reason: "owner_protected" });
+    }
+
+    const principalMemberships = yield* memberships
+      .listForPrincipal(input.principalId)
+      .pipe(
+        Effect.mapError(
+          (cause) => new MembershipInternalError({ operation: "reactivatePrincipal", cause }),
+        ),
+      );
+    let reactivatedMemberships = 0;
+    for (const membership of principalMemberships) {
+      if (membership.state === "suspended") {
+        yield* memberships
+          .setState({
+            projectId: membership.projectId,
+            principalId: input.principalId,
+            state: "active",
+            updatedAt: nowIso,
+          })
+          .pipe(
+            Effect.mapError(
+              (cause) => new MembershipInternalError({ operation: "reactivatePrincipal", cause }),
+            ),
+          );
+        reactivatedMemberships += 1;
+      }
+    }
+
+    yield* principals
+      .update({
+        id: input.principalId,
+        status: "active",
+        updatedAt: nowIso,
+        bumpAccessRevision: true,
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) => new MembershipInternalError({ operation: "reactivatePrincipal", cause }),
+        ),
+      );
+
+    yield* auditEvents
+      .append({
+        at: nowIso,
+        actorPrincipalId: actorPrincipalId(input.actor),
+        actorSessionId: actorSessionId(input.actor, input.audit),
+        action: "member.reactivated",
+        resourceType: "principal",
+        resourceId: input.principalId,
+        projectId: null,
+        ip: input.audit?.ip ?? null,
+        userAgent: input.audit?.userAgent ?? null,
+        outcome: "allow",
+        metadata: {
+          principalId: input.principalId,
+          displayName: targetPrincipal.displayName,
+          reactivatedMemberships,
+        },
+      })
+      .pipe(
+        Effect.mapError(
+          (cause) => new MembershipInternalError({ operation: "reactivatePrincipal", cause }),
+        ),
+      );
+
+    return {
+      principal: {
+        ...targetPrincipal,
+        status: "active",
+        accessRevision: targetPrincipal.accessRevision + 1,
+        updatedAt: nowIso,
+      } satisfies Principal,
+      reactivatedMemberships,
+    };
+  });
+
   const suspendPrincipal = Effect.fn("MembershipService.suspendPrincipal")(function* (
     input: SuspendPrincipalInput,
   ) {
     const nowIso = DateTime.formatIso(yield* DateTime.now);
     const txResult = yield* sql
-      .withTransaction(
-        Effect.gen(function* () {
-          if (!input.actor.isOwner) {
-            return yield* new MembershipForbiddenError({ reason: "owner_required" });
-          }
-
-          const maybePrincipal = yield* principals
-            .get(input.principalId)
-            .pipe(
-              Effect.mapError(
-                (cause) => new MembershipInternalError({ operation: "suspendPrincipal", cause }),
-              ),
-            );
-          if (Option.isNone(maybePrincipal) || maybePrincipal.value.status === "removed") {
-            return yield* new MembershipNotFoundError({
-              resource: "principal",
-              principalId: input.principalId,
-            });
-          }
-          const targetPrincipal = maybePrincipal.value;
-          if (targetPrincipal.kind === "owner") {
-            return yield* new MembershipForbiddenError({ reason: "owner_protected" });
-          }
-
-          const principalMemberships = yield* memberships
-            .listForPrincipal(input.principalId)
-            .pipe(
-              Effect.mapError(
-                (cause) => new MembershipInternalError({ operation: "suspendPrincipal", cause }),
-              ),
-            );
-          let suspendedMemberships = 0;
-          for (const membership of principalMemberships) {
-            if (membership.state !== "removed" && membership.state !== "suspended") {
-              yield* memberships
-                .setState({
-                  projectId: membership.projectId,
-                  principalId: input.principalId,
-                  state: "suspended",
-                  updatedAt: nowIso,
-                })
-                .pipe(
-                  Effect.mapError(
-                    (cause) =>
-                      new MembershipInternalError({ operation: "suspendPrincipal", cause }),
-                  ),
-                );
-              suspendedMemberships += 1;
-            }
-          }
-
-          yield* principals
-            .update({
-              id: input.principalId,
-              status: "suspended",
-              updatedAt: nowIso,
-              bumpAccessRevision: true,
-            })
-            .pipe(
-              Effect.mapError(
-                (cause) => new MembershipInternalError({ operation: "suspendPrincipal", cause }),
-              ),
-            );
-
-          yield* auditEvents
-            .append({
-              at: nowIso,
-              actorPrincipalId: actorPrincipalId(input.actor),
-              actorSessionId: actorSessionId(input.actor, input.audit),
-              action: "member.suspended",
-              resourceType: "principal",
-              resourceId: input.principalId,
-              projectId: null,
-              ip: input.audit?.ip ?? null,
-              userAgent: input.audit?.userAgent ?? null,
-              outcome: "allow",
-              metadata: {
-                principalId: input.principalId,
-                displayName: targetPrincipal.displayName,
-                suspendedMemberships,
-              },
-            })
-            .pipe(
-              Effect.mapError(
-                (cause) => new MembershipInternalError({ operation: "suspendPrincipal", cause }),
-              ),
-            );
-
-          return {
-            principal: {
-              ...targetPrincipal,
-              status: "suspended",
-              accessRevision: targetPrincipal.accessRevision + 1,
-              updatedAt: nowIso,
-            } satisfies Principal,
-            suspendedMemberships,
-          };
-        }),
-      )
+      .withTransaction(suspendPrincipalTx(input, nowIso))
       .pipe(
         Effect.mapError(
           mapTransactionError<OwnerMutationError>("suspendPrincipal", MUTATION_ERROR_TAGS),
@@ -1192,18 +1310,32 @@ const make = Effect.gen(function* () {
     } satisfies SuspendPrincipalResult;
   });
 
+  const reactivatePrincipal = Effect.fn("MembershipService.reactivatePrincipal")(function* (
+    input: ReactivatePrincipalInput,
+  ) {
+    const nowIso = DateTime.formatIso(yield* DateTime.now);
+    return yield* sql
+      .withTransaction(reactivatePrincipalTx(input, nowIso))
+      .pipe(
+        Effect.mapError(
+          mapTransactionError<OwnerMutationError>("reactivatePrincipal", MUTATION_ERROR_TAGS),
+        ),
+      );
+  });
+
   const updateMember = Effect.fn("MembershipService.updateMember")(function* (
     input: UpdateMemberInput,
   ) {
     if (input.ceiling === undefined && input.role === undefined && input.state === undefined) {
       return yield* new MembershipInvalidInputError({ reason: "empty_update" });
     }
-    if ((input.role !== undefined || input.state !== undefined) && input.projectId === undefined) {
+    if (input.role !== undefined && input.projectId === undefined) {
       return yield* new MembershipInvalidInputError({ reason: "project_id_required" });
     }
 
     const nowIso = DateTime.formatIso(yield* DateTime.now);
-    return yield* sql
+    const shouldRevokeSessions = input.projectId === undefined && input.state === "suspended";
+    const result = yield* sql
       .withTransaction(
         Effect.gen(function* () {
           if (input.ceiling !== undefined) {
@@ -1229,17 +1361,37 @@ const make = Effect.gen(function* () {
               nowIso,
             );
           }
-          if (input.state !== undefined && input.projectId !== undefined) {
-            yield* setMembershipStateTx(
-              {
-                actor: input.actor,
-                projectId: input.projectId,
-                principalId: input.principalId,
-                state: input.state,
-                ...(input.audit === undefined ? {} : { audit: input.audit }),
-              },
-              nowIso,
-            );
+          if (input.state !== undefined) {
+            if (input.projectId !== undefined) {
+              yield* setMembershipStateTx(
+                {
+                  actor: input.actor,
+                  projectId: input.projectId,
+                  principalId: input.principalId,
+                  state: input.state,
+                  ...(input.audit === undefined ? {} : { audit: input.audit }),
+                },
+                nowIso,
+              );
+            } else if (input.state === "suspended") {
+              yield* suspendPrincipalTx(
+                {
+                  actor: input.actor,
+                  principalId: input.principalId,
+                  ...(input.audit === undefined ? {} : { audit: input.audit }),
+                },
+                nowIso,
+              );
+            } else {
+              yield* reactivatePrincipalTx(
+                {
+                  actor: input.actor,
+                  principalId: input.principalId,
+                  ...(input.audit === undefined ? {} : { audit: input.audit }),
+                },
+                nowIso,
+              );
+            }
           }
 
           const updatedPrincipal = yield* principals
@@ -1277,6 +1429,11 @@ const make = Effect.gen(function* () {
           mapTransactionError<UpdateMemberError>("updateMember", MUTATION_ERROR_TAGS),
         ),
       );
+
+    if (shouldRevokeSessions) {
+      yield* revokePrincipalSessions(input.principalId, "updateMember");
+    }
+    return result;
   });
 
   const canIssueInvite = Effect.fn("MembershipService.canIssueInvite")(function* (
@@ -1354,6 +1511,7 @@ const make = Effect.gen(function* () {
     removePrincipal,
     setCeiling,
     suspendPrincipal,
+    reactivatePrincipal,
     updateMember,
     canIssueInvite,
     grantCreatorAdmin,

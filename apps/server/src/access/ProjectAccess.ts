@@ -69,6 +69,7 @@ export type AccessActor = {
   readonly principalId?: PrincipalId;
   readonly binding?: SessionBinding;
   readonly isOwner: boolean;
+  readonly accessRevision?: number;
   readonly ceiling?: ReadonlyArray<AuthEnvironmentScope>;
   readonly roles: ReadonlyMap<ProjectId | string, ProjectRole>;
   readonly ownedProjectIds?: ReadonlySet<string>;
@@ -118,6 +119,7 @@ export class ProjectAccess extends Context.Service<
     readonly resolve: (
       session: AccessSessionInput,
     ) => Effect.Effect<AccessActor, AccessResolveError>;
+    readonly refresh: (actor: AccessActor) => Effect.Effect<AccessActor, AccessResolveError>;
     readonly can: (
       actor: AccessActor,
       projectId: ProjectId | string,
@@ -243,10 +245,56 @@ const make = Effect.gen(function* () {
       principalId: principal.id,
       ...bindingProps,
       isOwner,
+      accessRevision: principal.accessRevision,
       ...(ceiling === undefined ? {} : { ceiling }),
       roles,
       ...(ownedProjectIds === undefined ? {} : { ownedProjectIds }),
     } satisfies AccessActor;
+  });
+
+  const refresh = Effect.fn("ProjectAccess.refresh")(function* (actor: AccessActor) {
+    if (actor.principalId === undefined) {
+      return actor;
+    }
+    const maybeStatus = yield* principals.getAccessStatus(actor.principalId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new AccessResolveError({
+            reason: "repository_error",
+            principalId: actor.principalId,
+            cause,
+          }),
+      ),
+    );
+    if (Option.isNone(maybeStatus)) {
+      return yield* new AccessResolveError({
+        reason: "principal_not_found",
+        principalId: actor.principalId,
+      });
+    }
+    const { status, accessRevision } = maybeStatus.value;
+    if (status === "suspended") {
+      return yield* new AccessResolveError({
+        reason: "principal_suspended",
+        principalId: actor.principalId,
+      });
+    }
+    if (status === "removed") {
+      return yield* new AccessResolveError({
+        reason: "principal_removed",
+        principalId: actor.principalId,
+      });
+    }
+    if (actor.accessRevision !== undefined && accessRevision === actor.accessRevision) {
+      return actor;
+    }
+    return yield* resolve({
+      sessionId: actor.sessionId,
+      subject: actor.subject,
+      scopes: actor.scopes,
+      principalId: actor.principalId,
+      binding: actor.binding,
+    });
   });
 
   const assert = Effect.fn("ProjectAccess.assert")(function* (
@@ -266,6 +314,7 @@ const make = Effect.gen(function* () {
 
   return ProjectAccess.of({
     resolve,
+    refresh,
     can: canActor,
     accessibleProjectIds: accessibleProjectIdsForActor,
     assert,

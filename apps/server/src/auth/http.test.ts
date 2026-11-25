@@ -826,6 +826,100 @@ it.effect(
             );
             expect(deleteOwnerResp.status).toBe(403);
 
+            // Project A admin cannot suspend/reactivate a whole principal (owner-only -> 403).
+            const adminSuspendPrincipalResp = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(
+                  `/api/auth/members/${devA.principalId}`,
+                  { state: "suspended" },
+                  { cookie: adminA.cookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(adminSuspendPrincipalResp.status).toBe(403);
+
+            // Owner cannot suspend the owner principal (403).
+            const suspendOwnerResp = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(
+                  "/api/auth/members/owner",
+                  { state: "suspended" },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(suspendOwnerResp.status).toBe(403);
+
+            // Owner suspends Dev B at the principal level without projectId -> 200,
+            // principal + memberships suspended, and Dev B's session is revoked (401).
+            const ownerSuspendResp = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(
+                  `/api/auth/members/${devB.principalId}`,
+                  { state: "suspended" },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(ownerSuspendResp.status).toBe(200);
+            const suspendedDevB = (yield* Effect.promise(() => ownerSuspendResp.json())) as {
+              principal: { status: string; accessRevision: number };
+              memberships: Array<{ projectId: string; state: string }>;
+            };
+            expect(suspendedDevB.principal.status).toBe("suspended");
+            expect(suspendedDevB.principal.accessRevision).toBeGreaterThanOrEqual(1);
+            expect(suspendedDevB.memberships).toEqual([
+              expect.objectContaining({ projectId: projectB, state: "suspended" }),
+            ]);
+
+            const suspendedSessionCheck = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/members", {
+                  headers: { cookie: devB.cookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(suspendedSessionCheck.status).toBe(401);
+
+            // Owner reactivates Dev B without projectId -> 200, principal + memberships active,
+            // while the previously revoked session remains invalid (must sign in again).
+            const ownerReactivateResp = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(
+                  `/api/auth/members/${devB.principalId}`,
+                  { state: "active" },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(ownerReactivateResp.status).toBe(200);
+            const reactivatedDevB = (yield* Effect.promise(() => ownerReactivateResp.json())) as {
+              principal: { status: string; accessRevision: number };
+              memberships: Array<{ projectId: string; state: string }>;
+            };
+            expect(reactivatedDevB.principal.status).toBe("active");
+            expect(reactivatedDevB.principal.accessRevision).toBeGreaterThan(
+              suspendedDevB.principal.accessRevision,
+            );
+            expect(reactivatedDevB.memberships).toEqual([
+              expect.objectContaining({ projectId: projectB, state: "active" }),
+            ]);
+
+            const staleCookieAfterReactivate = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/members", {
+                  headers: { cookie: devB.cookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(staleCookieAfterReactivate.status).toBe(401);
+
             // Owner deletes Dev A principal -> 200 and Dev A's session is revoked (401).
             const deleteDevResp = yield* Effect.promise(() =>
               environment.handler(

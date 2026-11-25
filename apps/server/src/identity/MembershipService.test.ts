@@ -606,6 +606,25 @@ it.effect("sets principal ceiling and suspends principal (owner-only, revoking s
       change: "ceiling",
       template: "client",
     });
+
+    // Owner reactivates principal -> principal + suspended memberships become active, revision bumps.
+    yield* expectFailureTag(
+      service.reactivatePrincipal({ actor: memberActor, principalId: target }),
+      "MembershipForbiddenError",
+      "owner_required",
+    );
+    const reactivated = yield* service.reactivatePrincipal({
+      actor: ownerActor,
+      principalId: target,
+    });
+    assert.strictEqual(reactivated.principal.status, "active");
+    assert.strictEqual(reactivated.principal.accessRevision, 3);
+    assert.strictEqual(reactivated.reactivatedMemberships, 2);
+    assert.isTrue(
+      (yield* memberships.listForPrincipal(target)).every((row) => row.state === "active"),
+    );
+    const reactivateEvents = yield* audit.list({ action: "member.reactivated" });
+    assert.strictEqual(reactivateEvents.length, 1);
   }).pipe(Effect.provide(makeTestLayer())),
 );
 
