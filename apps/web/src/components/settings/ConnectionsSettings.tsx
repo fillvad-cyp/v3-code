@@ -151,6 +151,7 @@ import {
   SavedBackendListRow,
 } from "./SavedEnvironmentRows";
 import { AddEnvironmentDialog } from "./AddEnvironmentDialog";
+import { ApiTokensAccessRow } from "./ApiTokensSettings";
 import { AuditLogAccessRow } from "./AuditLogSettings";
 import { MembersSettings } from "./MembersSettings";
 import { MyAccessSection } from "./MyAccessSettings";
@@ -1455,6 +1456,7 @@ function ConnectionsSettingsContent({
                 }
               />
             ) : null}
+            <ApiTokensAccessRow environmentId={accessEnvironmentId} />
             <AuditLogAccessRow environmentId={accessEnvironmentId} />
             {accessEnvironment ? (
               <details className="group px-3 sm:px-4">

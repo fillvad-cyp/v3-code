@@ -135,11 +135,24 @@ export const ProjectSecret = Schema.Struct({
 });
 export type ProjectSecret = typeof ProjectSecret.Type;
 
+export const DEFAULT_MEMBER_MAX_SESSIONS = 5;
+export const DEFAULT_MEMBER_MAX_TERMINALS = 3;
+export const DEFAULT_MEMBER_MAX_PREVIEW_TABS = 4;
+export const DEFAULT_MEMBER_INVITES_PER_HOUR = 10;
+export const DEFAULT_MEMBER_MAX_API_TOKENS = 10;
+
+export const DEFAULT_PROJECT_MAX_ACTIVE_THREADS = 10;
+export const DEFAULT_PROJECT_MAX_WORKTREES = 5;
+export const DEFAULT_PROJECT_DISK_BYTES = 5 * 1024 * 1024 * 1024;
+export const DEFAULT_PROJECT_ATTACHMENT_BYTES = 200 * 1024 * 1024;
+export const PROJECT_QUOTA_WARNING_RATIO = 0.8;
+
 /** Null leaves the built-in default in place for that limit. */
 export const MemberLimits = Schema.Struct({
   principalId: PrincipalId,
   maxSessions: Schema.NullOr(NonNegativeInt),
   maxTerminals: Schema.NullOr(NonNegativeInt),
+  maxPreviewTabs: Schema.optionalKey(Schema.NullOr(NonNegativeInt)),
   invitesPerHour: Schema.NullOr(NonNegativeInt),
   maxApiTokens: Schema.NullOr(NonNegativeInt),
 });
@@ -154,6 +167,58 @@ export const ProjectQuota = Schema.Struct({
   attachmentBytes: Schema.NullOr(NonNegativeInt),
 });
 export type ProjectQuota = typeof ProjectQuota.Type;
+
+export const ProjectQuotaLimits = Schema.Struct({
+  maxActiveThreads: NonNegativeInt,
+  maxWorktrees: NonNegativeInt,
+  diskBytes: NonNegativeInt,
+  attachmentBytes: NonNegativeInt,
+});
+export type ProjectQuotaLimits = typeof ProjectQuotaLimits.Type;
+
+export const ProjectQuotaResource = Schema.Literals(["active_threads", "worktrees", "disk_bytes"]);
+export type ProjectQuotaResource = typeof ProjectQuotaResource.Type;
+
+export const ProjectQuotaWarning = Schema.Struct({
+  resource: ProjectQuotaResource,
+  level: Schema.Literals(["warning", "exceeded"]),
+  current: NonNegativeInt,
+  limit: NonNegativeInt,
+  ratio: Schema.Number,
+});
+export type ProjectQuotaWarning = typeof ProjectQuotaWarning.Type;
+
+export const ProjectUsageResult = Schema.Struct({
+  projectId: ProjectId,
+  activeThreads: NonNegativeInt,
+  worktrees: NonNegativeInt,
+  diskBytes: NonNegativeInt,
+  sampledAt: Schema.NullOr(IsoDateTime),
+  limits: ProjectQuotaLimits,
+  warnings: Schema.Array(ProjectQuotaWarning),
+});
+export type ProjectUsageResult = typeof ProjectUsageResult.Type;
+
+export class ProjectQuotaExceededError extends Schema.TaggedError<ProjectQuotaExceededError>()(
+  "ProjectQuotaExceededError",
+  {
+    projectId: ProjectId,
+    resource: ProjectQuotaResource,
+    current: NonNegativeInt,
+    limit: NonNegativeInt,
+  },
+) {
+  override get message(): string {
+    switch (this.resource) {
+      case "active_threads":
+        return `Project ${this.projectId} reached its active thread quota (${this.current}/${this.limit}). Archive or delete a thread before creating a new one.`;
+      case "worktrees":
+        return `Project ${this.projectId} reached its worktree quota (${this.current}/${this.limit}). Remove an unused worktree before creating a new one.`;
+      case "disk_bytes":
+        return `Project ${this.projectId} reached its disk quota (${this.current}/${this.limit} bytes). Free project space before creating new threads or worktrees.`;
+    }
+  }
+}
 
 /** The capability a role check names in `project_forbidden`, always `project:<capability>`. */
 export const ProjectCapability = Schema.Literals([
@@ -335,3 +400,39 @@ export const OwnerTransferResult = Schema.Struct({
   adminProjectIds: Schema.Array(ProjectId),
 });
 export type OwnerTransferResult = typeof OwnerTransferResult.Type;
+
+export const ApiTokenBindingInput = Schema.Union([
+  Schema.TaggedStruct("principal", {}),
+  Schema.TaggedStruct("projects", {
+    projects: Schema.Array(BoundProject),
+  }),
+]);
+export type ApiTokenBindingInput = typeof ApiTokenBindingInput.Type;
+
+export const ApiTokenCreateInput = Schema.Struct({
+  /** Owner may issue a token for another principal; omitted defaults to the caller. */
+  principalId: Schema.optionalKey(PrincipalId),
+  scopes: Schema.Array(Schema.String),
+  binding: ApiTokenBindingInput,
+  /** Optional ISO-8601 expiration timestamp; null or omitted means no expiration. */
+  expiresAt: Schema.optionalKey(Schema.NullOr(IsoDateTime)),
+});
+export type ApiTokenCreateInput = typeof ApiTokenCreateInput.Type;
+
+export const ApiTokenCreateResult = Schema.Struct({
+  apiToken: ApiToken,
+  /** Raw bearer token with `t3p_` prefix; shown once on creation. */
+  token: TrimmedNonEmptyString,
+});
+export type ApiTokenCreateResult = typeof ApiTokenCreateResult.Type;
+
+export const ApiTokenListItem = Schema.Struct({
+  ...ApiToken.fields,
+  principalDisplayName: Schema.optionalKey(TrimmedNonEmptyString),
+});
+export type ApiTokenListItem = typeof ApiTokenListItem.Type;
+
+export const ApiTokenRevokeResult = Schema.Struct({
+  revoked: Schema.Boolean,
+});
+export type ApiTokenRevokeResult = typeof ApiTokenRevokeResult.Type;

@@ -1,4 +1,6 @@
 import {
+  type ApiTokenCreateInput,
+  type ApiTokenId,
   AuthAccessReadScope,
   AuthAccessWriteScope,
   type AuthAccessSnapshot,
@@ -406,6 +408,50 @@ export function createAuthEnvironmentAtoms<R, E>(
           }),
       }),
       { permissionAtom: accessReadPermissionAtom },
+    ),
+    listApiTokens: Object.assign(
+      createEnvironmentQueryAtomFamily(runtime, {
+        label: "environment-data:server:auth-list-api-tokens",
+        staleTimeMs: 10_000,
+        execute: (_input: null) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "GET",
+            url: (urls) => urls.listApiTokens({ query: {} }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) => client.listApiTokens({ headers, query: {} }),
+          }),
+      }),
+      { permissionAtom: authenticatedPermissionAtom },
+    ),
+    createApiToken: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:auth-create-api-token",
+        execute: (input: ApiTokenCreateInput) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "POST",
+            url: (urls) => urls.createApiToken(),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) => client.createApiToken({ headers, payload: input }),
+          }),
+      }),
+      { permissionAtom: authenticatedPermissionAtom },
+    ),
+    revokeApiToken: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:auth-revoke-api-token",
+        execute: (input: { readonly id: ApiTokenId }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "DELETE",
+            url: (urls) => urls.revokeApiToken({ params: { id: input.id } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.revokeApiToken({ headers, params: { id: input.id } }),
+          }),
+      }),
+      { permissionAtom: authenticatedPermissionAtom },
     ),
     accessChanges: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:auth-access-changes",

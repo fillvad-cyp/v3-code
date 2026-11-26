@@ -36,6 +36,7 @@ export type SettingsPath =
   | "/settings/worktrees"
   | "/settings/connections"
   | "/settings/access"
+  | "/settings/api-tokens"
   | "/settings/audit"
   | "/settings/roles"
   | "/settings/my-access"
@@ -122,6 +123,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/worktrees": msg("Worktrees"),
   "/settings/connections": msg("Environments"),
   "/settings/access": msg("Sharing & access"),
+  "/settings/api-tokens": msg("API tokens"),
   "/settings/audit": msg("Audit log"),
   "/settings/roles": msg("Roles & permissions"),
   "/settings/my-access": msg("My access"),
@@ -1553,6 +1555,15 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "api-tokens",
+    title: msg("API tokens"),
+    to: "/settings/api-tokens",
+    environmentOnly: true,
+    searchTerms: [
+      msg("personal access token pat bearer api key scopes revoke projects automation"),
+    ],
+  },
+  {
     id: "audit-retention",
     title: msg("Audit retention"),
     to: "/settings/audit",
@@ -1664,6 +1675,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/worktrees": "project-defaults",
   "/settings/connections": "connections",
   "/settings/access": "connections",
+  "/settings/api-tokens": "connections",
   "/settings/audit": "connections",
   "/settings/roles": "connections",
   "/settings/my-access": "connections",

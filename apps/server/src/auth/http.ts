@@ -49,6 +49,7 @@ import { HttpServerRequest, HttpServerResponse } from "effect/http";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ApiTokenService from "../identity/ApiTokenService.ts";
 import * as AuditService from "../identity/AuditService.ts";
 import * as InvitationService from "../identity/InvitationService.ts";
 import * as MembershipService from "../identity/MembershipService.ts";
@@ -323,6 +324,7 @@ export const layer = HttpApiBuilder.group(
     const membershipService = yield* MembershipService.MembershipService;
     const passwords = yield* Passwords.Passwords;
     const auditService = yield* AuditService.AuditService;
+    const apiTokenService = yield* ApiTokenService.ApiTokenService;
     const projectAccess = yield* ProjectAccess.ProjectAccess;
 
     const resolveSessionActor = (session: EnvironmentAuthenticatedPrincipal["Service"]) =>
@@ -385,9 +387,18 @@ export const layer = HttpApiBuilder.group(
           },
         })
         .pipe(
-          Effect.catch((error) =>
+          Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
             failEnvironmentInternal("browser_session_issuance_failed", error),
           ),
+          Effect.catchTags({
+            SessionLimitExceededError: (error) =>
+              Effect.fail(
+                new EnvironmentHttpTooManyRequestsError({
+                  message: error.message,
+                  retryAfterSeconds: error.retryAfterSeconds,
+                }),
+              ),
+          }),
         );
       yield* appendSessionCookie(request, sessions.cookieName, issued.token, issued.expiresAt);
       yield* appendCredentialResponseHeaders;
@@ -1163,9 +1174,18 @@ export const layer = HttpApiBuilder.group(
                 },
               })
               .pipe(
-                Effect.catch((error) =>
+                Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (error) =>
                   failEnvironmentInternal("access_token_issuance_failed", error),
                 ),
+                Effect.catchTags({
+                  SessionLimitExceededError: (error) =>
+                    Effect.fail(
+                      new EnvironmentHttpTooManyRequestsError({
+                        message: error.message,
+                        retryAfterSeconds: error.retryAfterSeconds,
+                      }),
+                    ),
+                }),
               );
             yield* appendSessionCookie(
               request,
@@ -1285,6 +1305,98 @@ export const layer = HttpApiBuilder.group(
               Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
             MembershipNotFoundError: () => failEnvironmentNotFound("principal_not_found"),
             MembershipInternalError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
+      )
+      .handle(
+        "listApiTokens",
+        Effect.fn("environment.auth.listApiTokens")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* EnvironmentAuthenticatedPrincipal;
+            const actor = yield* resolveSessionActor(session);
+            return yield* apiTokenService.listForActor({
+              actor,
+              ...(args.query.principalId === undefined
+                ? {}
+                : { principalId: args.query.principalId }),
+            });
+          },
+          Effect.catchTags({
+            ApiTokenForbiddenError: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+            ApiTokenInternalError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
+      )
+      .handle(
+        "createApiToken",
+        Effect.fn("environment.auth.createApiToken")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* EnvironmentAuthenticatedPrincipal;
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const clientMetadata = deriveAuthClientMetadata({ request });
+            const actor = yield* resolveSessionActor(session);
+            yield* appendCredentialResponseHeaders;
+            return yield* apiTokenService.create({
+              actor,
+              ...(args.payload.principalId === undefined
+                ? {}
+                : { principalId: args.payload.principalId }),
+              scopes: args.payload.scopes,
+              binding: args.payload.binding,
+              ...(args.payload.expiresAt === undefined
+                ? {}
+                : { expiresAt: args.payload.expiresAt }),
+              audit: {
+                sessionId: session.sessionId,
+                ip: clientMetadata.ipAddress ?? null,
+                userAgent: clientMetadata.userAgent ?? null,
+              },
+            });
+          },
+          Effect.catchTags({
+            ApiTokenInvalidInputError: (error) =>
+              Effect.fail(new EnvironmentHttpBadRequestError({ message: error.message })),
+            ApiTokenForbiddenError: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+            ApiTokenNotFoundError: () => failEnvironmentNotFound("principal_not_found"),
+            ApiTokenLimitExceededError: (error) =>
+              Effect.fail(
+                new EnvironmentHttpTooManyRequestsError({
+                  message: error.message,
+                  retryAfterSeconds: 60,
+                }),
+              ),
+            ApiTokenInternalError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
+      )
+      .handle(
+        "revokeApiToken",
+        Effect.fn("environment.auth.revokeApiToken")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* EnvironmentAuthenticatedPrincipal;
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const clientMetadata = deriveAuthClientMetadata({ request });
+            const actor = yield* resolveSessionActor(session);
+            const revoked = yield* apiTokenService.revoke({
+              actor,
+              id: args.params.id,
+              audit: {
+                sessionId: session.sessionId,
+                ip: clientMetadata.ipAddress ?? null,
+                userAgent: clientMetadata.userAgent ?? null,
+              },
+            });
+            return { revoked };
+          },
+          Effect.catchTags({
+            ApiTokenForbiddenError: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+            ApiTokenInternalError: (error) => failEnvironmentInternal("internal_error", error),
           }),
         ),
       );

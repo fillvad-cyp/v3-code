@@ -56,6 +56,7 @@ import { Route as ChatSettingsBetaRouteImport } from './routes/_chat.settings.be
 import { Route as ChatSettingsAuditRouteImport } from './routes/_chat.settings.audit'
 import { Route as ChatSettingsArchivedRouteImport } from './routes/_chat.settings.archived'
 import { Route as ChatSettingsAppearanceRouteImport } from './routes/_chat.settings.appearance'
+import { Route as ChatSettingsApiTokensRouteImport } from './routes/_chat.settings.api-tokens'
 import { Route as ChatSettingsAccessRouteImport } from './routes/_chat.settings.access'
 import { Route as ChatSettingsAboutRouteImport } from './routes/_chat.settings.about'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
@@ -301,6 +302,11 @@ const ChatSettingsAppearanceRoute = ChatSettingsAppearanceRouteImport.update({
   path: '/appearance',
   getParentRoute: () => ChatSettingsRoute,
 } as any)
+const ChatSettingsApiTokensRoute = ChatSettingsApiTokensRouteImport.update({
+  id: '/api-tokens',
+  path: '/api-tokens',
+  getParentRoute: () => ChatSettingsRoute,
+} as any)
 const ChatSettingsAccessRoute = ChatSettingsAccessRouteImport.update({
   id: '/access',
   path: '/access',
@@ -352,6 +358,7 @@ export interface FileRoutesByFullPath {
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/settings/about': typeof ChatSettingsAboutRoute
   '/settings/access': typeof ChatSettingsAccessRoute
+  '/settings/api-tokens': typeof ChatSettingsApiTokensRoute
   '/settings/appearance': typeof ChatSettingsAppearanceRoute
   '/settings/archived': typeof ChatSettingsArchivedRoute
   '/settings/audit': typeof ChatSettingsAuditRoute
@@ -405,6 +412,7 @@ export interface FileRoutesByTo {
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/settings/about': typeof ChatSettingsAboutRoute
   '/settings/access': typeof ChatSettingsAccessRoute
+  '/settings/api-tokens': typeof ChatSettingsApiTokensRoute
   '/settings/appearance': typeof ChatSettingsAppearanceRoute
   '/settings/archived': typeof ChatSettingsArchivedRoute
   '/settings/audit': typeof ChatSettingsAuditRoute
@@ -460,6 +468,7 @@ export interface FileRoutesById {
   '/_chat/draft/$draftId': typeof ChatDraftDraftIdRoute
   '/_chat/settings/about': typeof ChatSettingsAboutRoute
   '/_chat/settings/access': typeof ChatSettingsAccessRoute
+  '/_chat/settings/api-tokens': typeof ChatSettingsApiTokensRoute
   '/_chat/settings/appearance': typeof ChatSettingsAppearanceRoute
   '/_chat/settings/archived': typeof ChatSettingsArchivedRoute
   '/_chat/settings/audit': typeof ChatSettingsAuditRoute
@@ -515,6 +524,7 @@ export interface FileRouteTypes {
     | '/draft/$draftId'
     | '/settings/about'
     | '/settings/access'
+    | '/settings/api-tokens'
     | '/settings/appearance'
     | '/settings/archived'
     | '/settings/audit'
@@ -568,6 +578,7 @@ export interface FileRouteTypes {
     | '/draft/$draftId'
     | '/settings/about'
     | '/settings/access'
+    | '/settings/api-tokens'
     | '/settings/appearance'
     | '/settings/archived'
     | '/settings/audit'
@@ -622,6 +633,7 @@ export interface FileRouteTypes {
     | '/_chat/draft/$draftId'
     | '/_chat/settings/about'
     | '/_chat/settings/access'
+    | '/_chat/settings/api-tokens'
     | '/_chat/settings/appearance'
     | '/_chat/settings/archived'
     | '/_chat/settings/audit'
@@ -1001,6 +1013,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatSettingsAppearanceRouteImport
       parentRoute: typeof ChatSettingsRoute
     }
+    '/_chat/settings/api-tokens': {
+      id: '/_chat/settings/api-tokens'
+      path: '/api-tokens'
+      fullPath: '/settings/api-tokens'
+      preLoaderRoute: typeof ChatSettingsApiTokensRouteImport
+      parentRoute: typeof ChatSettingsRoute
+    }
     '/_chat/settings/access': {
       id: '/_chat/settings/access'
       path: '/access'
@@ -1042,6 +1061,7 @@ declare module '@tanstack/react-router' {
 interface ChatSettingsRouteChildren {
   ChatSettingsAboutRoute: typeof ChatSettingsAboutRoute
   ChatSettingsAccessRoute: typeof ChatSettingsAccessRoute
+  ChatSettingsApiTokensRoute: typeof ChatSettingsApiTokensRoute
   ChatSettingsAppearanceRoute: typeof ChatSettingsAppearanceRoute
   ChatSettingsArchivedRoute: typeof ChatSettingsArchivedRoute
   ChatSettingsAuditRoute: typeof ChatSettingsAuditRoute
@@ -1075,6 +1095,7 @@ interface ChatSettingsRouteChildren {
 const ChatSettingsRouteChildren: ChatSettingsRouteChildren = {
   ChatSettingsAboutRoute: ChatSettingsAboutRoute,
   ChatSettingsAccessRoute: ChatSettingsAccessRoute,
+  ChatSettingsApiTokensRoute: ChatSettingsApiTokensRoute,
   ChatSettingsAppearanceRoute: ChatSettingsAppearanceRoute,
   ChatSettingsArchivedRoute: ChatSettingsArchivedRoute,
   ChatSettingsAuditRoute: ChatSettingsAuditRoute,

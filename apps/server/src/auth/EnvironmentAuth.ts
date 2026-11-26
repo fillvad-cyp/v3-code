@@ -1,6 +1,7 @@
 import {
   AuthAccessTokenType,
   AuthAccessWriteScope,
+  AuthEnvironmentScope,
   AuthMcpClientAccess,
   AuthOrchestrationOperateScope,
   AuthAdministrativeClientScopes,
@@ -11,11 +12,11 @@ import {
   type AuthClientSession,
   type AuthConnectDevice,
   type AuthCreatePairingCredentialInput,
-  type AuthEnvironmentScope,
   type AuthPairingLink,
   type AuthPairingCredentialResult,
-  type AuthSessionId,
+  AuthSessionId,
   type AuthSessionState,
+  type BoundProject,
   type PrincipalId,
   type SessionBinding,
   authScopeResponse,
@@ -25,9 +26,14 @@ import {
   type AuthWebSocketTicketUse,
   DpopFailureReason,
   type DpopFailureReason as DpopFailureReasonType,
+  capabilitiesForRole,
   highestProjectRole,
+  intersectScopes,
   mcpClientScopes,
   type ProjectRole,
+  roleAtLeast,
+  roleHasCapability,
+  roleScopes,
 } from "@t3tools/contracts";
 import { isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
@@ -48,11 +54,14 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerConfig from "../config.ts";
 import * as EnvironmentAuthPolicy from "./EnvironmentAuthPolicy.ts";
 import * as PairingGrantStore from "./PairingGrantStore.ts";
+import * as PayloadSigner from "./PayloadSigner.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
+import { API_TOKEN_SIGNING_SECRET_NAME, isApiTokenFormat } from "../identity/ApiTokenCodes.ts";
+import * as ApiTokens from "../persistence/ApiTokens.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
@@ -624,7 +633,7 @@ export class EnvironmentAuth extends Context.Service<
         readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
         readonly expiresAt: DateTime.Utc;
       },
-      ServerAuthInternalError
+      ServerAuthInternalError | SessionStore.SessionLimitExceededError
     >;
     readonly listSessions: () => Effect.Effect<
       ReadonlyArray<AuthClientSession>,
@@ -712,6 +721,25 @@ type BootstrapExchangeResult = {
 
 const AUTHORIZATION_PREFIX = "Bearer ";
 const DPOP_AUTHORIZATION_PREFIX = "DPoP ";
+const API_TOKEN_LAST_USED_THROTTLE_MS = 60_000;
+const isAuthEnvironmentScope = Schema.is(AuthEnvironmentScope);
+
+function roleContainsRole(granted: ProjectRole, requested: ProjectRole): boolean {
+  return (
+    roleAtLeast(granted, requested) &&
+    capabilitiesForRole(requested).every((capability) => roleHasCapability(granted, capability))
+  );
+}
+
+function narrowProjectRole(boundRole: ProjectRole, liveRole: ProjectRole): ProjectRole {
+  if (roleContainsRole(liveRole, boundRole)) {
+    return boundRole;
+  }
+  if (roleContainsRole(boundRole, liveRole)) {
+    return liveRole;
+  }
+  return "viewer";
+}
 const WebSocketUpgradeQuery = Schema.Struct({
   wsTicket: Schema.optionalKey(Schema.RedactedFromValue(Schema.String)),
   dpop: Schema.optionalKey(Schema.RedactedFromValue(Schema.String)),
@@ -853,6 +881,9 @@ export const make = Effect.gen(function* () {
   const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
   const principalsRepo = yield* Effect.serviceOption(Principals.PrincipalRepository);
   const membershipsRepo = yield* Effect.serviceOption(Memberships.MembershipRepository);
+  const apiTokensRepo = yield* Effect.serviceOption(ApiTokens.ApiTokenRepository);
+  const apiTokenSigner = yield* PayloadSigner.make(API_TOKEN_SIGNING_SECRET_NAME);
+  const apiTokenLastTouchedAt = new Map<string, number>();
   const devAuth = resolveReusableDevAuth(config);
 
   const resolveDescriptor = Option.match(serverSettings, {
@@ -921,6 +952,146 @@ export const make = Effect.gen(function* () {
     ...config.devAllowedOrigins,
   ]);
 
+  const authenticateApiToken = Effect.fn("EnvironmentAuth.authenticateApiToken")(function* (
+    rawToken: string,
+  ): Effect.fn.Return<
+    AuthenticatedSession,
+    ServerAuthInvalidCredentialError | ServerAuthInternalError
+  > {
+    if (Option.isNone(apiTokensRepo) || Option.isNone(principalsRepo)) {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "API token authentication is unavailable.",
+      });
+    }
+    const tokenHmac = yield* apiTokenSigner
+      .sign(rawToken)
+      .pipe(Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })));
+    const maybeToken = yield* apiTokensRepo.value
+      .getByHmac(tokenHmac)
+      .pipe(Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })));
+    if (Option.isNone(maybeToken)) {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "API token was not found.",
+      });
+    }
+    const token = maybeToken.value;
+    if (token.revokedAt !== null) {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "API token has been revoked.",
+      });
+    }
+    const now = yield* DateTime.now;
+    const nowMs = now.epochMilliseconds;
+    if (token.expiresAt !== null && Date.parse(token.expiresAt) <= nowMs) {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "API token has expired.",
+      });
+    }
+    const maybePrincipal = yield* principalsRepo.value
+      .get(token.principalId)
+      .pipe(Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })));
+    if (Option.isNone(maybePrincipal) || maybePrincipal.value.status !== "active") {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "API token principal is not active.",
+      });
+    }
+    const principal = maybePrincipal.value;
+    const rawTokenScopes = token.scopes.filter(isAuthEnvironmentScope);
+
+    let effectiveScopes: ReadonlyArray<AuthEnvironmentScope>;
+    let effectiveBinding: SessionBinding = token.binding;
+
+    if (principal.kind === "owner") {
+      if (token.binding._tag === "projects") {
+        const boundScopeUnion = [
+          ...new Set(token.binding.projects.flatMap((entry) => roleScopes(entry.role))),
+        ];
+        effectiveScopes = intersectScopes(rawTokenScopes, boundScopeUnion);
+      } else {
+        effectiveScopes = rawTokenScopes;
+      }
+    } else {
+      const ceiling = principal.ceiling.filter(isAuthEnvironmentScope);
+      const membershipRows = Option.isSome(membershipsRepo)
+        ? yield* membershipsRepo.value
+            .listForPrincipal(principal.id)
+            .pipe(
+              Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })),
+            )
+        : [];
+      const activeByProject = new Map(
+        membershipRows
+          .filter((row) => row.state === "active")
+          .map((row) => [row.projectId, row.role] as const),
+      );
+      if (token.binding._tag === "projects") {
+        const narrowedProjects: Array<BoundProject> = [];
+        for (const entry of token.binding.projects) {
+          const liveRole = activeByProject.get(entry.projectId);
+          if (liveRole === undefined) {
+            continue;
+          }
+          narrowedProjects.push({
+            projectId: entry.projectId,
+            role: narrowProjectRole(entry.role, liveRole),
+          });
+        }
+        effectiveBinding = { _tag: "projects", projects: narrowedProjects };
+        const boundScopeUnion = [
+          ...new Set(narrowedProjects.flatMap((entry) => roleScopes(entry.role))),
+        ];
+        effectiveScopes = intersectScopes(
+          intersectScopes(rawTokenScopes, ceiling),
+          boundScopeUnion,
+        );
+      } else if (token.binding._tag === "principal") {
+        const activeRoleScopes = [
+          ...new Set([...activeByProject.values()].flatMap((role) => roleScopes(role))),
+        ];
+        effectiveScopes = intersectScopes(
+          intersectScopes(rawTokenScopes, ceiling),
+          activeRoleScopes,
+        );
+      } else {
+        effectiveScopes = intersectScopes(rawTokenScopes, ceiling);
+      }
+    }
+
+    const lastDbTouchMs = token.lastUsedAt === null ? undefined : Date.parse(token.lastUsedAt);
+    const lastMemTouchMs = apiTokenLastTouchedAt.get(token.id);
+    const recentDbTouch =
+      lastDbTouchMs !== undefined &&
+      Number.isFinite(lastDbTouchMs) &&
+      nowMs >= lastDbTouchMs &&
+      nowMs - lastDbTouchMs < API_TOKEN_LAST_USED_THROTTLE_MS;
+    const recentMemTouch =
+      lastMemTouchMs !== undefined &&
+      nowMs >= lastMemTouchMs &&
+      nowMs - lastMemTouchMs < API_TOKEN_LAST_USED_THROTTLE_MS;
+
+    if (!recentDbTouch && !recentMemTouch) {
+      apiTokenLastTouchedAt.set(token.id, nowMs);
+      yield* apiTokensRepo.value.touchLastUsed(token.id, DateTime.formatIso(now)).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Failed to update API token last_used_at.", {
+            tokenId: token.id,
+            cause,
+          }),
+        ),
+      );
+    }
+
+    return {
+      sessionId: AuthSessionId.make(`pat:${token.id}`),
+      subject: `pat:${token.id}`,
+      method: "bearer-access-token",
+      scopes: effectiveScopes,
+      ...(token.expiresAt !== null ? { expiresAt: DateTime.makeUnsafe(token.expiresAt) } : {}),
+      principalId: token.principalId,
+      binding: effectiveBinding,
+    } satisfies AuthenticatedSession;
+  });
+
   const authenticateRequest = (
     request: HttpServerRequest.HttpServerRequest,
   ): Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError> => {
@@ -939,7 +1110,11 @@ export const make = Effect.gen(function* () {
         }),
       );
     }
-    return authenticateToken(credential.token).pipe(
+    const verifyCredential =
+      credential.source === "bearer" && isApiTokenFormat(credential.token)
+        ? authenticateApiToken(credential.token)
+        : authenticateToken(credential.token);
+    return verifyCredential.pipe(
       Effect.flatMap((session) => {
         if (session.proofKeyThumbprint) {
           if (!dpopToken || dpopToken !== credential.token) {
@@ -1509,7 +1684,11 @@ export const make = Effect.gen(function* () {
           scopes: issued.scopes,
           expiresAt: DateTime.toUtc(issued.expiresAt),
         })),
-        Effect.mapError((cause) => new ServerAuthAuthenticatedAccessTokenIssueError({ cause })),
+        Effect.mapError((cause) =>
+          SessionStore.isSessionLimitExceededError(cause)
+            ? cause
+            : new ServerAuthAuthenticatedAccessTokenIssueError({ cause }),
+        ),
         Effect.withSpan("EnvironmentAuth.issuePrincipalSession"),
       );
 

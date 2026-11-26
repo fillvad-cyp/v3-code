@@ -34,6 +34,7 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerHttp from "../http.ts";
+import * as ApiTokenService from "../identity/ApiTokenService.ts";
 import * as AuditService from "../identity/AuditService.ts";
 import * as InvitationService from "../identity/InvitationService.ts";
 import * as MembershipService from "../identity/MembershipService.ts";
@@ -119,6 +120,7 @@ const layerIdentity = Layer.mergeAll(
     Layer.provide(layerIdentityRepositories),
     Layer.provide(ServerSettings.layerTest()),
   ),
+  ApiTokenService.layer.pipe(Layer.provide(layerAccess), Layer.provide(layerIdentityRepositories)),
   layerMembership,
   layerAccess,
   layerIdentityRepositories,

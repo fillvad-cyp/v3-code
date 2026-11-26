@@ -135,7 +135,10 @@ export async function installEnvironmentHttpTest(scenario: EnvironmentHttpTestSc
             .handle("issueRecoveryCode", () => unexpectedEndpoint("auth.issueRecoveryCode"))
             .handle("confirmRecovery", () => unexpectedEndpoint("auth.confirmRecovery"))
             .handle("transferOwnership", () => unexpectedEndpoint("auth.transferOwnership"))
-            .handle("listAuditEvents", () => unexpectedEndpoint("auth.listAuditEvents")),
+            .handle("listAuditEvents", () => unexpectedEndpoint("auth.listAuditEvents"))
+            .handle("listApiTokens", () => unexpectedEndpoint("auth.listApiTokens"))
+            .handle("createApiToken", () => unexpectedEndpoint("auth.createApiToken"))
+            .handle("revokeApiToken", () => unexpectedEndpoint("auth.revokeApiToken")),
         ),
       ]),
       Effect.provideService(EnvironmentAuthenticatedAuth, authenticatedAuth),

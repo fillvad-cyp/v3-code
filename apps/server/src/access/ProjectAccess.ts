@@ -80,13 +80,14 @@ export function canActor(
   projectId: ProjectId | string,
   capability: ProjectCapability,
 ): boolean {
+  if (actor.binding?._tag === "projects") {
+    const role = boundProjectRole(actor.binding, projectId);
+    return role !== undefined && roleHasCapability(role, capability);
+  }
   if (actor.isOwner || passesProjectChecks(actor.binding)) {
     return true;
   }
-  const role =
-    actor.binding?._tag === "projects"
-      ? boundProjectRole(actor.binding, projectId)
-      : actor.roles.get(projectId);
+  const role = actor.roles.get(projectId);
   return role !== undefined && roleHasCapability(role, capability);
 }
 
@@ -108,11 +109,11 @@ export function assertActorCan(
 }
 
 export function accessibleProjectIdsForActor(actor: AccessActor): ReadonlySet<string> | undefined {
-  if (actor.isOwner || passesProjectChecks(actor.binding)) {
-    return undefined;
-  }
   if (actor.binding?._tag === "projects") {
     return boundProjectIds(actor.binding);
+  }
+  if (actor.isOwner || passesProjectChecks(actor.binding)) {
+    return undefined;
   }
   const ids = new Set<string>(actor.roles.keys());
   if (actor.ownedProjectIds !== undefined) {
@@ -219,18 +220,19 @@ const make = Effect.gen(function* () {
       });
     }
 
-    const isOwner = principal.kind === "owner";
+    const isOwner = principal.kind === "owner" && session.binding?._tag !== "projects";
     // The owner principal is ceiling-free even though its migration row stores `[]`.
-    const ceiling = isOwner ? undefined : principal.ceiling.filter(isAuthEnvironmentScope);
+    const ceiling =
+      principal.kind === "owner" ? undefined : principal.ceiling.filter(isAuthEnvironmentScope);
 
     const roles = new Map<ProjectId | string, ProjectRole>();
     let ownedProjectIds: ReadonlySet<string> | undefined;
-    if (!isOwner && !passesProjectChecks(session.binding)) {
-      if (session.binding?._tag === "projects") {
-        for (const entry of session.binding.projects) {
-          roles.set(entry.projectId, entry.role);
-        }
-      } else if (session.binding?._tag === "principal") {
+    if (session.binding?._tag === "projects") {
+      for (const entry of session.binding.projects) {
+        roles.set(entry.projectId, entry.role);
+      }
+    } else if (!isOwner && !passesProjectChecks(session.binding)) {
+      if (session.binding?._tag === "principal") {
         const [rows, ownedRows] = yield* Effect.all([
           memberships.listForPrincipal(principal.id),
           projects.listOwnedByPrincipal(principal.id),

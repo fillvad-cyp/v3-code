@@ -187,7 +187,10 @@ import * as EnvironmentAuthPolicy from "./auth/EnvironmentAuthPolicy.ts";
 import * as ProjectAccess from "./access/ProjectAccess.ts";
 import * as ProjectPaths from "./access/ProjectPaths.ts";
 import * as ResourceResolver from "./access/ResourceResolver.ts";
+import * as ApiTokenService from "./identity/ApiTokenService.ts";
 import * as AuditService from "./identity/AuditService.ts";
+import * as PrincipalLimitsService from "./identity/PrincipalLimitsService.ts";
+import * as ProjectQuotaService from "./project/ProjectQuotaService.ts";
 import * as InvitationService from "./identity/InvitationService.ts";
 import * as MembershipService from "./identity/MembershipService.ts";
 import * as Passwords from "./identity/Passwords.ts";
@@ -644,6 +647,13 @@ const layerAuditService = AuditService.layer.pipe(
 const layerIdentity = Layer.mergeAll(
   layerMembership,
   layerAuditService,
+  PrincipalLimitsService.layer.pipe(Layer.provideMerge(layerIdentityRepositories)),
+  ApiTokenService.layer.pipe(
+    Layer.provideMerge(layerIdentityRepositories),
+    Layer.provide(layerAccess),
+    Layer.provide(layerPersistence),
+    Layer.provide(ServerSecretStore.layer),
+  ),
   Passwords.layer.pipe(
     Layer.provideMerge(layerIdentityRepositories),
     Layer.provide(layerAuth),
@@ -845,6 +855,7 @@ const layerRuntimeCoreDependenciesBase = Layer.mergeAll(
   layerProviderInstallationRefresh,
   ProviderInstallation.layer,
   ReplayMarkers.layer,
+  ProjectQuotaService.layerSampler,
   Layer.effectDiscard(ProjectSettingsOverrideSweep.sweep),
 ).pipe(
   Layer.provideMerge(layerOrchestrationApplication),

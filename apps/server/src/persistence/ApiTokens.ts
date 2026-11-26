@@ -61,12 +61,20 @@ export class ApiTokenRepository extends Context.Service<
   ApiTokenRepository,
   {
     readonly create: (input: CreateApiTokenInput) => Effect.Effect<void, ApiTokenRepositoryError>;
+    readonly getById: (
+      id: ApiTokenId,
+    ) => Effect.Effect<Option.Option<ApiToken>, ApiTokenRepositoryError>;
     readonly getByHmac: (
       tokenHmac: string,
     ) => Effect.Effect<Option.Option<ApiToken>, ApiTokenRepositoryError>;
     readonly listForPrincipal: (
       principalId: PrincipalId,
     ) => Effect.Effect<ReadonlyArray<ApiToken>, ApiTokenRepositoryError>;
+    readonly countActiveForPrincipal: (
+      principalId: PrincipalId,
+      nowMs: number,
+    ) => Effect.Effect<number, ApiTokenRepositoryError>;
+    readonly listAll: Effect.Effect<ReadonlyArray<ApiToken>, ApiTokenRepositoryError>;
     readonly touchLastUsed: (
       id: ApiTokenId,
       at: EpochMillis,
@@ -112,6 +120,12 @@ const make = Effect.gen(function* () {
       `,
   });
 
+  const getRowById = SqlSchema.findOneOption({
+    Request: ApiTokenId,
+    Result: ApiTokenRow,
+    execute: (id) => sql`${selectRow} WHERE id = ${id}`,
+  });
+
   const getRowByHmac = SqlSchema.findOneOption({
     Request: Schema.String,
     Result: ApiTokenRow,
@@ -123,6 +137,25 @@ const make = Effect.gen(function* () {
     Result: ApiTokenRow,
     execute: (principalId) =>
       sql`${selectRow} WHERE principal_id = ${principalId} ORDER BY created_at DESC, id DESC`,
+  });
+
+  const countActiveRowsForPrincipal = SqlSchema.findOne({
+    Request: Schema.Struct({ principalId: PrincipalId, nowMs: Schema.Number }),
+    Result: Schema.Struct({ count: Schema.Number }),
+    execute: ({ principalId, nowMs }) =>
+      sql`
+        SELECT COUNT(*) AS "count"
+        FROM api_tokens
+        WHERE principal_id = ${principalId}
+          AND revoked_at IS NULL
+          AND (expires_at IS NULL OR expires_at > ${nowMs})
+      `,
+  });
+
+  const listAllRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ApiTokenRow,
+    execute: () => sql`${selectRow} ORDER BY created_at DESC, id DESC`,
   });
 
   const touchRow = SqlSchema.findAll({
@@ -164,6 +197,12 @@ const make = Effect.gen(function* () {
         Effect.mapError(toSqlOrDecodeError("createApiToken", "CreateApiTokenInput")),
       ),
     ),
+    getById: Effect.fn("ApiTokenRepository.getById")((id) =>
+      getRowById(id).pipe(
+        Effect.mapError(toSqlOrDecodeError("getApiTokenById", "ApiToken")),
+        Effect.map(Option.map(toToken)),
+      ),
+    ),
     getByHmac: Effect.fn("ApiTokenRepository.getByHmac")((tokenHmac) =>
       getRowByHmac(tokenHmac).pipe(
         Effect.mapError(toSqlOrDecodeError("getApiTokenByHmac", "ApiToken")),
@@ -175,6 +214,17 @@ const make = Effect.gen(function* () {
         Effect.mapError(toSqlOrDecodeError("listPrincipalApiTokens", "ApiToken")),
         Effect.map((rows) => rows.map(toToken)),
       ),
+    ),
+    countActiveForPrincipal: Effect.fn("ApiTokenRepository.countActiveForPrincipal")(
+      (principalId, nowMs) =>
+        countActiveRowsForPrincipal({ principalId, nowMs }).pipe(
+          Effect.mapError(toSqlOrDecodeError("countActivePrincipalApiTokens", "ApiToken")),
+          Effect.map((row) => row.count),
+        ),
+    ),
+    listAll: listAllRows(undefined).pipe(
+      Effect.mapError(toSqlOrDecodeError("listAllApiTokens", "ApiToken")),
+      Effect.map((rows) => rows.map(toToken)),
     ),
     touchLastUsed: Effect.fn("ApiTokenRepository.touchLastUsed")((id, at) =>
       touchRow({ id, at }).pipe(

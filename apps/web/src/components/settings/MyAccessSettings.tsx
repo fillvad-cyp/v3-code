@@ -280,6 +280,9 @@ function MyAccessSectionContent({
           <T>Password</T>
         </Button>
       ) : null}
+      <Button size="xs" variant="outline" render={<Link to="/settings/api-tokens" />}>
+        <T>API tokens</T>
+      </Button>
       {accessState.canIssueLoginCode ? (
         <Button
           size="xs"

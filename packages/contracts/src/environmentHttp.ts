@@ -49,6 +49,7 @@ import {
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
 } from "./environment.ts";
 import {
+  ApiTokenId,
   DpopFailureReason,
   AuthSessionId,
   InvitationId,
@@ -59,6 +60,10 @@ import {
 } from "./baseSchemas.ts";
 import { ListAuditEventsQuery, ListAuditEventsResult } from "./audit.ts";
 import {
+  ApiTokenCreateInput,
+  ApiTokenCreateResult,
+  ApiTokenListItem,
+  ApiTokenRevokeResult,
   Invitation,
   InvitationAcceptInput,
   InvitationCreateInput,
@@ -74,6 +79,7 @@ import {
   PasswordLoginInput,
   PasswordSetInput,
   PasswordSetResult,
+  ProjectUsageResult,
   RecoveryConfirmInput,
   RecoveryConfirmResult,
   RecoveryIssueInput,
@@ -408,12 +414,16 @@ export class EnvironmentHttpTooManyRequestsError extends Schema.TaggedError<Envi
   "EnvironmentHttpTooManyRequestsError",
   {
     message: Schema.String,
+    retryAfterSeconds: Schema.optionalKey(Schema.Int),
   },
   { httpApiStatus: 429 },
 ) {
   [HttpServerRespondable.symbol]() {
     return HttpServerResponse.schemaJson(EnvironmentHttpTooManyRequestsError)(this, {
       status: 429,
+      ...(this.retryAfterSeconds === undefined
+        ? {}
+        : { headers: { "Retry-After": String(this.retryAfterSeconds) } }),
     });
   }
 }
@@ -461,6 +471,7 @@ const EnvironmentSessionRevokeErrors = [
 const EnvironmentInvitationAcceptErrors = [
   EnvironmentHttpBadRequestError,
   EnvironmentHttpConflictError,
+  EnvironmentHttpTooManyRequestsError,
   EnvironmentInternalError,
 ] as const;
 const EnvironmentInvitationManageErrors = [
@@ -519,6 +530,17 @@ const EnvironmentAuditListErrors = [
   EnvironmentScopeRequiredError,
   EnvironmentInternalError,
 ] as const;
+const EnvironmentApiTokenCreateErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentHttpTooManyRequestsError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentApiTokenManageErrors = [
+  EnvironmentHttpForbiddenError,
+  EnvironmentInternalError,
+] as const;
 const EnvironmentProjectSnapshotErrors = [
   EnvironmentAuthInvalidError,
   EnvironmentScopeRequiredError,
@@ -540,6 +562,13 @@ const EnvironmentProjectMutationErrors = [
   EnvironmentHttpForbiddenError,
   EnvironmentRequestInvalidError,
   EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentProjectUsageErrors = [
+  EnvironmentAuthInvalidError,
+  EnvironmentScopeRequiredError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentResourceNotFoundError,
   EnvironmentInternalError,
 ] as const;
 
@@ -926,6 +955,30 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       success: ListAuditEventsResult,
       error: EnvironmentAuditListErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listApiTokens", "/api/tokens", {
+      headers: OptionalBearerHeaders,
+      query: Schema.Struct({ principalId: Schema.optionalKey(PrincipalId) }),
+      success: Schema.Array(ApiTokenListItem),
+      error: EnvironmentApiTokenManageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("createApiToken", "/api/tokens", {
+      headers: OptionalBearerHeaders,
+      payload: ApiTokenCreateInput,
+      success: ApiTokenCreateResult,
+      error: EnvironmentApiTokenCreateErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("revokeApiToken", "/api/tokens/:id", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ApiTokenId }),
+      success: ApiTokenRevokeResult,
+      error: EnvironmentApiTokenManageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
 class EnvironmentMcpOAuthHttpApi extends HttpApiGroup.make("mcpOAuth")
@@ -1079,6 +1132,14 @@ class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
       payload: ProjectMutation,
       success: Project,
       error: EnvironmentProjectMutationErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("usage", "/api/projects/:id/usage", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId }),
+      success: ProjectUsageResult,
+      error: EnvironmentProjectUsageErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
