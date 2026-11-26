@@ -2,7 +2,9 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 import {
@@ -101,6 +103,8 @@ export class PrincipalRepository extends Context.Service<
       id: PrincipalId,
       updatedAt: EpochMillis,
     ) => Effect.Effect<number, PrincipalRepositoryError>;
+    readonly getEnvironmentAccessRevision: Effect.Effect<number, PrincipalRepositoryError>;
+    readonly streamEnvironmentAccessRevision: Stream.Stream<number>;
     readonly getCredential: (
       principalId: PrincipalId,
     ) => Effect.Effect<Option.Option<CredentialRecord>, PrincipalRepositoryError>;
@@ -122,6 +126,32 @@ function toSqlOrDecodeError(sqlOperation: string, decodeOperation: string) {
 
 const make = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
+  const revisionChanges = yield* PubSub.unbounded<number>();
+
+  const readEnvironmentRevisionRow = SqlSchema.findOneOption({
+    Request: Schema.Void,
+    Result: Schema.Struct({ revision: Schema.Number }),
+    execute: () => sql`SELECT revision AS "revision" FROM auth_access_revision WHERE id = 1`,
+  });
+
+  const bumpEnvironmentRevisionRow = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: Schema.Struct({ revision: Schema.Number }),
+    execute: () =>
+      sql`
+        INSERT INTO auth_access_revision (id, revision) VALUES (1, 1)
+        ON CONFLICT (id) DO UPDATE SET revision = revision + 1
+        RETURNING revision AS "revision"
+      `,
+  });
+
+  const bumpEnvironmentAccessRevision = bumpEnvironmentRevisionRow(undefined).pipe(
+    Effect.mapError(
+      toSqlOrDecodeError("bumpEnvironmentAccessRevision", "EnvironmentAccessRevision"),
+    ),
+    Effect.map((rows) => rows[0]?.revision ?? 1),
+    Effect.tap((revision) => PubSub.publish(revisionChanges, revision)),
+  );
 
   const selectRow = sql`
     SELECT id AS "id", kind AS "kind", display_name AS "displayName", email AS "email",
@@ -257,12 +287,18 @@ const make = Effect.gen(function* () {
     create: Effect.fn("PrincipalRepository.create")((input) =>
       createRow(input).pipe(
         Effect.mapError(toSqlOrDecodeError("createPrincipal", "CreatePrincipalInput")),
+        Effect.andThen(bumpEnvironmentAccessRevision),
+        Effect.asVoid,
       ),
     ),
     update: Effect.fn("PrincipalRepository.update")((input) =>
       updateRow(input).pipe(
         Effect.mapError(toSqlOrDecodeError("updatePrincipal", "UpdatePrincipalInput")),
-        Effect.map((rows) => rows.length > 0),
+        Effect.flatMap((rows) =>
+          rows.length > 0
+            ? bumpEnvironmentAccessRevision.pipe(Effect.as(true))
+            : Effect.succeed(false),
+        ),
       ),
     ),
     bumpAccessRevision: Effect.fn("PrincipalRepository.bumpAccessRevision")((id, updatedAt) =>
@@ -270,9 +306,23 @@ const make = Effect.gen(function* () {
         Effect.mapError(
           toSqlOrDecodeError("bumpPrincipalAccessRevision", "PrincipalAccessRevision"),
         ),
-        Effect.map((rows) => rows[0]?.accessRevision ?? 0),
+        Effect.flatMap((rows) => {
+          const next = rows[0]?.accessRevision;
+          return next === undefined
+            ? Effect.succeed(0)
+            : bumpEnvironmentAccessRevision.pipe(Effect.as(next));
+        }),
       ),
     ),
+    getEnvironmentAccessRevision: readEnvironmentRevisionRow(undefined).pipe(
+      Effect.mapError(
+        toSqlOrDecodeError("getEnvironmentAccessRevision", "EnvironmentAccessRevision"),
+      ),
+      Effect.map((row) => (Option.isSome(row) ? row.value.revision : 0)),
+    ),
+    get streamEnvironmentAccessRevision() {
+      return Stream.fromPubSub(revisionChanges);
+    },
     getCredential: Effect.fn("PrincipalRepository.getCredential")((principalId) =>
       getCredentialRow(principalId).pipe(
         Effect.mapError(toSqlOrDecodeError("getPrincipalCredential", "PrincipalCredential")),

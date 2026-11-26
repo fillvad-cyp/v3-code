@@ -15,6 +15,7 @@ import { T, useGT, useMessages } from "gt-react";
 
 import { m as resolveMessage } from "../../i18n/messages";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
+import { useSyncAccessRevision } from "../../state/accessRevision";
 import { authEnvironment } from "../../state/auth";
 import { useProjects } from "../../state/entities";
 import { useEnvironment } from "../../state/environments";
@@ -52,6 +53,7 @@ import {
   MEMBERSHIP_STATE_LABELS,
   PRINCIPAL_STATUS_LABELS,
   PROJECT_ROLE_LABELS,
+  supportsMembersCapability,
 } from "./MembersSettings.logic";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
@@ -85,8 +87,11 @@ function MembersSettingsContent({ environmentId }: { readonly environmentId: Env
     environmentProjects.map((project) => [project.id, project.label]),
   );
 
+  const membersSupported = supportsMembersCapability(
+    environment?.serverConfig?.environment.capabilities,
+  );
   const currentMultiUser = environment?.serverConfig?.settings.multiUser;
-  const nextMultiUserValue = !(currentMultiUser ?? session.data?.auth.authMode === "multi-user");
+  const nextMultiUserValue = !(currentMultiUser ?? membersSupported);
   const canUpdateMultiUserSetting = useAtomValue(
     serverEnvironment.updateSettings.permissionAtom(environmentId, {
       patch: { multiUser: nextMultiUserValue },
@@ -95,6 +100,7 @@ function MembersSettingsContent({ environmentId }: { readonly environmentId: Env
   const gate = deriveEnvironmentMembersGate({
     session: session.data,
     canUpdateMultiUserSetting,
+    membersSupported,
     settingsMultiUser: currentMultiUser,
   });
 
@@ -104,6 +110,8 @@ function MembersSettingsContent({ environmentId }: { readonly environmentId: Env
   const canCreateInvitation = useAtomValue(
     authEnvironment.createInvitation.permissionAtom(environmentId),
   );
+
+  useSyncAccessRevision(environmentId, gate.visible && canReadMembers);
 
   const membersQuery = useEnvironmentQuery(
     gate.visible && canReadMembers

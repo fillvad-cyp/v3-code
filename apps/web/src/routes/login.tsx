@@ -7,16 +7,26 @@ import { LoginRouteSurface } from "../components/auth/LoginRouteSurface";
 import { connectLoginCode } from "../connection/onboarding";
 import { submitMemberLoginCode } from "../environments/primary";
 import { m } from "../i18n/messages";
+import { isPopoutRoutePathname } from "../lib/threadPopout";
 import { useAtomCommand } from "../state/use-atom-command";
 
 interface LoginRouteSearch {
   readonly host?: string;
   readonly environmentId?: EnvironmentId;
   readonly label?: string;
+  readonly redirect?: string;
 }
 
 function parseOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function parseSafePopoutRedirect(value: unknown): string | undefined {
+  const raw = parseOptionalString(value);
+  if (!raw || raw.startsWith("//") || !isPopoutRoutePathname(raw.split("?")[0] ?? "")) {
+    return undefined;
+  }
+  return raw;
 }
 
 export const Route = createFileRoute("/login")({
@@ -24,10 +34,12 @@ export const Route = createFileRoute("/login")({
     const host = parseOptionalString(search.host);
     const environmentId = parseOptionalString(search.environmentId);
     const label = parseOptionalString(search.label);
+    const redirectTarget = parseSafePopoutRedirect(search.redirect);
     return {
       ...(host !== undefined ? { host } : {}),
       ...(environmentId !== undefined ? { environmentId: EnvironmentId.make(environmentId) } : {}),
       ...(label !== undefined ? { label } : {}),
+      ...(redirectTarget !== undefined ? { redirect: redirectTarget } : {}),
     };
   },
   beforeLoad: async ({ context, search }) => {
@@ -84,7 +96,7 @@ function LoginRouteView() {
       return;
     }
     // Recreate the connection so WebSocket and cached scopes use the new member session.
-    router.history.replace("/");
+    router.history.replace(search.redirect ?? "/");
     router.history.flush();
     window.location.reload();
   };

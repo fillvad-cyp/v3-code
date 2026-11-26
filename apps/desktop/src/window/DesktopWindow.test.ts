@@ -1877,6 +1877,20 @@ describe("DesktopWindow", () => {
         });
         assert.isTrue(fourthOpen);
         assert.equal(yield* Ref.get(createCount), 3);
+
+        assert.isFalse(
+          yield* desktopWindow.openThreadPopout({ routePath: "/popout/thread/..?env=local" }),
+        );
+        const fifthOpen = yield* desktopWindow.openThreadPopout({
+          routePath: "/popout/thread/thread-99?env=local",
+          title: "Lightweight popout",
+        });
+        assert.isTrue(fifthOpen);
+        assert.equal(yield* Ref.get(createCount), 4);
+        assert.equal(
+          popoutWindow.loadURL.mock.calls.at(-1)?.[0],
+          "v3code-dev://app/#/popout/thread/thread-99?env=local",
+        );
       }).pipe(Effect.provide(layer));
     }),
   );

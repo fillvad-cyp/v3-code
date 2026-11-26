@@ -394,6 +394,16 @@
           document.documentElement.style.backgroundColor = fallbackColor;
           setThemeColor(fallbackColor);
         }
+        try {
+          const isPopoutBoot =
+            /^\/popout(?:\/|$)/.test(window.location.pathname) ||
+            /^#\/popout(?:\/|\?|$)/.test(window.location.hash) ||
+            /(?:^|[?&])popout=1(?:&|#|$)/.test(window.location.search) ||
+            /(?:[?&])popout=1(?:&|#|$)/.test(window.location.hash);
+          if (isPopoutBoot) {
+            document.documentElement.dataset.popoutWindow = "true";
+          }
+        } catch {}
       })();
     </script>
     <style>
@@ -447,6 +457,75 @@
         width: 64px;
         height: 64px;
         object-fit: contain;
+      }
+
+      #boot-popout-skeleton {
+        display: none;
+      }
+
+      html[data-popout-window="true"] #boot-shell {
+        align-items: stretch;
+        justify-content: stretch;
+      }
+
+      html[data-popout-window="true"] #boot-shell-card {
+        display: none;
+      }
+
+      html[data-popout-window="true"] #boot-popout-skeleton {
+        display: flex;
+        flex: 1;
+        flex-direction: column;
+        min-height: 100%;
+        width: 100%;
+      }
+
+      #boot-popout-header {
+        display: flex;
+        align-items: center;
+        height: 52px;
+        padding: 0 20px;
+        border-bottom: 1px solid color-mix(in srgb, currentColor 8%, transparent);
+        font-size: 13px;
+        font-weight: 500;
+      }
+
+      #boot-popout-title {
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
+      #boot-popout-messages {
+        flex: 1;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        width: 100%;
+        max-width: 736px;
+        margin: 0 auto;
+        padding: 24px 20px;
+        box-sizing: border-box;
+      }
+
+      .boot-popout-bar {
+        border-radius: 6px;
+        background: color-mix(in srgb, currentColor 10%, transparent);
+      }
+
+      #boot-popout-composer {
+        width: 100%;
+        max-width: 736px;
+        margin: 0 auto 20px;
+        padding: 0 20px;
+        box-sizing: border-box;
+      }
+
+      #boot-popout-composer-box {
+        height: 76px;
+        border-radius: 12px;
+        border: 1px solid color-mix(in srgb, currentColor 10%, transparent);
+        background: color-mix(in srgb, currentColor 4%, transparent);
       }
 
       /* App CSS locks body and #root scrolling once main loads, so the error screen scrolls itself. */
@@ -693,8 +772,56 @@
         <div id="boot-shell-card" aria-label="V3 Code splash screen">
           <img id="boot-shell-logo" src="/apple-touch-icon.png" alt="V3 Code" />
         </div>
+        <div id="boot-popout-skeleton" role="status" aria-busy="true" aria-label="Loading thread">
+          <div id="boot-popout-header">
+            <span id="boot-popout-title"></span>
+          </div>
+          <div id="boot-popout-messages" aria-hidden="true">
+            <div class="boot-popout-bar" style="height: 14px; width: 42%"></div>
+            <div class="boot-popout-bar" style="height: 14px; width: 78%"></div>
+            <div class="boot-popout-bar" style="height: 14px; width: 64%"></div>
+          </div>
+          <div id="boot-popout-composer" aria-hidden="true">
+            <div id="boot-popout-composer-box"></div>
+          </div>
+        </div>
       </div>
     </div>
+    <script>
+      (() => {
+        if (document.documentElement.dataset.popoutWindow !== "true") return;
+        try {
+          const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+          const rawPath = hash.startsWith("/")
+            ? hash
+            : window.location.pathname + window.location.search;
+          const qIndex = rawPath.indexOf("?");
+          const pathname = qIndex === -1 ? rawPath : rawPath.slice(0, qIndex);
+          const query = qIndex === -1 ? "" : rawPath.slice(qIndex + 1);
+          const match = /^\/popout\/thread\/([^/]+)/.exec(pathname);
+          const threadId = match ? decodeURIComponent(match[1]) : null;
+          const envId = query ? new URLSearchParams(query).get("env") : null;
+          const raw = window.localStorage.getItem("v3code:popout-thread-cache:v1");
+          if (!raw || !threadId) return;
+          const cache = JSON.parse(raw);
+          if (!cache || typeof cache !== "object") return;
+          let entry = null;
+          for (const candidate of Object.values(cache)) {
+            if (!candidate || candidate.threadId !== threadId) continue;
+            if (envId && candidate.environmentId === envId) {
+              entry = candidate;
+              break;
+            }
+            if (!entry || candidate.updatedAt > entry.updatedAt) entry = candidate;
+          }
+          if (entry && typeof entry.title === "string" && entry.title.trim()) {
+            const titleEl = document.getElementById("boot-popout-title");
+            if (titleEl) titleEl.textContent = entry.title;
+            document.title = entry.title;
+          }
+        } catch {}
+      })();
+    </script>
     <script type="module" src="/src/bootstrap.ts"></script>
   </body>
 </html>

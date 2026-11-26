@@ -74,6 +74,8 @@ export interface SettingsSearchItem {
   readonly peerLinksOnly?: boolean;
   readonly fastWorktreeCheckoutOnly?: boolean;
   readonly agentFeedbackOnly?: boolean;
+  readonly membersOnly?: boolean;
+  readonly auditOnly?: boolean;
   readonly textGeneratorsOnly?: boolean;
   readonly secondary?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
@@ -91,6 +93,8 @@ export interface SettingsSearchAvailability {
   readonly hasPeerLinkHost?: boolean;
   readonly hasFastWorktreeCheckoutEnvironment?: boolean;
   readonly hasAgentFeedbackEnvironment?: boolean;
+  readonly hasMembersEnvironment?: boolean;
+  readonly hasAuditEnvironment?: boolean;
   /** An environment without a provider allow-list, which hides text generators. */
   readonly hasTextGeneratorsEnvironment?: boolean;
   readonly hasPrimaryEnvironment?: boolean;
@@ -320,6 +324,7 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: msg("Project members"),
     to: "/settings/projects",
     scope: "project",
+    membersOnly: true,
     searchTerms: [msg("invite role admin developer viewer suspend remove login code team access")],
   },
   {
@@ -1520,12 +1525,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     id: "multi-user-mode",
     title: msg("Multi-user mode"),
     to: "/settings/access",
+    membersOnly: true,
     searchTerms: [msg("members team multiuser invite login code ceiling owner host access roles")],
   },
   {
     id: "environment-members",
     title: msg("Members"),
     to: "/settings/access",
+    membersOnly: true,
     searchTerms: [
       msg("team staff ceiling invite login code suspend remove owner host access roles"),
     ],
@@ -1760,6 +1767,8 @@ export function filterAvailableSettingsSearchItems(
       (!item.fastWorktreeCheckoutOnly ||
         availability.hasFastWorktreeCheckoutEnvironment === true) &&
       (!item.agentFeedbackOnly || availability.hasAgentFeedbackEnvironment === true) &&
+      (!item.membersOnly || availability.hasMembersEnvironment === true) &&
+      (!item.auditOnly || availability.hasAuditEnvironment === true) &&
       (!item.textGeneratorsOnly || availability.hasTextGeneratorsEnvironment === true) &&
       (!item.secretProvidersOnly || availability.hasSecretProvidersEnvironment === true),
   );

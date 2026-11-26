@@ -17,7 +17,9 @@ import { T, useGT, useMessages } from "gt-react";
 import { m as resolveMessage } from "../../i18n/messages";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import type { SidebarProjectGroupMember } from "../../sidebarProjectGrouping";
+import { useSyncAccessRevision } from "../../state/accessRevision";
 import { authEnvironment } from "../../state/auth";
+import { useEnvironment, useEnvironments } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { useEnvironmentSessionState } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -45,6 +47,7 @@ import {
   MEMBERSHIP_STATE_LABELS,
   PROJECT_ROLE_LABELS,
   projectMembersForProject,
+  supportsMembersCapability,
   type ProjectMemberEntry,
 } from "./MembersSettings.logic";
 import { SettingsSection } from "./settingsLayout";
@@ -76,14 +79,21 @@ export function ProjectMembersCard({
 }: ProjectMembersCardProps) {
   const gt = useGT();
   const m = useMessages();
+  const environment = useEnvironment(environmentId);
+  const membersSupported = supportsMembersCapability(
+    environment?.serverConfig?.environment.capabilities,
+  );
   const session = useEnvironmentSessionState(environmentId);
   const canReadMembers = useAtomValue(authEnvironment.listMembers.permissionAtom(environmentId));
   const canUpdateMembers = useAtomValue(authEnvironment.updateMember.permissionAtom(environmentId));
   const canInviteCommand = useAtomValue(
     authEnvironment.createInvitation.permissionAtom(environmentId),
   );
+  useSyncAccessRevision(environmentId, membersSupported && canReadMembers);
   const membersQuery = useEnvironmentQuery(
-    canReadMembers ? authEnvironment.listMembers({ environmentId, input: null }) : null,
+    membersSupported && canReadMembers
+      ? authEnvironment.listMembers({ environmentId, input: null })
+      : null,
     m,
   );
   const updateMember = useAtomCommand(authEnvironment.updateMember, { reportFailure: false });
@@ -100,6 +110,10 @@ export function ProjectMembersCard({
   const [loginCodeResult, setLoginCodeResult] = useState<MemberLoginCodeResult | null>(null);
   const [loginCodeLoading, setLoginCodeLoading] = useState(false);
   const [loginCodeError, setLoginCodeError] = useState<string | null>(null);
+
+  if (!membersSupported) {
+    return null;
+  }
 
   const rawMembers = membersQuery.data ?? EMPTY_MEMBERS;
   const projectMembers = projectMembersForProject(rawMembers, projectId);
@@ -465,11 +479,22 @@ export function ProjectMembersSettings({
 }: {
   readonly members: ReadonlyArray<SidebarProjectGroupMember>;
 }) {
-  if (members.length === 0) return null;
-  const showEnvironmentSubtitle = members.length > 1;
+  const { environments } = useEnvironments();
+  const supportedEnvironmentIds = new Set(
+    environments
+      .filter((environment) =>
+        supportsMembersCapability(environment.serverConfig?.environment.capabilities),
+      )
+      .map((environment) => environment.environmentId),
+  );
+  const supportedMembers = members.filter((member) =>
+    supportedEnvironmentIds.has(member.environmentId),
+  );
+  if (supportedMembers.length === 0) return null;
+  const showEnvironmentSubtitle = supportedMembers.length > 1;
   return (
     <>
-      {members.map((member, index) => (
+      {supportedMembers.map((member, index) => (
         <ProjectMembersCard
           key={member.physicalProjectKey}
           environmentId={member.environmentId}

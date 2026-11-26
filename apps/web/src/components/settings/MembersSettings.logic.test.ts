@@ -24,6 +24,8 @@ import {
   inferCeilingTemplate,
   isSessionOwner,
   projectMembersForProject,
+  supportsAuditCapability,
+  supportsMembersCapability,
   validateInviteForm,
 } from "./MembersSettings.logic";
 
@@ -234,17 +236,41 @@ describe("grantableRolesForActor & deriveProjectMemberPermissions", () => {
 });
 
 describe("deriveEnvironmentMembersGate", () => {
-  it("shows environment settings only to owners and reflects authMode and permissionAtom", () => {
+  it("gates environment settings by capabilities.members rather than authMode", () => {
+    expect(supportsMembersCapability(undefined)).toBe(false);
+    expect(supportsMembersCapability({ repositoryIdentity: true })).toBe(false);
+    expect(supportsMembersCapability({ repositoryIdentity: true, members: false })).toBe(false);
+    expect(supportsMembersCapability({ repositoryIdentity: true, members: true })).toBe(true);
+    expect(supportsAuditCapability(undefined)).toBe(false);
+    expect(supportsAuditCapability({ repositoryIdentity: true, audit: false })).toBe(false);
+    expect(supportsAuditCapability({ repositoryIdentity: true, audit: true })).toBe(true);
+
+    // Flag off hides the screen even when session.auth.authMode says "multi-user".
+    expect(
+      deriveEnvironmentMembersGate({
+        session: ownerSession("multi-user"),
+        canUpdateMultiUserSetting: true,
+        membersSupported: false,
+        settingsMultiUser: true,
+      }),
+    ).toEqual({
+      visible: false,
+      isOwner: true,
+      multiUserEnabled: true,
+      canToggleMultiUser: false,
+    });
+
+    // Flag on shows the screen for owner even when authMode is single-owner.
     expect(
       deriveEnvironmentMembersGate({
         session: ownerSession("single-owner"),
         canUpdateMultiUserSetting: true,
+        membersSupported: true,
         settingsMultiUser: false,
       }),
     ).toEqual({
       visible: true,
       isOwner: true,
-      authMode: "single-owner",
       multiUserEnabled: false,
       canToggleMultiUser: true,
     });
@@ -253,12 +279,12 @@ describe("deriveEnvironmentMembersGate", () => {
       deriveEnvironmentMembersGate({
         session: ownerSession("multi-user"),
         canUpdateMultiUserSetting: false,
+        membersSupported: true,
         settingsMultiUser: true,
       }),
     ).toEqual({
       visible: true,
       isOwner: true,
-      authMode: "multi-user",
       multiUserEnabled: true,
       canToggleMultiUser: false,
     });
@@ -270,6 +296,7 @@ describe("deriveEnvironmentMembersGate", () => {
           AuthAccessWriteScope,
         ]),
         canUpdateMultiUserSetting: true,
+        membersSupported: true,
         settingsMultiUser: true,
       }).visible,
     ).toBe(false);

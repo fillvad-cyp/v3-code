@@ -268,6 +268,7 @@ import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProjectAccess from "./access/ProjectAccess.ts";
 import * as ProjectPaths from "./access/ProjectPaths.ts";
 import * as ResourceResolver from "./access/ResourceResolver.ts";
+import * as Principals from "./persistence/Principals.ts";
 import { requiredScopeForDeviceList, rpcAuthorizationError } from "./auth/RpcAuthorization.ts";
 import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
 import { RpcInstrumentation, rpcInstrumentationLayer } from "./observability/RpcInstrumentation.ts";
@@ -1785,6 +1786,7 @@ export const layerWsRpc = (
       const openedPullRequestRead = Effect.provideService(SourceControlRateLimit.Interactive, true);
       const bootstrapCredentials = yield* PairingGrantStore.PairingGrantStore;
       const sessions = yield* SessionStore.SessionStore;
+      const principalsRepo = yield* Effect.serviceOption(Principals.PrincipalRepository);
       const processDiagnostics = yield* ProcessDiagnostics.ProcessDiagnostics;
       const triage = yield* TriageService.TriageService;
       const hostResources = yield* HostResources.HostResources;
@@ -2104,7 +2106,15 @@ export const layerWsRpc = (
           pairingLinks: serverAuth.listPairingLinks(),
           clientSessions: serverAuth.listClientSessions(currentSessionId),
           connectDevices: serverAuth.listConnectDevices(),
+          revision: Option.isSome(principalsRepo)
+            ? principalsRepo.value.getEnvironmentAccessRevision.pipe(
+                Effect.orElseSucceed(() => undefined),
+              )
+            : Effect.undefined,
         }).pipe(
+          Effect.map(({ revision, ...rest }) =>
+            revision === undefined ? rest : { ...rest, revision },
+          ),
           Effect.mapError(
             (error) =>
               new AuthAccessStreamError({
@@ -4540,9 +4550,11 @@ export const layerWsRpc = (
           Stream.unwrap(
             Effect.gen(function* () {
               const liveBuffer = yield* Queue.unbounded<
-                PairingGrantStore.BootstrapCredentialChange | SessionStore.SessionCredentialChange
+                | PairingGrantStore.BootstrapCredentialChange
+                | SessionStore.SessionCredentialChange
+                | { readonly type: "accessRevisionChanged" }
               >();
-              // Each store subscribes only when consumed, so start both before the snapshot read.
+              // Each store subscribes only when consumed, so start all before the snapshot read.
               yield* Effect.forkScoped(
                 Stream.runForEach(bootstrapCredentials.streamChanges, (change) =>
                   Queue.offer(liveBuffer, change),
@@ -4555,6 +4567,14 @@ export const layerWsRpc = (
                 ),
                 { startImmediately: true },
               );
+              if (Option.isSome(principalsRepo)) {
+                yield* Effect.forkScoped(
+                  Stream.runForEach(principalsRepo.value.streamEnvironmentAccessRevision, () =>
+                    Queue.offer(liveBuffer, { type: "accessRevisionChanged" }),
+                  ),
+                  { startImmediately: true },
+                );
+              }
               const initialSnapshot = yield* loadAuthAccessSnapshot();
               const revisionRef = yield* Ref.make(1);
 
@@ -4563,8 +4583,9 @@ export const layerWsRpc = (
                   Stream.mapEffect((change) =>
                     Ref.updateAndGet(revisionRef, (revision) => revision + 1).pipe(
                       Effect.flatMap((revision) =>
-                        // Device trust has no incremental event older clients could decode.
-                        change.type === "connectDevicesChanged"
+                        // Device trust and access revision have no incremental event older clients could decode.
+                        change.type === "connectDevicesChanged" ||
+                        change.type === "accessRevisionChanged"
                           ? loadAuthAccessSnapshot().pipe(
                               Effect.map((payload): AuthAccessStreamEvent => ({
                                 version: 1,

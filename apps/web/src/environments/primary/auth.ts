@@ -28,6 +28,11 @@ import {
 import { PrimaryEnvironmentHttpClient } from "./httpClient";
 import { resolvePrimaryEnvironmentHttpUrl } from "./target";
 import { runPrimaryHttp } from "../../lib/runtime";
+import {
+  clearPersistedPopoutAuthSession,
+  markPersistedPopoutAuthSession,
+  notifyPopoutSignOut,
+} from "../../lib/threadPopout";
 import { msg } from "gt-react";
 import { m } from "../../i18n/messages";
 
@@ -362,6 +367,7 @@ export async function submitServerAuthCredential(credential: string): Promise<vo
   await exchangeBootstrapCredential(trimmedCredential);
   await waitForAuthenticatedSessionAfterBootstrap();
   resolvedAuthenticatedGateState = { status: "authenticated" };
+  markPersistedPopoutAuthSession();
   bootstrapPromise = null;
   explicitPairingRequested = false;
   stripPairingTokenFromUrl();
@@ -385,6 +391,7 @@ export async function submitMemberLoginCode(code: string): Promise<AuthInvitatio
   );
   await waitForAuthenticatedSessionAfterBootstrap();
   resolvedAuthenticatedGateState = { status: "authenticated" };
+  markPersistedPopoutAuthSession();
   bootstrapPromise = null;
   explicitPairingRequested = false;
   return result;
@@ -399,6 +406,7 @@ export async function signOutPrimaryEnvironment(): Promise<void> {
   resolvedAuthenticatedGateState = null;
   bootstrapPromise = null;
   explicitPairingRequested = false;
+  notifyPopoutSignOut();
 }
 
 export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGateState> {
@@ -438,8 +446,13 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
   bootstrapPromise = nextPromise;
   return nextPromise
     .then((result) => {
-      if (bootstrapPromise === nextPromise && result.status === "authenticated") {
-        resolvedAuthenticatedGateState = result;
+      if (bootstrapPromise === nextPromise) {
+        if (result.status === "authenticated") {
+          resolvedAuthenticatedGateState = result;
+          markPersistedPopoutAuthSession();
+        } else {
+          clearPersistedPopoutAuthSession();
+        }
       }
       return result;
     })
@@ -450,8 +463,12 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
     });
 }
 
-export function __resetServerAuthBootstrapForTests() {
+export function invalidatePrimaryAuthGateCache() {
   bootstrapPromise = null;
   resolvedAuthenticatedGateState = null;
   explicitPairingRequested = false;
+}
+
+export function __resetServerAuthBootstrapForTests() {
+  invalidatePrimaryAuthGateCache();
 }

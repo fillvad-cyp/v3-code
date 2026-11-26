@@ -60,6 +60,7 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { Headers, HttpRouter, HttpServer } from "effect/http";
@@ -1424,6 +1425,129 @@ it.effect("access changes made while the snapshot loads reach the client after i
       ),
     ),
   ),
+);
+
+it.effect(
+  "auth access stream exposes persisted access revision and publishes snapshots on advance",
+  () =>
+    Effect.gen(function* () {
+      const responses = yield* Queue.unbounded<AuthAccessStreamEvent>();
+      const subscribed = yield* Queue.unbounded<void>();
+      const revisionChanges = yield* PubSub.unbounded<number>();
+      const currentRevision = yield* Ref.make(2);
+      const principalsLayer = Layer.succeed(Principals.PrincipalRepository, {
+        get: () => Effect.die("unused"),
+        getAccessStatus: () => Effect.die("unused"),
+        getByEmail: () => Effect.die("unused"),
+        list: Effect.die("unused"),
+        create: () => Effect.die("unused"),
+        update: () => Effect.die("unused"),
+        bumpAccessRevision: () => Effect.die("unused"),
+        getEnvironmentAccessRevision: Ref.get(currentRevision),
+        streamEnvironmentAccessRevision: Stream.unwrap(
+          PubSub.subscribe(revisionChanges).pipe(
+            Effect.tap(() => Queue.offer(subscribed, undefined)),
+            Effect.map((subscription) => Stream.fromSubscription(subscription)),
+          ),
+        ),
+        getCredential: () => Effect.die("unused"),
+        setCredential: () => Effect.die("unused"),
+        deleteCredential: () => Effect.die("unused"),
+      });
+      const server = yield* RpcServer.makeNoSerialization(WsRpcGroup, {
+        ...WS_RPC_SERVER_OPTIONS,
+        onFromServer: (response) =>
+          response._tag === "Chunk"
+            ? Effect.forEach(
+                response.values,
+                (event) => Queue.offer(responses, event as AuthAccessStreamEvent),
+                { discard: true },
+              )
+            : Effect.void,
+      }).pipe(
+        Effect.provide(
+          layerWsRpc(
+            {
+              sessionId: AuthSessionId.make("current"),
+              subject: "current",
+              method: "browser-session-cookie",
+              scopes: [],
+            },
+            {},
+            yield* ServerBrowser.ServerBrowser,
+            () => Effect.void,
+            { secretReferences: true },
+          ).pipe(
+            Layer.merge(RpcAuthorization.layer([AuthAccessReadScope])),
+            Layer.provide(
+              Layer.mergeAll(
+                layerUnusedConfigRpcServices,
+                principalsLayer,
+                Layer.mock(ExternalLauncher.ExternalLauncher)({}),
+                Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+                Layer.mock(UsageLimitSources.UsageLimitSources)({}),
+                Layer.mock(RemoteOpenTargets.RemoteOpenTargets)({}),
+                Layer.mock(DirectEndpoints.DirectEndpoints)({}),
+                Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({
+                  namedProjectsRoot: "/unused",
+                }),
+                Layer.mock(ScratchThreadPromotion.ScratchThreadPromotion)({}),
+                Layer.mock(ServerEnvironment.ServerEnvironment)({}),
+                Layer.mock(EnvironmentAuth.EnvironmentAuth)({
+                  listPairingLinks: () => Effect.succeed([]),
+                  listConnectDevices: () => Effect.succeed([]),
+                  listClientSessions: () => Effect.succeed([]),
+                }),
+                Layer.mock(PairingGrantStore.PairingGrantStore)({
+                  streamChanges: Stream.never,
+                }),
+                Layer.mock(SessionStore.SessionStore)({
+                  cookieName: "auth-access-revision-test",
+                  legacyCookieName: undefined,
+                  streamChanges: Stream.never,
+                }),
+              ),
+            ),
+          ),
+        ),
+      );
+      const requestId = RpcMessage.RequestId("auth-access-revision");
+      yield* server.write(0, {
+        _tag: "Request",
+        id: requestId,
+        tag: WS_METHODS.subscribeAuthAccess,
+        payload: {},
+        headers: Headers.empty,
+      });
+      const initial = yield* Queue.take(responses);
+      assert.deepEqual(initial, {
+        version: 1,
+        revision: 1,
+        type: "snapshot",
+        payload: { pairingLinks: [], clientSessions: [], connectDevices: [], revision: 2 },
+      });
+      yield* server.write(0, { _tag: "Ack", requestId });
+      yield* Queue.take(subscribed);
+
+      yield* Ref.set(currentRevision, 3);
+      yield* PubSub.publish(revisionChanges, 3);
+      const updated = yield* Queue.take(responses);
+      assert.deepEqual(updated, {
+        version: 1,
+        revision: 2,
+        type: "snapshot",
+        payload: { pairingLinks: [], clientSessions: [], connectDevices: [], revision: 3 },
+      });
+      yield* server.write(0, { _tag: "Interrupt", requestId, interruptors: [] });
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          Layer.fresh(layerConfigSources),
+          Layer.mock(PreviewAutomationBroker.PreviewAutomationBroker)({}),
+          Layer.mock(ServerBrowser.ServerBrowser)({}),
+        ),
+      ),
+    ),
 );
 
 it.effect("on-demand clients get provider config without workspace snapshots", () =>

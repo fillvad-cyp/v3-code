@@ -52,6 +52,7 @@ import { IssueGlyph } from "../issue/issuePresentation";
 import { isSidebarUtilityPage, useNavigateToMainApp } from "./mainAppLocation";
 import { SidebarThreadUndoNotice } from "./SidebarThreadUndoNotice";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
+import { supportsMembersCapability } from "~/components/settings/MembersSettings.logic";
 import { observeResize } from "~/lib/observeResize";
 
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
@@ -250,10 +251,12 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   const primaryEnvironment = usePrimaryEnvironment();
   const primarySession = useEnvironmentSessionState(primaryEnvironment?.environmentId ?? null);
   const [isSigningOut, setIsSigningOut] = useState(false);
+  const primaryMembersSupported = supportsMembersCapability(
+    primaryEnvironment?.serverConfig?.environment.capabilities,
+  );
   const showSignOut =
     primarySession.data?.authenticated === true &&
-    (primarySession.data.auth.authMode === "multi-user" ||
-      primarySession.data.principal !== undefined);
+    (primaryMembersSupported || primarySession.data.principal !== undefined);
   const closeMobileSidebar = () => {
     if (isMobile) {
       setOpenMobile(false);

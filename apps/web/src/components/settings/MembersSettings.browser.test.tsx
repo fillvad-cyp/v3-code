@@ -9,6 +9,7 @@ import {
   PrincipalId,
   ProjectId,
   ceilingScopes,
+  type AuthAccessStreamEvent,
   type AuthSessionState,
   type InvitationCreateInput,
   type InvitationCreateResult,
@@ -28,6 +29,7 @@ import "~/index.css";
 
 type SessionResult = AsyncResult.AsyncResult<AuthSessionState, Error>;
 type MembersResult = AsyncResult.AsyncResult<ReadonlyArray<MemberWithMemberships>, Error>;
+type AccessChangesResult = AsyncResult.AsyncResult<AuthAccessStreamEvent, Error>;
 
 const envId = EnvironmentId.make("env-1");
 const projectA = ProjectId.make("project-a");
@@ -37,10 +39,12 @@ const state = vi.hoisted(() => ({
   environmentId: null as EnvironmentId | null,
   sessionAtom: null as Atom.Writable<SessionResult> | null,
   membersAtom: null as Atom.Writable<MembersResult> | null,
+  accessChangesAtom: null as Atom.Writable<AccessChangesResult> | null,
   canReadMembersAtom: null as Atom.Writable<boolean> | null,
   canWriteMembersAtom: null as Atom.Writable<boolean> | null,
   canUpdateSettingsAtom: null as Atom.Writable<boolean> | null,
   multiUserSetting: false,
+  membersCapability: true,
   projects: [] as Array<{
     readonly id: ProjectId;
     readonly environmentId: EnvironmentId;
@@ -120,6 +124,7 @@ vi.mock(import("../../state/auth"), async (original) => {
     ...actual,
     authEnvironment: {
       ...actual.authEnvironment,
+      accessChanges: () => state.accessChangesAtom!,
       listMembers: Object.assign(() => state.membersAtom!, {
         permissionAtom: () => state.canReadMembersAtom!,
       }),
@@ -196,7 +201,10 @@ vi.mock(import("../../state/environments"), async (original) => {
       serverConfig: {
         keybindings: defaultResolvedKeybindings,
         settings: { ...defaultServerSettings, multiUser: state.multiUserSetting },
-        environment: { platform: { machine: "server" }, capabilities: {} },
+        environment: {
+          platform: { machine: "server" },
+          capabilities: state.membersCapability ? { members: true } : {},
+        },
       },
     })) as never,
     usePrimaryEnvironment: (() => ({
@@ -333,6 +341,7 @@ function setup(
     canWriteMembers?: boolean;
     canUpdateSettings?: boolean;
     multiUserSetting?: boolean;
+    membersCapability?: boolean;
   } = {},
 ) {
   vi.clearAllMocks();
@@ -343,10 +352,19 @@ function setup(
   state.membersAtom = Atom.make<MembersResult>(
     AsyncResult.success(options.members ?? sampleMembers()),
   ).pipe(Atom.keepAlive);
+  state.accessChangesAtom = Atom.make<AccessChangesResult>(
+    AsyncResult.success<AuthAccessStreamEvent>({
+      version: 1,
+      revision: 1,
+      type: "snapshot",
+      payload: { pairingLinks: [], clientSessions: [], revision: 1 },
+    }),
+  ).pipe(Atom.keepAlive);
   state.canReadMembersAtom = Atom.make(options.canReadMembers ?? true).pipe(Atom.keepAlive);
   state.canWriteMembersAtom = Atom.make(options.canWriteMembers ?? true).pipe(Atom.keepAlive);
   state.canUpdateSettingsAtom = Atom.make(options.canUpdateSettings ?? true).pipe(Atom.keepAlive);
   state.multiUserSetting = options.multiUserSetting ?? false;
+  state.membersCapability = options.membersCapability ?? true;
   state.projects = [
     { id: projectA, environmentId: envId, title: "kotcrm" },
     { id: projectB, environmentId: envId, title: "billing" },
@@ -644,5 +662,42 @@ describe("MembersSettings (environment-level)", () => {
       appAtomRegistry.set(state.canUpdateSettingsAtom!, true);
     });
     await expect.element(page.getByRole("switch", { name: "Multi-user mode" })).toBeEnabled();
+  });
+
+  it("refreshes session and members when the access snapshot revision advances", async () => {
+    const refreshSpy = vi.spyOn(appAtomRegistry, "refresh");
+    try {
+      setup({
+        session: ownerSession("multi-user"),
+        multiUserSetting: true,
+        membersCapability: true,
+      });
+
+      await using _screen = await render(
+        <RegistryContext.Provider value={appAtomRegistry}>
+          <MembersSettings environmentId={envId} />
+        </RegistryContext.Provider>,
+      );
+
+      refreshSpy.mockClear();
+      await act(async () => {
+        appAtomRegistry.set(
+          state.accessChangesAtom!,
+          AsyncResult.success({
+            version: 1,
+            revision: 2,
+            type: "snapshot",
+            payload: { pairingLinks: [], clientSessions: [], revision: 2 },
+          }),
+        );
+      });
+
+      await vi.waitFor(() => {
+        expect(refreshSpy).toHaveBeenCalledWith(state.sessionAtom);
+        expect(refreshSpy).toHaveBeenCalledWith(state.membersAtom);
+      });
+    } finally {
+      refreshSpy.mockRestore();
+    }
   });
 });

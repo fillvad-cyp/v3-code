@@ -1,4 +1,5 @@
 export {
+  invalidatePrimaryAuthGateCache,
   peekPairingTokenFromUrl,
   PrimaryEnvironmentPairingCredentialRejectedError,
   PrimaryEnvironmentRequestError,

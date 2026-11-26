@@ -18,6 +18,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import * as ServerConfig from "../config.ts";
@@ -124,6 +125,8 @@ function makeFixtureLayer(options: {
     create: () => Effect.die("unused"),
     update: () => Effect.die("unused"),
     bumpAccessRevision: () => Effect.die("unused"),
+    getEnvironmentAccessRevision: Effect.succeed(0),
+    streamEnvironmentAccessRevision: Stream.empty,
     getCredential: () => Effect.die("unused"),
     setCredential: () => Effect.die("unused"),
     deleteCredential: () => Effect.die("unused"),

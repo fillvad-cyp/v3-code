@@ -6,6 +6,7 @@ import {
   ForwardCompatibleArray,
   ClientSurface,
   ClientWebDeployment,
+  NonNegativeInt,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { Principal, ProjectRole, SessionBinding, SessionBindingKind } from "./membership.ts";
@@ -435,6 +436,8 @@ export const AuthAccessSnapshot = Schema.Struct({
   clientSessions: Schema.Array(AuthClientSession),
   /** Older servers omit it; they have no device approval. */
   connectDevices: Schema.optionalKey(Schema.Array(AuthConnectDevice)),
+  /** Monotonic environment-level counter bumped on membership, ceiling, role, or principal changes. */
+  revision: Schema.optionalKey(NonNegativeInt),
 });
 export type AuthAccessSnapshot = typeof AuthAccessSnapshot.Type;
 
@@ -571,6 +574,8 @@ export const AuthSessionState = Schema.Struct({
   binding_kind: Schema.optionalKey(SessionBindingKind),
   binding: Schema.optionalKey(SessionBinding),
   role: Schema.optionalKey(ProjectRole),
+  /** Monotonic environment-level counter bumped on membership, ceiling, role, or principal changes. */
+  accessRevision: Schema.optionalKey(NonNegativeInt),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;
 

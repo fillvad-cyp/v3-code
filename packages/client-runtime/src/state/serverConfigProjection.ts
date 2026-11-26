@@ -153,11 +153,44 @@ export function applyServerConfigProjection(
     case "settingsUpdated":
       return Option.map(current, (projection) => {
         const settings = reuseUnchanged(projection.config.settings, event.payload.settings);
+        if (settings === projection.config.settings) {
+          return {
+            config: projection.config,
+            latestEvent: event,
+            source: "live",
+          };
+        }
+        if (settings.multiUser === projection.config.settings.multiUser) {
+          return {
+            config: { ...projection.config, settings },
+            latestEvent: event,
+            source: "live",
+          };
+        }
+        const {
+          authMode: _prevAuthMode,
+          capabilities: prevCapabilities,
+          ...envRest
+        } = projection.config.environment;
+        const {
+          members: _prevMembers,
+          audit: _prevAudit,
+          projectSecrets: _prevProjectSecrets,
+          ...capRest
+        } = prevCapabilities;
         return {
-          config:
-            settings === projection.config.settings
-              ? projection.config
-              : { ...projection.config, settings },
+          config: {
+            ...projection.config,
+            settings,
+            environment: {
+              ...envRest,
+              ...(settings.multiUser ? { authMode: "multi-user" as const } : {}),
+              capabilities: {
+                ...capRest,
+                ...(settings.multiUser ? { members: true, audit: true, projectSecrets: true } : {}),
+              },
+            },
+          },
           latestEvent: event,
           source: "live",
         };

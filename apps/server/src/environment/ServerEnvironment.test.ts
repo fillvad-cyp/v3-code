@@ -20,6 +20,7 @@ import {
   RELAY_URL_SECRET,
 } from "../cloud/config.ts";
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
 
 const layerServerEnvironment = (baseDir: string) =>
@@ -364,5 +365,49 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
         expect(disabled.capabilities.agentActivityPublishing).toBe(false);
       }).pipe(Effect.provide(layerTest));
     }),
+  );
+
+  it.effect(
+    "sets members, audit, and projectSecrets capabilities only when settings.multiUser is enabled",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-server-environment-multiuser-test-",
+        });
+        const settingsLayer = ServerSettings.layerTest({ multiUser: false });
+        const layerTest = Layer.mergeAll(
+          ServerEnvironment.layer.pipe(
+            Layer.provide(layerEmptySecretStore),
+            Layer.provide(settingsLayer),
+          ),
+          settingsLayer,
+        ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)));
+
+        yield* Effect.gen(function* () {
+          const settings = yield* ServerSettings.ServerSettingsService;
+          const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+
+          const disabled = yield* serverEnvironment.getDescriptor;
+          expect(disabled.authMode).toBeUndefined();
+          expect(disabled.capabilities.members).toBeUndefined();
+          expect(disabled.capabilities.audit).toBeUndefined();
+          expect(disabled.capabilities.projectSecrets).toBeUndefined();
+
+          yield* settings.updateSettings({ multiUser: true });
+          const enabled = yield* serverEnvironment.getDescriptor;
+          expect(enabled.authMode).toBe("multi-user");
+          expect(enabled.capabilities.members).toBe(true);
+          expect(enabled.capabilities.audit).toBe(true);
+          expect(enabled.capabilities.projectSecrets).toBe(true);
+
+          yield* settings.updateSettings({ multiUser: false });
+          const disabledAgain = yield* serverEnvironment.getDescriptor;
+          expect(disabledAgain.authMode).toBeUndefined();
+          expect(disabledAgain.capabilities.members).toBeUndefined();
+          expect(disabledAgain.capabilities.audit).toBeUndefined();
+          expect(disabledAgain.capabilities.projectSecrets).toBeUndefined();
+        }).pipe(Effect.provide(layerTest));
+      }),
   );
 });

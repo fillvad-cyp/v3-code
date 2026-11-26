@@ -4,6 +4,7 @@ import {
   AuthEnvironmentMaintainScope,
   AuthEnvironmentScope,
   type AuthSessionState,
+  type ExecutionEnvironmentCapabilities,
   type MemberWithMemberships,
   type MembershipState,
   type Principal,
@@ -203,24 +204,31 @@ export function deriveProjectMemberPermissions(input: {
   };
 }
 
+export function supportsMembersCapability(
+  capabilities: ExecutionEnvironmentCapabilities | null | undefined,
+): boolean {
+  return capabilities?.members === true;
+}
+
+export function supportsAuditCapability(
+  capabilities: ExecutionEnvironmentCapabilities | null | undefined,
+): boolean {
+  return capabilities?.audit === true;
+}
+
 export function deriveEnvironmentMembersGate(input: {
   readonly session: AuthSessionState | null;
   readonly canUpdateMultiUserSetting: boolean;
+  readonly membersSupported: boolean;
   readonly settingsMultiUser?: boolean | undefined;
 }) {
   const isOwner = isSessionOwner(input.session);
-  const authMode: "multi-user" | "single-owner" =
-    input.settingsMultiUser !== undefined
-      ? input.settingsMultiUser
-        ? "multi-user"
-        : "single-owner"
-      : (input.session?.auth.authMode ?? "single-owner");
+  const multiUserEnabled = input.settingsMultiUser ?? input.membersSupported;
   return {
-    visible: isOwner,
+    visible: isOwner && input.membersSupported,
     isOwner,
-    authMode,
-    multiUserEnabled: authMode === "multi-user",
-    canToggleMultiUser: isOwner && input.canUpdateMultiUserSetting,
+    multiUserEnabled,
+    canToggleMultiUser: isOwner && input.membersSupported && input.canUpdateMultiUserSetting,
   };
 }
 

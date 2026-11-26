@@ -33,13 +33,18 @@ import { DesktopWebLinkCoordinator } from "../components/desktop/DesktopWebLinkC
 import { RunningThreadKeepAlive } from "../components/desktop/RunningThreadKeepAlive";
 import { ReopenClosedViewShortcut } from "../components/ReopenClosedViewShortcut";
 import { ProjectCloneToastCoordinator } from "../components/ProjectCloneToastCoordinator";
+import { AccessRevisionRefreshCoordinator } from "../components/AccessRevisionRefreshCoordinator";
 import { ConnectDeviceApprovalCoordinator } from "../components/ConnectDeviceApprovalCoordinator";
 import { ChatGptWelcomeCoordinator } from "../components/settings/ChatGptWelcomeCoordinator";
 import { ThemeEditorHost } from "../components/settings/ThemeEditorHost";
 import { HomeScreenInstallPromptHost } from "../components/pwa/HomeScreenInstallPrompt";
 import { PrivacyLockOverlayHost } from "../components/pwa/PrivacyLockOverlay";
 import { usePrivacyShieldStore } from "../lib/privacyShield";
-import { isPopoutWindowRuntime } from "../lib/threadPopout";
+import {
+  hasPersistedPopoutAuthSession,
+  isPopoutRoutePathname,
+  isPopoutWindowRuntime,
+} from "../lib/threadPopout";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { Button } from "../components/ui/button";
 import { StandalonePage, StandalonePageHeader } from "../components/ui/standalone-page";
@@ -94,6 +99,16 @@ export const Route = createRootRoute({
       };
     }
 
+    // Popout windows paint immediately from cached thread metadata and validate auth asynchronously.
+    if (isPopoutRoutePathname(location.pathname)) {
+      return {
+        authGateState: {
+          status: "popout-rehydrating",
+          hasStoredSession: hasPersistedPopoutAuthSession(),
+        } as const,
+      };
+    }
+
     const authGateState = await resolveInitialServerAuthGateState();
     if (authGateState.status === "authenticated") {
       // Idempotent, so every navigation can ask for it.
@@ -141,6 +156,8 @@ function RootRouteNotFoundView() {
 }
 
 function RootRouteView() {
+  const pathname = useLocation({ select: (location) => location.pathname });
+  const isPopoutRoute = isPopoutRoutePathname(pathname);
   const privacyOverlayActive = usePrivacyShieldStore(
     (state) => state.locked || state.curtainVisible || state.wiped,
   );
@@ -151,7 +168,7 @@ function RootRouteView() {
       <AnchoredToastProvider>
         <div className="contents" inert={privacyOverlayActive}>
           <RootRouteBranch />
-          <HomeScreenInstallPromptHost />
+          {isPopoutRoute ? null : <HomeScreenInstallPromptHost />}
         </div>
         <PrivacyLockOverlayHost />
       </AnchoredToastProvider>
@@ -174,6 +191,16 @@ function RootRouteBranch() {
   );
 
   if (pathname === GUEST_PAGE_PATH) return <Outlet />;
+
+  if (isPopoutRoutePathname(pathname)) {
+    return (
+      <>
+        <ConfirmDialogHost />
+        <GuestShareDialogHost />
+        <Outlet />
+      </>
+    );
+  }
 
   if (
     pathname === "/pair" ||
@@ -215,6 +242,7 @@ function RootRouteBranch() {
       <CustomSnoozeDialogHost />
       <GuestShareDialogHost />
       {!isPopoutWindow ? <ProjectCloneToastCoordinator /> : null}
+      {!isPopoutWindow ? <AccessRevisionRefreshCoordinator /> : null}
       {!isPopoutWindow ? <ConnectDeviceApprovalCoordinator /> : null}
       <AddProjectToMachineDialogHost />
       <UseInAnotherAppDialogHost />

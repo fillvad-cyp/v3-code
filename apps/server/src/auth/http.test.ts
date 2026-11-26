@@ -989,10 +989,16 @@ it.live(
               environment.handler(new Request("http://127.0.0.1/api/auth/session"), requestContext),
             );
             expect(unauthSessionResp.status).toBe(200);
-            expect(yield* Effect.promise(() => unauthSessionResp.json())).toMatchObject({
+            const unauthSessionBody = (yield* Effect.promise(() => unauthSessionResp.json())) as {
+              authenticated: boolean;
+              auth: { authMode?: string };
+              accessRevision?: number;
+            };
+            expect(unauthSessionBody).toMatchObject({
               authenticated: false,
               auth: { authMode: "multi-user" },
             });
+            expect(unauthSessionBody.accessRevision).toBeUndefined();
 
             // Owner bootstraps and invites a member to a project.
             const devResponse = yield* Effect.promise(() =>
@@ -1132,7 +1138,11 @@ it.live(
               ),
             );
             expect(sessionResp.status).toBe(200);
-            expect(yield* Effect.promise(() => sessionResp.json())).toMatchObject({
+            const memberSessionBody = (yield* Effect.promise(() => sessionResp.json())) as {
+              authenticated: boolean;
+              accessRevision?: number;
+            };
+            expect(memberSessionBody).toMatchObject({
               authenticated: true,
               auth: { authMode: "multi-user" },
               binding_kind: "principal",
@@ -1143,6 +1153,39 @@ it.live(
                 displayName: "Ada Lovelace",
               },
             });
+            expect(typeof memberSessionBody.accessRevision).toBe("number");
+            const revBeforeRoleChange = memberSessionBody.accessRevision!;
+
+            // Role change advances the environment-level accessRevision returned in session state.
+            const roleUpdateResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/api/auth/members/${memberPrincipalId}`, {
+                  method: "PATCH",
+                  headers: {
+                    "content-type": "application/json",
+                    cookie: ownerCookie,
+                  },
+                  body: JSON.stringify({ projectId, role: "operator" }),
+                }),
+                requestContext,
+              ),
+            );
+            expect(roleUpdateResp.status).toBe(200);
+
+            const sessionAfterUpdateResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/session", {
+                  headers: { authorization: `Bearer ${loginBody.token}` },
+                }),
+                requestContext,
+              ),
+            );
+            expect(sessionAfterUpdateResp.status).toBe(200);
+            const sessionAfterUpdateBody = (yield* Effect.promise(() =>
+              sessionAfterUpdateResp.json(),
+            )) as { accessRevision?: number; role?: string };
+            expect(sessionAfterUpdateBody.role).toBe("operator");
+            expect(sessionAfterUpdateBody.accessRevision).toBeGreaterThan(revBeforeRoleChange);
 
             // POST /api/auth/websocket-ticket succeeds with the returned bearer token.
             const ticketResp = yield* Effect.promise(() =>

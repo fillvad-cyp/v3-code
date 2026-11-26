@@ -9,13 +9,15 @@ import { useNavigate, useRouter } from "@tanstack/react-router";
 import { T, useGT, useMessages, Var } from "gt-react";
 import { useState } from "react";
 import { signOutPrimaryEnvironment } from "~/environments/primary";
+import { notifyPopoutSignOut } from "~/lib/threadPopout";
 import { m } from "~/i18n/messages";
 import { authEnvironment } from "~/state/auth";
-import { usePrimaryEnvironment } from "~/state/environments";
+import { useEnvironment, usePrimaryEnvironment } from "~/state/environments";
 import { useEnvironmentSessionState, usePreparedConnection } from "~/state/session";
 import { useAtomCommand } from "~/state/use-atom-command";
 import { Button } from "../ui/button";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { supportsMembersCapability } from "./MembersSettings.logic";
 
 export function SessionPermissions({
   environmentId,
@@ -31,6 +33,7 @@ export function SessionPermissions({
   const router = useRouter();
   const navigate = useNavigate();
   const primaryEnvironment = usePrimaryEnvironment();
+  const environment = useEnvironment(environmentId);
   const session = useEnvironmentSessionState(environmentId);
   const prepared = usePreparedConnection(environmentId);
   const signOutCurrentSession = useAtomCommand(authEnvironment.signOutCurrentSession, {
@@ -39,9 +42,12 @@ export function SessionPermissions({
   const [isSigningOut, setIsSigningOut] = useState(false);
 
   const isPrimary = primaryEnvironment?.environmentId === environmentId;
+  const membersSupported = supportsMembersCapability(
+    environment?.serverConfig?.environment.capabilities,
+  );
   const showSignOut =
     session.data?.authenticated === true &&
-    (session.data.auth.authMode === "multi-user" || session.data.principal !== undefined);
+    (membersSupported || session.data.principal !== undefined);
 
   const handleSignOut = async () => {
     if (isSigningOut) return;
@@ -85,6 +91,7 @@ export function SessionPermissions({
       );
       return;
     }
+    notifyPopoutSignOut({ environmentId });
     const host = prepared._tag === "Some" ? prepared.value.httpBaseUrl : undefined;
     const label = prepared._tag === "Some" ? prepared.value.label : undefined;
     void navigate({

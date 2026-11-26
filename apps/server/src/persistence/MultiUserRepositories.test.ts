@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
 import {
   ApiTokenId,
@@ -8,8 +9,12 @@ import {
   type AppendAuditEventInput,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
+import * as Stream from "effect/Stream";
 
 import * as ApiTokens from "./ApiTokens.ts";
 import * as AuditEvents from "./AuditEvents.ts";
@@ -388,3 +393,69 @@ it.layer(repositories.pipe(Layer.provideMerge(Sqlite.layerMemory)))(
     );
   },
 );
+
+it.layer(NodeServices.layer)("environment access revision persistence", (it) => {
+  it.effect("monotonically advances on principal mutations and survives restarts", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-access-revision-" });
+      const dbPath = path.join(dir, "statev2.sqlite");
+      const openLayer = () => Principals.layer.pipe(Layer.provide(Sqlite.layerFromPath(dbPath)));
+
+      const persistedAfterFirstBoot = yield* Effect.gen(function* () {
+        const principals = yield* Principals.PrincipalRepository;
+        const initial = yield* principals.getEnvironmentAccessRevision;
+        assert.strictEqual(initial, 0);
+
+        const nextTwo = yield* principals.streamEnvironmentAccessRevision.pipe(
+          Stream.take(3),
+          Stream.runCollect,
+          Effect.forkScoped,
+        );
+        // Yield once so the PubSub subscription is active before mutations run.
+        yield* Effect.yieldNow;
+
+        yield* principals.create({
+          id: member,
+          kind: "member",
+          displayName: "Ada",
+          email: null,
+          status: "active",
+          ceiling: ["orchestration:read"],
+          createdAt: at("2026-11-25T00:00:00.000Z"),
+        });
+        const afterCreate = yield* principals.getEnvironmentAccessRevision;
+        assert.isTrue(afterCreate > initial);
+
+        yield* principals.update({
+          id: member,
+          ceiling: ["orchestration:read", "filesystem:read"],
+          updatedAt: at("2026-11-25T00:01:00.000Z"),
+          bumpAccessRevision: true,
+        });
+        const afterUpdate = yield* principals.getEnvironmentAccessRevision;
+        assert.isTrue(afterUpdate > afterCreate);
+
+        yield* principals.bumpAccessRevision(member, at("2026-11-25T00:02:00.000Z"));
+        const afterBump = yield* principals.getEnvironmentAccessRevision;
+        assert.isTrue(afterBump > afterUpdate);
+
+        const streamed = Array.from(yield* Fiber.join(nextTwo));
+        assert.deepStrictEqual(streamed, [afterCreate, afterUpdate, afterBump]);
+        return afterBump;
+      }).pipe(Effect.scoped, Effect.provide(openLayer()));
+
+      // Reopen a fresh SQLite + PrincipalRepository layer to simulate a server restart.
+      yield* Effect.gen(function* () {
+        const principals = yield* Principals.PrincipalRepository;
+        const afterRestart = yield* principals.getEnvironmentAccessRevision;
+        assert.strictEqual(afterRestart, persistedAfterFirstBoot);
+
+        yield* principals.bumpAccessRevision(member, at("2026-11-25T00:03:00.000Z"));
+        const afterNextMutation = yield* principals.getEnvironmentAccessRevision;
+        assert.strictEqual(afterNextMutation, persistedAfterFirstBoot + 1);
+      }).pipe(Effect.scoped, Effect.provide(openLayer()));
+    }),
+  );
+});

@@ -500,6 +500,8 @@ describe("Live access revocation", () => {
                 create: () => Effect.die("unused"),
                 update: () => Effect.die("unused"),
                 bumpAccessRevision: () => Effect.die("unused"),
+                getEnvironmentAccessRevision: Effect.succeed(0),
+                streamEnvironmentAccessRevision: Stream.empty,
                 getCredential: () => Effect.die("unused"),
                 setCredential: () => Effect.die("unused"),
                 deleteCredential: () => Effect.die("unused"),

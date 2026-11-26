@@ -1013,6 +1013,11 @@ export const make = Effect.gen(function* () {
               ...(role !== undefined ? { role } : {}),
             };
           }
+          const accessRevision = Option.isSome(principalsRepo)
+            ? yield* principalsRepo.value.getEnvironmentAccessRevision.pipe(
+                Effect.orElseSucceed(() => undefined),
+              )
+            : undefined;
           return {
             authenticated: true,
             auth: currentDescriptor,
@@ -1020,6 +1025,7 @@ export const make = Effect.gen(function* () {
             sessionMethod: session.method,
             ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
             ...principalFields,
+            ...(accessRevision !== undefined ? { accessRevision } : {}),
           } satisfies AuthSessionState;
         }),
       ),

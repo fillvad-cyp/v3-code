@@ -94,6 +94,39 @@ describe("searchSettings", () => {
     }
   });
 
+  it("gates member settings search entries by hasMembersEnvironment", () => {
+    const baseAvailability = {
+      hasCloudPublicConfig: false,
+      hasEnvironment: true,
+      hasProviderSettingsEnvironment: true,
+      canManageLocalBackend: false,
+      isWslSettingsRowVisible: false,
+      hasThreadAutoSettlement: false,
+    };
+
+    const disabledIds = new Set(
+      filterAvailableSettingsSearchItems({
+        ...baseAvailability,
+        hasMembersEnvironment: false,
+        hasAuditEnvironment: false,
+      }).map((item) => item.id),
+    );
+    expect(disabledIds.has("project-members")).toBe(false);
+    expect(disabledIds.has("environment-members")).toBe(false);
+    expect(disabledIds.has("multi-user-mode")).toBe(false);
+
+    const enabledIds = new Set(
+      filterAvailableSettingsSearchItems({
+        ...baseAvailability,
+        hasMembersEnvironment: true,
+        hasAuditEnvironment: true,
+      }).map((item) => item.id),
+    );
+    expect(enabledIds.has("project-members")).toBe(true);
+    expect(enabledIds.has("environment-members")).toBe(true);
+    expect(enabledIds.has("multi-user-mode")).toBe(true);
+  });
+
   it("finds where subagents and side chats open by any of its names", () => {
     for (const query of ["side panel", "subagent", "side chat", "linked thread", "middle click"]) {
       expect(searchSettings(query).map((item) => item.id)).toContain("side-thread-open-target");

@@ -240,7 +240,16 @@ export function useThreadActionMenu(input: {
           onFind?.(threadRef);
           return;
         case "open-in-new-window": {
-          const opened = await openThreadInPopoutWindow(threadRef, { title: thread.title });
+          const threadProject = projects.find(
+            (candidate) =>
+              candidate.environmentId === thread.environmentId && candidate.id === thread.projectId,
+          );
+          const opened = await openThreadInPopoutWindow(threadRef, {
+            title: thread.title,
+            ...(threadProject && !threadProject.isScratch
+              ? { projectTitle: threadProject.title }
+              : {}),
+          });
           if (!opened) {
             toastManager.add(
               stackedThreadToast({

@@ -14,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Stream from "effect/Stream";
 
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
@@ -453,6 +454,8 @@ describe("ResourceResolver", () => {
             create: () => Effect.die("unused"),
             update: () => Effect.die("unused"),
             bumpAccessRevision: () => Effect.die("unused"),
+            getEnvironmentAccessRevision: Effect.succeed(0),
+            streamEnvironmentAccessRevision: Stream.empty,
             getCredential: () => Effect.die("unused"),
             setCredential: () => Effect.die("unused"),
             deleteCredential: () => Effect.die("unused"),

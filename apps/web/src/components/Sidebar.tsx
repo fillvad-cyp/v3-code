@@ -2832,7 +2832,10 @@ export default function Sidebar({ routeReveal }: { routeReveal: SidebarRouteReve
         }
         switch (clicked.value) {
           case "open-in-new-window": {
-            const opened = await openThreadInPopoutWindow(threadRef, { title: thread.title });
+            const opened = await openThreadInPopoutWindow(threadRef, {
+              title: thread.title,
+              ...(threadProjectGroup ? { projectTitle: threadProjectGroup.displayName } : {}),
+            });
             if (!opened) {
               toastManager.add(
                 stackedThreadToast({

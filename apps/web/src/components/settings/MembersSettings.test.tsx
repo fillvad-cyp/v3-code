@@ -8,6 +8,7 @@ import {
   PrincipalId,
   ProjectId,
   ceilingScopes,
+  type AuthAccessStreamEvent,
   type AuthSessionState,
   type MemberWithMemberships,
   type Principal,
@@ -22,6 +23,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 type SessionResult = AsyncResult.AsyncResult<AuthSessionState, Error>;
 type MembersResult = AsyncResult.AsyncResult<ReadonlyArray<MemberWithMemberships>, Error>;
+type AccessChangesResult = AsyncResult.AsyncResult<AuthAccessStreamEvent, Error>;
 
 const envId = EnvironmentId.make("env-1");
 const projectA = ProjectId.make("project-a");
@@ -30,10 +32,12 @@ const projectB = ProjectId.make("project-b");
 const state = vi.hoisted(() => ({
   sessionAtom: null as Atom.Writable<SessionResult> | null,
   membersAtom: null as Atom.Writable<MembersResult> | null,
+  accessChangesAtom: null as Atom.Writable<AccessChangesResult> | null,
   canReadMembersAtom: null as Atom.Writable<boolean> | null,
   canWriteMembersAtom: null as Atom.Writable<boolean> | null,
   canUpdateSettingsAtom: null as Atom.Writable<boolean> | null,
   multiUserSetting: false,
+  membersCapability: true,
   projects: [] as Array<{
     readonly id: ProjectId;
     readonly environmentId: EnvironmentId;
@@ -68,6 +72,7 @@ vi.mock(import("../../state/session"), async (original) => {
 
 vi.mock(import("../../state/auth"), () => ({
   authEnvironment: {
+    accessChanges: () => state.accessChangesAtom!,
     listMembers: Object.assign(() => state.membersAtom!, {
       permissionAtom: () => state.canReadMembersAtom!,
     }),
@@ -107,7 +112,10 @@ vi.mock(import("../../state/environments"), async (original) => ({
     serverConfig: {
       keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
       settings: { ...DEFAULT_SERVER_SETTINGS, multiUser: state.multiUserSetting },
-      environment: { platform: { machine: "server" }, capabilities: {} },
+      environment: {
+        platform: { machine: "server" },
+        capabilities: state.membersCapability ? { members: true } : {},
+      },
     },
   })) as never,
   usePrimaryEnvironment: (() => ({
@@ -247,6 +255,7 @@ function setup(
     canWriteMembers?: boolean;
     canUpdateSettings?: boolean;
     multiUserSetting?: boolean;
+    membersCapability?: boolean;
   } = {},
 ) {
   initializeGT({ defaultLocale: "en", locales: ["en"] });
@@ -256,10 +265,19 @@ function setup(
   state.membersAtom = Atom.make<MembersResult>(
     AsyncResult.success(options.members ?? sampleMembers()),
   ).pipe(Atom.keepAlive);
+  state.accessChangesAtom = Atom.make<AccessChangesResult>(
+    AsyncResult.success<AuthAccessStreamEvent>({
+      version: 1,
+      revision: 1,
+      type: "snapshot",
+      payload: { pairingLinks: [], clientSessions: [], revision: 1 },
+    }),
+  ).pipe(Atom.keepAlive);
   state.canReadMembersAtom = Atom.make(options.canReadMembers ?? true).pipe(Atom.keepAlive);
   state.canWriteMembersAtom = Atom.make(options.canWriteMembers ?? true).pipe(Atom.keepAlive);
   state.canUpdateSettingsAtom = Atom.make(options.canUpdateSettings ?? true).pipe(Atom.keepAlive);
   state.multiUserSetting = options.multiUserSetting ?? false;
+  state.membersCapability = options.membersCapability ?? true;
   state.projects = [
     { id: projectA, environmentId: envId, title: "kotcrm" },
     { id: projectB, environmentId: envId, title: "billing" },
@@ -321,10 +339,33 @@ describe("ProjectMembersCard rendering and permissions", () => {
 
     expect(html).toContain("No members on this project yet.");
   });
+
+  it("hides the project members card when capabilities.members is absent even if authMode is multi-user", () => {
+    setup({
+      session: ownerSession("multi-user"),
+      membersCapability: false,
+      multiUserSetting: true,
+    });
+    const html = renderHtml(
+      <ProjectMembersCard environmentId={envId} projectId={projectA} projectTitle="kotcrm" />,
+    );
+
+    expect(html).toBe("");
+  });
 });
 
 describe("MembersSettings environment screen gating", () => {
-  it("renders multi-user switch, authMode status, L0 host-access badge, ceiling select, and remove for owner", () => {
+  it("hides the environment members screen when capabilities.members is absent even for owner with authMode multi-user", () => {
+    setup({
+      session: ownerSession("multi-user"),
+      membersCapability: false,
+      multiUserSetting: true,
+      canUpdateSettings: true,
+    });
+    expect(renderHtml(<MembersSettings environmentId={envId} />)).toBe("");
+  });
+
+  it("renders multi-user switch, status, L0 host-access badge, ceiling select, and remove for owner when capabilities.members is true", () => {
     setup({
       session: ownerSession("single-owner"),
       multiUserSetting: false,
