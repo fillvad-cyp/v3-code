@@ -1,4 +1,4 @@
-import { RegistryContext, useAtomValue } from "@effect/atom-react";
+import { RegistryContext } from "@effect/atom-react";
 import {
   AuthAccessReadScope,
   AuthAccessWriteScope,
@@ -18,14 +18,13 @@ import {
   type Principal,
   type ProjectMembership,
 } from "@t3tools/contracts";
-import { DEFAULT_RESOLVED_KEYBINDINGS } from "@t3tools/shared/keybindings";
 import * as Cause from "effect/Cause";
-import * as Option from "effect/Option";
 import { AsyncResult, Atom } from "effect/reactivity";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 
 import { act, render } from "../../../test/render";
+import "~/index.css";
 
 type SessionResult = AsyncResult.AsyncResult<AuthSessionState, Error>;
 type MembersResult = AsyncResult.AsyncResult<ReadonlyArray<MemberWithMemberships>, Error>;
@@ -35,6 +34,7 @@ const projectA = ProjectId.make("project-a");
 const projectB = ProjectId.make("project-b");
 
 const state = vi.hoisted(() => ({
+  environmentId: null as EnvironmentId | null,
   sessionAtom: null as Atom.Writable<SessionResult> | null,
   membersAtom: null as Atom.Writable<MembersResult> | null,
   canReadMembersAtom: null as Atom.Writable<boolean> | null,
@@ -86,6 +86,9 @@ const state = vi.hoisted(() => ({
 
 vi.mock(import("../../state/session"), async (original) => {
   const actual = await original();
+  const { useAtomValue: readAtomValue } = await import("@effect/atom-react");
+  const OptionModule = await import("effect/Option");
+  const { AsyncResult: AsyncResultModule } = await import("effect/reactivity");
   return {
     ...actual,
     environmentSession: {
@@ -93,53 +96,76 @@ vi.mock(import("../../state/session"), async (original) => {
       sessionStateAtom: (() => state.sessionAtom!) as never,
     },
     useEnvironmentSessionState: (() => {
-      const result = useAtomValue(state.sessionAtom!);
+      const result = readAtomValue(state.sessionAtom!);
       return {
-        data: AsyncResult.getOrElse(result, () => null),
+        data: AsyncResultModule.getOrElse(result, () => null),
         hasError: result._tag === "Failure",
         isPending: result.waiting,
       };
     }) as never,
     usePreparedConnection: (() =>
-      Option.some({
-        environmentId: envId,
+      OptionModule.some({
+        environmentId: state.environmentId!,
         httpBaseUrl: "https://hub.example.com",
         label: "Hub",
       })) as never,
   };
 });
 
-vi.mock(import("../../state/auth"), () => ({
-  authEnvironment: {
-    listMembers: Object.assign(() => state.membersAtom!, {
-      permissionAtom: () => state.canReadMembersAtom!,
-    }),
-    updateMember: Object.assign("updateMember", {
-      permissionAtom: () => state.canWriteMembersAtom!,
-    }),
-    removeMember: Object.assign("removeMember", {
-      permissionAtom: () => state.canWriteMembersAtom!,
-    }),
-    createInvitation: Object.assign("createInvitation", {
-      permissionAtom: () => state.canWriteMembersAtom!,
-    }),
-    issueMemberLoginCode: Object.assign("issueMemberLoginCode", {
-      permissionAtom: () => Atom.make(true),
-    }),
-  } as never,
-}));
+vi.mock(import("../../state/auth"), async (original) => {
+  const actual = await original();
+  const { Atom: AtomModule } = await import("effect/reactivity");
+  const canIssueLoginCode = AtomModule.make(true).pipe(AtomModule.keepAlive);
+  return {
+    ...actual,
+    authEnvironment: {
+      ...actual.authEnvironment,
+      listMembers: Object.assign(() => state.membersAtom!, {
+        permissionAtom: () => state.canReadMembersAtom!,
+      }),
+      updateMember: {
+        ...actual.authEnvironment.updateMember,
+        label: "updateMember",
+        permissionAtom: () => state.canWriteMembersAtom!,
+      },
+      removeMember: {
+        ...actual.authEnvironment.removeMember,
+        label: "removeMember",
+        permissionAtom: () => state.canWriteMembersAtom!,
+      },
+      createInvitation: {
+        ...actual.authEnvironment.createInvitation,
+        label: "createInvitation",
+        permissionAtom: () => state.canWriteMembersAtom!,
+      },
+      issueMemberLoginCode: {
+        ...actual.authEnvironment.issueMemberLoginCode,
+        label: "issueMemberLoginCode",
+        permissionAtom: () => canIssueLoginCode,
+      },
+    } as never,
+  };
+});
 
-vi.mock(import("../../state/server"), () => ({
-  serverEnvironment: {
-    updateSettings: Object.assign("updateSettings", {
-      permissionAtom: () => state.canUpdateSettingsAtom!,
-    }),
-  } as never,
-}));
+vi.mock(import("../../state/server"), async (original) => {
+  const actual = await original();
+  return {
+    ...actual,
+    serverEnvironment: {
+      ...actual.serverEnvironment,
+      updateSettings: {
+        ...actual.serverEnvironment.updateSettings,
+        label: "updateSettings",
+        permissionAtom: () => state.canUpdateSettingsAtom!,
+      },
+    } as never,
+  };
+});
 
-vi.mock(import("../../state/use-atom-command"), () => ({
-  useAtomCommand: ((command: string) => {
-    switch (command) {
+vi.mock(import("../../state/use-atom-command"), async (original) => ({
+  ...(await original()),
+  useAtomCommand: ((command: { label?: string }) => {
+    switch (command?.label) {
       case "updateMember":
         return state.updateMember;
       case "removeMember":
@@ -156,24 +182,30 @@ vi.mock(import("../../state/use-atom-command"), () => ({
   }) as never,
 }));
 
-vi.mock(import("../../state/environments"), async (original) => ({
-  ...(await original()),
-  useEnvironment: (() => ({
-    environmentId: envId,
-    label: "Work Hub",
-    connection: { phase: "connected" },
-    serverConfig: {
-      keybindings: DEFAULT_RESOLVED_KEYBINDINGS,
-      settings: { ...DEFAULT_SERVER_SETTINGS, multiUser: state.multiUserSetting },
-      environment: { platform: { machine: "server" }, capabilities: {} },
-    },
-  })) as never,
-  usePrimaryEnvironment: (() => ({
-    environmentId: envId,
-    label: "Work Hub",
-  })) as never,
-  usePrimaryEnvironmentId: () => envId,
-}));
+vi.mock(import("../../state/environments"), async (original) => {
+  const actual = await original();
+  const { DEFAULT_SERVER_SETTINGS: defaultServerSettings } = await import("@t3tools/contracts");
+  const { DEFAULT_RESOLVED_KEYBINDINGS: defaultResolvedKeybindings } =
+    await import("@t3tools/shared/keybindings");
+  return {
+    ...actual,
+    useEnvironment: (() => ({
+      environmentId: state.environmentId!,
+      label: "Work Hub",
+      connection: { phase: "connected" },
+      serverConfig: {
+        keybindings: defaultResolvedKeybindings,
+        settings: { ...defaultServerSettings, multiUser: state.multiUserSetting },
+        environment: { platform: { machine: "server" }, capabilities: {} },
+      },
+    })) as never,
+    usePrimaryEnvironment: (() => ({
+      environmentId: state.environmentId!,
+      label: "Work Hub",
+    })) as never,
+    usePrimaryEnvironmentId: () => state.environmentId!,
+  };
+});
 
 vi.mock(import("../../state/entities"), async (original) => ({
   ...(await original()),
@@ -304,6 +336,7 @@ function setup(
   } = {},
 ) {
   vi.clearAllMocks();
+  state.environmentId = envId;
   state.sessionAtom = Atom.make<SessionResult>(
     AsyncResult.success(options.session ?? ownerSession()),
   ).pipe(Atom.keepAlive);
@@ -550,8 +583,9 @@ describe("MembersSettings (environment-level)", () => {
     );
 
     // Owner suspends a multi-project member via a single principal-level PATCH (no projectId loop).
+    // environmentMembersList sorts non-owners alphabetically, so Alex Dev's row comes before Sam Admin's.
     state.updateMember.mockClear();
-    await userEvent.click(page.getByRole("button", { name: "Suspend" }).last());
+    await userEvent.click(page.getByRole("button", { name: "Suspend" }).first());
     await vi.waitFor(() => expect(state.updateMember).toHaveBeenCalledTimes(1));
     expect(state.updateMember).toHaveBeenCalledWith({
       environmentId: envId,
