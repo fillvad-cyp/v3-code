@@ -7,6 +7,7 @@ import {
   AuthOrchestrationReadScope,
   AuthSessionId,
   AuthTerminalOperateScope,
+  CrmClientId,
   EnvironmentAuthenticatedAuth,
   EnvironmentAuthenticatedPrincipal,
   EnvironmentHttpApi,
@@ -46,6 +47,7 @@ import * as Stream from "effect/Stream";
 
 import * as ProjectAccess from "./access/ProjectAccess.ts";
 import * as ProjectPaths from "./access/ProjectPaths.ts";
+import * as ResourceResolver from "./access/ResourceResolver.ts";
 import * as RpcAuthorization from "./auth/RpcAuthorization.ts";
 import * as EventSink from "./orchestration-v2/EventSink.ts";
 import * as EventStore from "./orchestration-v2/EventStore.ts";
@@ -59,6 +61,7 @@ import {
 } from "./orchestration-v2/ShellStream.ts";
 import * as ThreadManagement from "./orchestration-v2/ThreadManagementService.ts";
 import * as ThreadSearch from "./orchestration-v2/ThreadSearch.ts";
+import * as CrmRepo from "./persistence/Crm.ts";
 import * as Memberships from "./persistence/Memberships.ts";
 import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.ts";
 import * as Principals from "./persistence/Principals.ts";
@@ -873,11 +876,113 @@ describe("Projects list and search filtering", () => {
           });
         }
 
+        const THREAD_SAME_PROJECT_FOREIGN = ThreadId.make("thread-allowed-foreign-same-project");
+        const THREAD_SETTLED_LINKED = ThreadId.make("thread-settled-linked");
+        const THREAD_SETTLED_FOREIGN = ThreadId.make("thread-settled-foreign");
+        const THREAD_ARCHIVED_LINKED = ThreadId.make("thread-archived-linked");
+        const THREAD_ARCHIVED_FOREIGN = ThreadId.make("thread-archived-foreign");
+        const EXTERNAL_PRINCIPAL_ID = PrincipalId.make("principal-external-client");
+        const CRM_CLIENT_ID = CrmClientId.make("crm-client-external");
+
+        const settledAt = DateTime.makeUnsafe("2026-01-01T00:00:00.000Z");
+        for (const [threadId, projectId, opts] of [
+          [THREAD_SAME_PROJECT_FOREIGN, PROJECT_ALLOWED, { title: "Foreign Same Project" }],
+          [
+            THREAD_SETTLED_LINKED,
+            PROJECT_ALLOWED,
+            { title: "Settled Needle Linked", settled: true },
+          ],
+          [
+            THREAD_SETTLED_FOREIGN,
+            PROJECT_ALLOWED,
+            { title: "Settled Needle Foreign", settled: true },
+          ],
+          [THREAD_ARCHIVED_LINKED, PROJECT_ALLOWED, { title: "Archived Linked", archived: true }],
+          [THREAD_ARCHIVED_FOREIGN, PROJECT_ALLOWED, { title: "Archived Foreign", archived: true }],
+        ] as const) {
+          const baseThread = makeAppThread(threadId, projectId);
+          yield* sink.write({
+            events: [
+              {
+                id: EventId.make(`evt-create-${threadId}`),
+                threadId,
+                occurredAt: NOW,
+                type: "thread.created",
+                payload: {
+                  ...baseThread,
+                  title: opts.title,
+                  ...("settled" in opts && opts.settled
+                    ? { settledOverride: "settled" as const, settledAt }
+                    : {}),
+                  ...("archived" in opts && opts.archived ? { archivedAt: NOW } : {}),
+                },
+              },
+              {
+                id: EventId.make(`evt-msg-${threadId}`),
+                threadId,
+                occurredAt: NOW,
+                type: "message.updated",
+                payload: {
+                  id: MessageId.make(`msg-${threadId}`),
+                  threadId,
+                  runId: null,
+                  nodeId: null,
+                  role: "user",
+                  createdBy: "user",
+                  creationSource: "web",
+                  text: `sharedneedle from ${threadId}`,
+                  attachments: [],
+                  streaming: false,
+                  createdAt: NOW,
+                  updatedAt: NOW,
+                },
+              },
+            ],
+          });
+        }
+
+        const principalsRepo = yield* Principals.PrincipalRepository;
+        const crmRepo = yield* CrmRepo.CrmRepository;
+        yield* principalsRepo.create({
+          id: EXTERNAL_PRINCIPAL_ID,
+          kind: "external",
+          displayName: "External Client",
+          email: null,
+          status: "active",
+          ceiling: [AuthOrchestrationReadScope],
+          createdAt: NOW_ISO,
+        });
+        yield* crmRepo.createClient({
+          id: CRM_CLIENT_ID,
+          projectId: PROJECT_ALLOWED,
+          principalId: EXTERNAL_PRINCIPAL_ID,
+          name: "External Co",
+          company: null,
+          status: "active",
+          emailCiphertext: null,
+          emailFingerprint: null,
+          phoneCiphertext: null,
+          phoneFingerprint: null,
+          createdBy: PrincipalId.make("owner"),
+          createdAt: NOW_ISO,
+          updatedAt: NOW_ISO,
+        });
+        for (const linkedId of [THREAD_ALLOWED, THREAD_SETTLED_LINKED, THREAD_ARCHIVED_LINKED]) {
+          yield* crmRepo.linkThread({
+            projectId: PROJECT_ALLOWED,
+            clientId: CRM_CLIENT_ID,
+            threadId: linkedId,
+            createdBy: PrincipalId.make("owner"),
+            createdAt: NOW_ISO,
+          });
+        }
+
         const tested = [
           WS_METHODS.projectsListEntries,
           WS_METHODS.projectsReadFile,
           WS_METHODS.terminalOpen,
           ORCHESTRATION_V2_WS_METHODS.searchThreads,
+          ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot,
         ] as const;
         const group = WsRpcGroup.omit(
           ...[...WsRpcGroup.requests.keys()].filter(
@@ -927,10 +1032,20 @@ describe("Projects list and search filtering", () => {
             ),
           ),
         );
+        const projections = yield* ProjectionStore.ProjectionStoreV2;
+        const resolverLayer = ResourceResolver.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(ProjectionStore.ProjectionStoreV2, projections),
+              Layer.succeed(CrmRepo.CrmRepository, crmRepo),
+            ),
+          ),
+        );
         const unusedServices = Layer.mergeAll(
           Layer.succeed(SqlClient.SqlClient, sql),
           Layer.succeed(ProjectStore.ProjectStoreV2, projects),
           Layer.succeed(ThreadSearch.ThreadSearch, threadSearch),
+          resolverLayer,
           projectPathsLayer,
           Layer.mock(WorkspaceEntries.WorkspaceEntries)({
             list: (input) =>
@@ -947,6 +1062,11 @@ describe("Projects list and search filtering", () => {
                   : threadId === THREAD_FOREIGN
                     ? makeThreadShell(THREAD_FOREIGN, PROJECT_FOREIGN)
                     : null,
+              ),
+            readShellSnapshot: (options) =>
+              projections.readShellSnapshot(options).pipe(
+                Effect.orDie,
+                Effect.map((decode) => decode.pipe(Effect.orDie)),
               ),
           }),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
@@ -989,7 +1109,14 @@ describe("Projects list and search filtering", () => {
           Layer.mock(WorktreeSetupTracker.WorktreeSetupTracker)({}),
           Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({}),
           Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
-          Layer.mock(ProjectEnrichment.ProjectEnrichmentService)({}),
+          Layer.mock(ProjectEnrichment.ProjectEnrichmentService)({
+            getAvailable: () =>
+              Effect.succeed({
+                repositoryIdentity: null,
+                faviconPath: null,
+                repositoryIdentityResolved: true,
+              }),
+          }),
           Layer.mock(AgentSessionScanner.AgentSessionScanner)({}),
           Layer.mock(AgentSessionImporter.AgentSessionImporter)({}),
           Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({}),
@@ -1229,7 +1356,59 @@ describe("Projects list and search filtering", () => {
         const narrowedSearch = yield* narrowedClient[ORCHESTRATION_V2_WS_METHODS.searchThreads]({
           query: "sharedneedle",
         });
-        expect(narrowedSearch.matches.map((m) => m.projectId)).toEqual([PROJECT_ALLOWED]);
+        expect(new Set(narrowedSearch.matches.map((m) => m.projectId))).toEqual(
+          new Set([PROJECT_ALLOWED]),
+        );
+
+        // External principal over WS searchThreads sees ONLY linked threads (foreign thread in the SAME project is absent).
+        const externalActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("external-rpc"),
+          subject: `principal:${EXTERNAL_PRINCIPAL_ID}`,
+          scopes: [AuthOrchestrationReadScope],
+          principalId: EXTERNAL_PRINCIPAL_ID,
+          principalKind: "external",
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[PROJECT_ALLOWED, "viewer"]]),
+        };
+        const externalClient = yield* makeActorClient(externalActor);
+        const externalSearch = yield* externalClient[ORCHESTRATION_V2_WS_METHODS.searchThreads]({
+          query: "sharedneedle",
+        });
+        expect(externalSearch.matches.map((m) => m.threadId).toSorted()).toEqual(
+          [THREAD_ALLOWED, THREAD_SETTLED_LINKED].toSorted(),
+        );
+        expect(externalSearch.matches.some((m) => m.threadId === THREAD_SAME_PROJECT_FOREIGN)).toBe(
+          false,
+        );
+        expect(externalSearch.matches.some((m) => m.threadId === THREAD_SETTLED_FOREIGN)).toBe(
+          false,
+        );
+
+        // External principal olderSettledBefore search excludes foreign settled threads in the same project.
+        const externalOlderSettledSearch = yield* externalClient[
+          ORCHESTRATION_V2_WS_METHODS.searchThreads
+        ]({
+          query: "Settled Needle",
+          olderSettledBefore: NOW_ISO,
+        });
+        expect((externalOlderSettledSearch.threads ?? []).map((t) => t.id)).toEqual([
+          THREAD_SETTLED_LINKED,
+        ]);
+
+        // External principal getArchivedShellSnapshot excludes foreign archived threads in the same project.
+        const externalArchived = yield* externalClient[
+          ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot
+        ]({});
+        expect(externalArchived.threads.map((t) => t.id)).toEqual([THREAD_ARCHIVED_LINKED]);
+
+        // Regular staff viewer on PROJECT_ALLOWED still sees both archived threads in PROJECT_ALLOWED.
+        const viewerArchived = yield* narrowedClient[
+          ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot
+        ]({});
+        expect(viewerArchived.threads.map((t) => t.id).toSorted()).toEqual(
+          [THREAD_ARCHIVED_LINKED, THREAD_ARCHIVED_FOREIGN].toSorted(),
+        );
 
         // Owner / legacy actor sees both projects and keeps arbitrary terminal cwd behavior.
         const ownerClient = yield* makeActorClient();
@@ -1242,8 +1421,8 @@ describe("Projects list and search filtering", () => {
         const ownerSearch = yield* ownerClient[ORCHESTRATION_V2_WS_METHODS.searchThreads]({
           query: "sharedneedle",
         });
-        expect(ownerSearch.matches.map((m) => m.projectId).toSorted()).toEqual(
-          [PROJECT_ALLOWED, PROJECT_FOREIGN].toSorted(),
+        expect(new Set(ownerSearch.matches.map((m) => m.projectId))).toEqual(
+          new Set([PROJECT_ALLOWED, PROJECT_FOREIGN]),
         );
       }).pipe(
         Effect.provide(
@@ -1253,8 +1432,11 @@ describe("Projects list and search filtering", () => {
                 Layer.mergeAll(EventStore.layer, ProjectionStore.layer, ProjectStore.layer),
               ),
             ),
+            ProjectionStore.layer,
             ProjectStore.layer,
             ThreadSearch.layer,
+            Principals.layer,
+            CrmRepo.layer,
           ).pipe(Layer.provideMerge(SqlitePersistence.layerMemory)),
         ),
         Effect.scoped,

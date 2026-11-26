@@ -511,7 +511,7 @@ it.effect("enforces allocated project_isolation port ranges for L1 isolated proj
               }
             : { allowed: true, level: 0 as const, portsFrom: null, portsTo: null },
         ),
-      findByPort: () => Effect.succeed(Option.none()),
+      findByPort: () => Effect.succeedNone,
     });
 
     const tunnel = yield* serveTunnel(Effect.never, undefined, isolationLayer);

@@ -17,9 +17,12 @@ import {
   type CrmNoteCreateInput,
   CrmNoteId,
   type CrmNoteUpdateInput,
+  type CrmPortalThread,
+  type CrmPortalView,
+  OrchestrationV2ShellThreadStatus,
   ProjectForbiddenError,
   ProjectId,
-  type ThreadId,
+  ThreadId,
   TrimmedNonEmptyString,
   ceilingScopes,
   maskCrmEmail,
@@ -78,10 +81,12 @@ export class CrmInvalidInputError extends Schema.TaggedError<CrmInvalidInputErro
 
 export class CrmNotFoundError extends Schema.TaggedError<CrmNotFoundError>()("CrmNotFoundError", {
   resource: Schema.Literals(["project", "client", "contact", "note", "thread"]),
-  projectId: ProjectId,
+  projectId: Schema.optionalKey(ProjectId),
 }) {
   override get message(): string {
-    return `The requested CRM ${this.resource} was not found in project ${this.projectId}.`;
+    return this.projectId === undefined
+      ? `The requested CRM ${this.resource} was not found.`
+      : `The requested CRM ${this.resource} was not found in project ${this.projectId}.`;
   }
 }
 
@@ -109,6 +114,7 @@ export type CrmServiceError =
   | CrmInternalError;
 
 const encodeJsonLine = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
+const decodeShellThreadStatus = Schema.decodeUnknownOption(OrchestrationV2ShellThreadStatus);
 
 interface EncryptedPiiField {
   readonly ciphertext: Uint8Array | null;
@@ -255,6 +261,10 @@ export class CrmService extends Context.Service<
       readonly actor: ProjectAccess.AccessActor;
       readonly audit?: CrmAuditContext;
     }) => Effect.Effect<string, CrmServiceError>;
+    readonly getPortal: (input: {
+      readonly clientId?: CrmClientId;
+      readonly actor: ProjectAccess.AccessActor;
+    }) => Effect.Effect<CrmPortalView, CrmServiceError>;
   }
 >()("v3code/crm/CrmService") {}
 
@@ -1268,6 +1278,126 @@ const make = Effect.gen(function* () {
     },
   );
 
+  const getPortal: CrmService["Service"]["getPortal"] = Effect.fn("CrmService.getPortal")(
+    function* ({ clientId, actor }) {
+      if (!isExternalActor(actor) || actor.principalId === undefined) {
+        return yield* new CrmNotFoundError({ resource: "client" });
+      }
+      const externalPrincipalId = actor.principalId;
+
+      let targetClientId = clientId;
+      if (targetClientId === undefined) {
+        const ownClientIds = yield* repo
+          .listClientIdsForPrincipal(externalPrincipalId)
+          .pipe(
+            Effect.mapError((cause) => new CrmInternalError({ operation: "getPortal", cause })),
+          );
+        targetClientId = ownClientIds[0];
+        if (targetClientId === undefined) {
+          return yield* new CrmNotFoundError({ resource: "client" });
+        }
+      }
+
+      const clientOpt = yield* repo
+        .getClientById(targetClientId)
+        .pipe(Effect.mapError((cause) => new CrmInternalError({ operation: "getPortal", cause })));
+      if (Option.isNone(clientOpt) || clientOpt.value.principalId !== externalPrincipalId) {
+        return yield* new CrmNotFoundError({ resource: "client" });
+      }
+
+      const projectId = clientOpt.value.projectId;
+      const resource = resourceResolver.resourceForCrmHttpEndpoint("getClient", {
+        projectId,
+        clientId: targetClientId,
+      });
+      yield* projectAccess.assert(actor, resource.projectId, resource.capability);
+      yield* assertActiveProject(projectId);
+      const clientRow = yield* requireClientInProject({
+        projectId,
+        clientId: targetClientId,
+        actor,
+      });
+
+      const [projectRows, contactRows, threadLinks] = yield* Effect.all([
+        sql<{ readonly title: string }>`
+          SELECT title AS "title"
+          FROM projection_projects
+          WHERE project_id = ${projectId} AND deleted_at IS NULL
+          LIMIT 1
+        `.pipe(NodeSqliteClient.readOnly),
+        repo.listContactsForClient(projectId, targetClientId),
+        repo.listThreadsForClient(projectId, targetClientId),
+      ]).pipe(Effect.mapError((cause) => new CrmInternalError({ operation: "getPortal", cause })));
+
+      const key = yield* loadKey();
+      const client = yield* toPublicClient(key, clientRow);
+      const contacts = yield* Effect.forEach(contactRows, (row) => toPublicContact(key, row));
+
+      let threads: Array<CrmPortalThread> = [];
+      if (threadLinks.length > 0) {
+        const linkedThreadIds = threadLinks.map((entry) => entry.threadId);
+        const linkedAtByThreadId = new Map<string, string>(
+          threadLinks.map((entry) => [entry.threadId, entry.createdAt]),
+        );
+        const threadRows = yield* sql<{
+          readonly threadId: string;
+          readonly projectId: string;
+          readonly title: string;
+          readonly archivedAt: string | null;
+          readonly updatedAt: string | null;
+          readonly latestRunStatus: string | null;
+        }>`
+          SELECT
+            t.thread_id AS "threadId",
+            t.project_id AS "projectId",
+            t.title AS "title",
+            t.archived_at AS "archivedAt",
+            t.updated_at AS "updatedAt",
+            (
+              SELECT r.status
+              FROM orchestration_v2_projection_runs AS r
+              WHERE r.thread_id = t.thread_id
+              ORDER BY r.ordinal DESC
+              LIMIT 1
+            ) AS "latestRunStatus"
+          FROM orchestration_v2_projection_threads AS t
+          WHERE t.project_id = ${projectId}
+            AND t.deleted_at IS NULL
+            AND t.thread_id IN ${sql.in(linkedThreadIds)}
+          ORDER BY t.updated_at DESC, t.thread_id ASC
+        `.pipe(
+          NodeSqliteClient.readOnly,
+          Effect.mapError(
+            (cause) => new CrmInternalError({ operation: "getPortalThreads", cause }),
+          ),
+        );
+
+        threads = threadRows.map((row): CrmPortalThread => {
+          const parsedStatus =
+            row.latestRunStatus === null
+              ? Option.none()
+              : decodeShellThreadStatus(row.latestRunStatus);
+          return {
+            threadId: ThreadId.make(row.threadId),
+            projectId: ProjectId.make(row.projectId),
+            title: row.title,
+            status: Option.getOrElse(parsedStatus, () => "idle" as const),
+            archivedAt: row.archivedAt,
+            linkedAt: linkedAtByThreadId.get(row.threadId) ?? client.updatedAt,
+            updatedAt: row.updatedAt,
+          };
+        });
+      }
+
+      return {
+        projectTitle: projectRows[0]?.title ?? null,
+        client,
+        contacts,
+        threads,
+      } satisfies CrmPortalView;
+    },
+  );
+
   return CrmService.of({
     listClients,
     getClient,
@@ -1287,6 +1417,7 @@ const make = Effect.gen(function* () {
     unlinkClientThread,
     inviteClient,
     exportJsonl,
+    getPortal,
   });
 });
 

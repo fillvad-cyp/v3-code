@@ -1661,12 +1661,31 @@ export const layerWsRpc = (
         currentActor !== undefined
           ? ProjectAccess.accessibleProjectIdsForActor(currentActor)
           : boundProjectIds(currentSession.binding);
+      const resolverOption = yield* Effect.serviceOption(ResourceResolver.ResourceResolver);
       const readCurrentActor: Effect.Effect<ProjectAccess.AccessActor | undefined> =
         accessGate !== undefined ? accessGate.getActor : Effect.succeed(currentActor);
       const readAllowedProjectIds: Effect.Effect<ReadonlySet<string> | undefined> =
         accessGate !== undefined
           ? Effect.map(accessGate.getActor, ProjectAccess.accessibleProjectIdsForActor)
           : Effect.succeed(staticAllowedProjectIds);
+      const resolveExternalThreadsForActor = (
+        actor: ProjectAccess.AccessActor | undefined,
+      ): Effect.Effect<ReadonlySet<string> | undefined> => {
+        if (
+          actor === undefined ||
+          actor.isOwner ||
+          actor.principalKind !== "external" ||
+          actor.principalId === undefined ||
+          Option.isNone(resolverOption)
+        ) {
+          return Effect.undefined;
+        }
+        return resolverOption.value.resolveExternalPrincipalThreadIds(actor.principalId);
+      };
+      const readAllowedThreadIds: Effect.Effect<ReadonlySet<string> | undefined> = Effect.flatMap(
+        readCurrentActor,
+        resolveExternalThreadsForActor,
+      );
       const narrowProjectIds = (
         requested: ReadonlyArray<ProjectId> | undefined,
         allowedProjectIds: ReadonlySet<string> | undefined,
@@ -2453,26 +2472,46 @@ export const layerWsRpc = (
 
       const getOrchestrationV2ArchivedShellSnapshot = Effect.gen(function* () {
         const allowedProjectIds = yield* readAllowedProjectIds;
+        const allowedThreadIds = yield* readAllowedThreadIds;
         const allowedList =
           allowedProjectIds === undefined
             ? undefined
             : Array.from(allowedProjectIds, (id) => ProjectId.make(id));
+        const allowedThreadList =
+          allowedThreadIds === undefined
+            ? undefined
+            : Array.from(allowedThreadIds, (id) => ThreadId.make(id));
         const { threads, projects, snapshotSequence } = yield* loadShellSnapshotParts({
           sql,
-          readThreads: threadManagement.readShellSnapshot({
-            location: "archive",
-            ...(allowedList === undefined ? {} : { projectIds: allowedList }),
-          }),
+          readThreads:
+            allowedThreadList !== undefined && allowedThreadList.length === 0
+              ? Effect.succeed(
+                  Effect.succeed({
+                    schemaVersion: ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION,
+                    snapshotSequence: 0,
+                    threads: [],
+                    archivedThreads: [],
+                  }),
+                )
+              : threadManagement.readShellSnapshot({
+                  location: "archive",
+                  ...(allowedList === undefined ? {} : { projectIds: allowedList }),
+                  ...(allowedThreadList === undefined ? {} : { threadIds: allowedThreadList }),
+                }),
           listProjects: projectStore.listShells(
             allowedList === undefined ? undefined : { projectIds: allowedList },
           ),
           latestSequence: applicationEvents.latestApplicationSequence,
         });
+        const archivedThreads =
+          allowedThreadIds === undefined
+            ? threads.archivedThreads
+            : threads.archivedThreads.filter((thread) => allowedThreadIds.has(thread.id));
         return {
           schemaVersion: threads.schemaVersion,
           snapshotSequence,
           projects,
-          threads: threads.archivedThreads,
+          threads: archivedThreads,
         } as const;
       }).pipe(
         Effect.flatMap((snapshot) =>
@@ -2668,11 +2707,18 @@ export const layerWsRpc = (
           threadManagement
             .searchThreadStream(input)
             .pipe(Stream.mapError((cause) => new OrchestrationV2SearchThreadError({ cause }))),
-        [ORCHESTRATION_V2_WS_METHODS.searchThreads]: (input) =>
-          Effect.flatMap(readAllowedProjectIds, (allowedProjectIds) => {
+        [ORCHESTRATION_V2_WS_METHODS.searchThreads]: Effect.fn("ws.orchestrationV2.searchThreads")(
+          function* (input) {
+            const allowedProjectIds = yield* readAllowedProjectIds;
+            const allowedThreadIds = yield* readAllowedThreadIds;
             const projectIds = narrowProjectIds(input.projectIds, allowedProjectIds);
-            return ThreadSearch.searchThreadsWithOlderSettledRows({
+            const allowedThreadList =
+              allowedThreadIds === undefined
+                ? undefined
+                : Array.from(allowedThreadIds, (id) => ThreadId.make(id));
+            return yield* ThreadSearch.searchThreadsWithOlderSettledRows({
               request: projectIds === undefined ? input : { ...input, projectIds },
+              ...(allowedThreadList === undefined ? {} : { allowedThreadIds: allowedThreadList }),
               search: threadSearch.search,
               searchOlderSettled: threadSearch.searchOlderSettled,
               sql,
@@ -2688,7 +2734,8 @@ export const layerWsRpc = (
                   }),
               ),
             );
-          }),
+          },
+        ),
         [ORCHESTRATION_V2_WS_METHODS.getArchivedShellSnapshot]: (_input) =>
           getOrchestrationV2ArchivedShellSnapshot,
         [ORCHESTRATION_V2_WS_METHODS.getThreadFamily]: (input) =>
@@ -2970,21 +3017,6 @@ export const layerWsRpc = (
         [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: (input) =>
           Stream.unwrap(
             Effect.gen(function* () {
-              const resolverOption = yield* Effect.serviceOption(ResourceResolver.ResourceResolver);
-              const resolveExternalThreadsForActor = (
-                actor: ProjectAccess.AccessActor | undefined,
-              ): Effect.Effect<ReadonlySet<string> | undefined> => {
-                if (
-                  actor === undefined ||
-                  actor.isOwner ||
-                  actor.principalKind !== "external" ||
-                  actor.principalId === undefined ||
-                  Option.isNone(resolverOption)
-                ) {
-                  return Effect.undefined;
-                }
-                return resolverOption.value.resolveExternalPrincipalThreadIds(actor.principalId);
-              };
               const staticAllowedThreadIds =
                 accessGate === undefined
                   ? yield* resolveExternalThreadsForActor(currentActor)

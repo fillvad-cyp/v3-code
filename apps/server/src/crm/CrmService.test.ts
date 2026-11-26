@@ -11,6 +11,7 @@ import {
   type CrmClientThread,
   type CrmContact,
   type CrmNote,
+  type CrmPortalView,
   EnvironmentHttpApi,
   ORCHESTRATION_V2_WS_METHODS,
   type OrchestrationProjectShell,
@@ -264,6 +265,29 @@ const seedProjectsAndPrincipals = Effect.gen(function* () {
       )
     `;
   }
+
+  for (const [threadId, projectId] of [
+    [THREAD_A_LINKED, PROJECT_A],
+    [THREAD_A_UNLINKED, PROJECT_A],
+    [THREAD_B, PROJECT_B],
+  ] as const) {
+    yield* sql`
+      INSERT INTO orchestration_v2_projection_threads (
+        thread_id, project_id, title, default_provider, runtime_mode, interaction_mode,
+        active_provider_thread_id, created_at, updated_at, archived_at, deleted_at, payload_json
+      ) VALUES (
+        ${threadId}, ${projectId}, ${`Thread ${threadId}`}, 'codex', 'auto', 'default',
+        NULL, ${NOW_ISO}, ${NOW_ISO}, NULL, NULL, '{}'
+      )
+    `;
+  }
+  yield* sql`
+    INSERT INTO orchestration_v2_projection_runs (
+      run_id, thread_id, ordinal, provider, provider_thread_id, status, requested_at, completed_at, payload_json
+    ) VALUES (
+      'run-linked-1', ${THREAD_A_LINKED}, 1, 'codex', NULL, 'completed', ${NOW_ISO}, ${NOW_ISO}, '{}'
+    )
+  `;
 
   const createMember = (
     id: PrincipalId,
@@ -878,6 +902,22 @@ describe("CRM service, HTTP, PII encryption, DSR, and external principals", () =
               })
             ).json as CrmClient;
 
+            await request(`/api/projects/${PROJECT_A}/crm/clients/${c1.id}/contacts`, {
+              method: "POST",
+              token: tokens.managerToken,
+              body: {
+                name: "Primary Contact",
+                roleTitle: "CTO",
+                email: "cto@client.example",
+                phone: "+1 555 234 5678",
+              },
+            });
+            await request(`/api/projects/${PROJECT_A}/crm/clients/${c1.id}/notes`, {
+              method: "POST",
+              token: tokens.managerToken,
+              body: { body: "Internal staff-only note" },
+            });
+
             await request(`/api/projects/${PROJECT_A}/crm/clients/${c1.id}/threads`, {
               method: "POST",
               token: tokens.managerToken,
@@ -967,6 +1007,46 @@ describe("CRM service, HTTP, PII encryption, DSR, and external principals", () =
               { token: externalSession.token },
             );
             expect(unlinkedTranscript.status).toBe(404);
+
+            // Client portal GET /api/crm/portal returns own client record + masked contacts + linked threads (no internal notes).
+            const portalRes = await request("/api/crm/portal", {
+              token: externalSession.token,
+            });
+            expect(portalRes.status).toBe(200);
+            const portal = portalRes.json as CrmPortalView;
+            expect(portal.client.id).toBe(setup.client1.id);
+            expect(portal.client.emailMasked).toBe("o***@client.example");
+            expect(portal.contacts).toHaveLength(1);
+            expect(portal.contacts[0]?.name).toBe("Primary Contact");
+            expect(portal.contacts[0]?.emailMasked).toBe("c***@client.example");
+            expect(portal.contacts[0]?.phoneMasked).toBe("***5678");
+            expect(portal.threads.map((thread) => thread.threadId)).toEqual([THREAD_A_LINKED]);
+            expect(portal.threads[0]?.status).toBe("completed");
+            expect(portal.threads[0]?.title).toBe(`Thread ${THREAD_A_LINKED}`);
+            expect(portal.projectTitle).toBe(`Project ${PROJECT_A}`);
+            expect("notes" in (portal as unknown as Record<string, unknown>)).toBe(false);
+
+            // Explicit matching clientId succeeds; foreign clientId returns 404.
+            const portalOwnRes = await request(`/api/crm/portal?clientId=${setup.client1.id}`, {
+              token: externalSession.token,
+            });
+            expect(portalOwnRes.status).toBe(200);
+            expect((portalOwnRes.json as CrmPortalView).client.id).toBe(setup.client1.id);
+
+            const portalForeignRes = await request(`/api/crm/portal?clientId=${setup.client2.id}`, {
+              token: externalSession.token,
+            });
+            expect(portalForeignRes.status).toBe(404);
+
+            // Non-external principals (owner, manager) receive 404 from /api/crm/portal.
+            const ownerPortalRes = await request("/api/crm/portal", {
+              token: tokens.ownerToken,
+            });
+            expect(ownerPortalRes.status).toBe(404);
+            const managerPortalRes = await request(`/api/crm/portal?clientId=${setup.client1.id}`, {
+              token: tokens.managerToken,
+            });
+            expect(managerPortalRes.status).toBe(404);
           }),
         );
 

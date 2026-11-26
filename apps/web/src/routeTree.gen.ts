@@ -20,6 +20,7 @@ import { Route as ApproveAgentRouteImport } from './routes/approve-agent'
 import { Route as ChatRouteImport } from './routes/_chat'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
 import { Route as ProjectsProjectKeyRouteImport } from './routes/projects.$projectKey'
+import { Route as CClientIdRouteImport } from './routes/c.$clientId'
 import { Route as ChatWorkflowsRouteImport } from './routes/_chat.workflows'
 import { Route as ChatUsageRouteImport } from './routes/_chat.usage'
 import { Route as ChatSettingsRouteImport } from './routes/_chat.settings'
@@ -115,6 +116,11 @@ const ChatIndexRoute = ChatIndexRouteImport.update({
 const ProjectsProjectKeyRoute = ProjectsProjectKeyRouteImport.update({
   id: '/projects/$projectKey',
   path: '/projects/$projectKey',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const CClientIdRoute = CClientIdRouteImport.update({
+  id: '/c/$clientId',
+  path: '/c/$clientId',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ChatWorkflowsRoute = ChatWorkflowsRouteImport.update({
@@ -353,6 +359,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof ChatSettingsRouteWithChildren
   '/usage': typeof ChatUsageRoute
   '/workflows': typeof ChatWorkflowsRoute
+  '/c/$clientId': typeof CClientIdRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
@@ -406,6 +413,7 @@ export interface FileRoutesByTo {
   '/settings': typeof ChatSettingsRouteWithChildren
   '/usage': typeof ChatUsageRoute
   '/workflows': typeof ChatWorkflowsRoute
+  '/c/$clientId': typeof CClientIdRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/': typeof ChatIndexRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
@@ -462,6 +470,7 @@ export interface FileRoutesById {
   '/_chat/settings': typeof ChatSettingsRouteWithChildren
   '/_chat/usage': typeof ChatUsageRoute
   '/_chat/workflows': typeof ChatWorkflowsRoute
+  '/c/$clientId': typeof CClientIdRoute
   '/projects/$projectKey': typeof ProjectsProjectKeyRoute
   '/_chat/': typeof ChatIndexRoute
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
@@ -519,6 +528,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/usage'
     | '/workflows'
+    | '/c/$clientId'
     | '/projects/$projectKey'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
@@ -572,6 +582,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/usage'
     | '/workflows'
+    | '/c/$clientId'
     | '/projects/$projectKey'
     | '/'
     | '/$environmentId/$threadId'
@@ -627,6 +638,7 @@ export interface FileRouteTypes {
     | '/_chat/settings'
     | '/_chat/usage'
     | '/_chat/workflows'
+    | '/c/$clientId'
     | '/projects/$projectKey'
     | '/_chat/'
     | '/_chat/$environmentId/$threadId'
@@ -677,6 +689,7 @@ export interface RootRouteChildren {
   PairRoute: typeof PairRoute
   RecoverRoute: typeof RecoverRoute
   WelcomeRoute: typeof WelcomeRoute
+  CClientIdRoute: typeof CClientIdRoute
   ProjectsProjectKeyRoute: typeof ProjectsProjectKeyRoute
   PopoutThreadThreadIdRoute: typeof PopoutThreadThreadIdRoute
   ThreadsEnvironmentIdThreadIdRoute: typeof ThreadsEnvironmentIdThreadIdRoute
@@ -759,6 +772,13 @@ declare module '@tanstack/react-router' {
       path: '/projects/$projectKey'
       fullPath: '/projects/$projectKey'
       preLoaderRoute: typeof ProjectsProjectKeyRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/c/$clientId': {
+      id: '/c/$clientId'
+      path: '/c/$clientId'
+      fullPath: '/c/$clientId'
+      preLoaderRoute: typeof CClientIdRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/_chat/workflows': {
@@ -1169,6 +1189,7 @@ const rootRouteChildren: RootRouteChildren = {
   PairRoute: PairRoute,
   RecoverRoute: RecoverRoute,
   WelcomeRoute: WelcomeRoute,
+  CClientIdRoute: CClientIdRoute,
   ProjectsProjectKeyRoute: ProjectsProjectKeyRoute,
   PopoutThreadThreadIdRoute: PopoutThreadThreadIdRoute,
   ThreadsEnvironmentIdThreadIdRoute: ThreadsEnvironmentIdThreadIdRoute,

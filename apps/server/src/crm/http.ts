@@ -334,6 +334,19 @@ export const layer = HttpApiBuilder.group(
             })
             .pipe(traceLocalHandlerWork, mapCrmErrors);
         }),
+      )
+      .handle(
+        "getPortal",
+        Effect.fn("environment.crm.getPortal")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const { actor } = yield* resolveActor(AuthOrchestrationReadScope);
+          return yield* crm
+            .getPortal({
+              ...(args.query.clientId === undefined ? {} : { clientId: args.query.clientId }),
+              actor,
+            })
+            .pipe(traceLocalHandlerWork, mapCrmErrors);
+        }),
       );
   }),
 );

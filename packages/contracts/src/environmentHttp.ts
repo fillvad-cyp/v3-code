@@ -80,6 +80,7 @@ import {
   CrmNoteCreateInput,
   CrmNoteDeleteResult,
   CrmNoteUpdateInput,
+  CrmPortalView,
 } from "./crm.ts";
 import {
   ApiTokenCreateInput,
@@ -1396,6 +1397,14 @@ class EnvironmentCrmHttpApi extends HttpApiGroup.make("crm")
       params: Schema.Struct({ id: ProjectId }),
       query: Schema.Struct({ clientId: Schema.optionalKey(CrmClientId) }),
       success: Schema.String.pipe(HttpApiSchema.asText({ contentType: "application/x-ndjson" })),
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("getPortal", "/api/crm/portal", {
+      headers: OptionalBearerHeaders,
+      query: Schema.Struct({ clientId: Schema.optionalKey(CrmClientId) }),
+      success: CrmPortalView,
       error: EnvironmentCrmErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}

@@ -7,6 +7,7 @@ import { LoginRouteSurface } from "../components/auth/LoginRouteSurface";
 import { connectLoginCode, connectPasswordLogin } from "../connection/onboarding";
 import { submitMemberLoginCode, submitMemberPasswordLogin } from "../environments/primary";
 import { m } from "../i18n/messages";
+import { isClientPortalRoutePathname } from "../lib/clientPortal";
 import { isPopoutRoutePathname } from "../lib/threadPopout";
 import { useAtomCommand } from "../state/use-atom-command";
 
@@ -21,9 +22,14 @@ function parseOptionalString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function parseSafePopoutRedirect(value: unknown): string | undefined {
+function parseSafeRedirect(value: unknown): string | undefined {
   const raw = parseOptionalString(value);
-  if (!raw || raw.startsWith("//") || !isPopoutRoutePathname(raw.split("?")[0] ?? "")) {
+  const targetPathname = raw?.split("?")[0] ?? "";
+  if (
+    !raw ||
+    raw.startsWith("//") ||
+    (!isPopoutRoutePathname(targetPathname) && !isClientPortalRoutePathname(targetPathname))
+  ) {
     return undefined;
   }
   return raw;
@@ -34,7 +40,7 @@ export const Route = createFileRoute("/login")({
     const host = parseOptionalString(search.host);
     const environmentId = parseOptionalString(search.environmentId);
     const label = parseOptionalString(search.label);
-    const redirectTarget = parseSafePopoutRedirect(search.redirect);
+    const redirectTarget = parseSafeRedirect(search.redirect);
     return {
       ...(host !== undefined ? { host } : {}),
       ...(environmentId !== undefined ? { environmentId: EnvironmentId.make(environmentId) } : {}),

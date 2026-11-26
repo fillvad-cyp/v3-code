@@ -45,6 +45,7 @@ import {
   isPopoutRoutePathname,
   isPopoutWindowRuntime,
 } from "../lib/threadPopout";
+import { isClientPortalRoutePathname } from "../lib/clientPortal";
 import { useCopyToClipboard } from "../hooks/useCopyToClipboard";
 import { Button } from "../components/ui/button";
 import { StandalonePage, StandalonePageHeader } from "../components/ui/standalone-page";
@@ -157,7 +158,8 @@ function RootRouteNotFoundView() {
 
 function RootRouteView() {
   const pathname = useLocation({ select: (location) => location.pathname });
-  const isPopoutRoute = isPopoutRoutePathname(pathname);
+  const isMinimalShellRoute =
+    isPopoutRoutePathname(pathname) || isClientPortalRoutePathname(pathname);
   const privacyOverlayActive = usePrivacyShieldStore(
     (state) => state.locked || state.curtainVisible || state.wiped,
   );
@@ -168,7 +170,7 @@ function RootRouteView() {
       <AnchoredToastProvider>
         <div className="contents" inert={privacyOverlayActive}>
           <RootRouteBranch />
-          {isPopoutRoute ? null : <HomeScreenInstallPromptHost />}
+          {isMinimalShellRoute ? null : <HomeScreenInstallPromptHost />}
         </div>
         <PrivacyLockOverlayHost />
       </AnchoredToastProvider>
@@ -200,6 +202,10 @@ function RootRouteBranch() {
         <Outlet />
       </>
     );
+  }
+
+  if (isClientPortalRoutePathname(pathname)) {
+    return <Outlet />;
   }
 
   if (

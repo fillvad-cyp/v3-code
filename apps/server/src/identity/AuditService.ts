@@ -1,6 +1,7 @@
 import {
   AUDIT_LIST_DEFAULT_LIMIT,
   AUDIT_LIST_MAX_LIMIT,
+  type AuditChainVerificationResult,
   AuthAccessReadScope,
   type ListAuditEventsInput,
   type ListAuditEventsResult,
@@ -81,6 +82,7 @@ export class AuditService extends Context.Service<
       input: ListAuditEventsForActorInput,
     ) => Effect.Effect<ListAuditEventsResult, ListAuditEventsError>;
     readonly pruneExpired: Effect.Effect<number, AuditInternalError>;
+    readonly verifyChain: Effect.Effect<AuditChainVerificationResult, AuditInternalError>;
   }
 >()("v3code/identity/AuditService") {}
 
@@ -190,9 +192,16 @@ const make = Effect.gen(function* () {
     return pruned;
   });
 
+  const verifyChain = Effect.fn("AuditService.verifyChain")(function* () {
+    return yield* auditEvents.verifyChain.pipe(
+      Effect.mapError((cause) => new AuditInternalError({ operation: "verifyChain", cause })),
+    );
+  });
+
   return AuditService.of({
     listForActor,
     pruneExpired: pruneExpired(),
+    verifyChain: verifyChain(),
   });
 });
 

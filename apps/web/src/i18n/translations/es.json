@@ -2946,6 +2946,17 @@
   "cde84b45d4aebd17": "No se pudo verificar el adjunto subido. Vuelve a intentarlo cuando el servidor se reconecte.",
   "3a69567de3069c41": "El adjunto aún se está subiendo",
   "475fcc23da6c9997": "Los adjuntos aún se están subiendo",
+  "7b022008c76d6606": "Idle",
+  "bbe8d365173dc548": "Queued",
+  "c997f0d0a7d33f37": "Preparing",
+  "601a236f9943fd9b": "Starting",
+  "57569512261a6137": "Running",
+  "0a260c7744afd0be": "Esperando",
+  "61d1f4c00b6ac3bf": "Completed",
+  "f51a27c93f698055": "Interrupted",
+  "37ffec8201f153c1": "Falló",
+  "a960e8b4ccc9bc53": "Cancelled",
+  "084cbb0da34dd9d2": "Rolled back",
   "8a716fa4339878b4": "L{start} (antes)",
   "bb4924538fda7405": "L{start} a L{end} (antes)",
   "b0c4ffd6931493e9": "L{start} a L{end}",
@@ -5107,6 +5118,30 @@
   "c752acb0b7088295": "Conectado",
   "a097631b7acab9d8": "Esperando aprobación…",
   "aabd9632196ee7e5": "Reconectando…",
+  "5f327ae3dfbfc4b1": "Loading client portal",
+  "92e5954cde3abb8a": "Client portal unavailable",
+  "d9109fa3c2b8ac1b": "Could not load client portal",
+  "7d37bb8a5d0c0ce9": "This portal is only available to the invited client for this record.",
+  "236f5613f212a1fb": "A network or server error occurred while loading your client portal.",
+  "3994628c27d07c43": "Client portal",
+  "070e8d2523890f69": "{count, plural, one {{count} thread} other {{count} threads}}",
+  "78a1a02732fc74e8": "Cerrar sesión",
+  "d39da0fdc712260a": "Your client record and linked conversations.",
+  "5f442660d9d62695": "Personal contact details for this client record have been redacted.",
+  "e340cf194b1d904d": "Contacts",
+  "b1ac2f368367aa7a": "No contacts listed.",
+  "f7068768fdf3e96b": "Linked threads",
+  "a05fc94e78accc86": "No linked threads yet",
+  "993291d7517d3796": "Conversations shared with your account will appear here.",
+  "9e0e71048f2e77ca": "Archived",
+  "04653200ff39e7a0": [
+    "Updated ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
   "a80895f122d7020f": "No se pudo abrir el enlace",
   "2a1758375b2701f3": "No se pudo añadir el backend",
   "6730fa8ae68fad99": "No se pudo añadir el backend.",
@@ -9625,11 +9660,9 @@
   "f310726a2af97d6e": "Export JSONL",
   "3db76bd28949c53f": "Purge PII",
   "f03cd6b98a81ca8a": "Loading client details…",
-  "e340cf194b1d904d": "Contacts",
   "defbc2ce3201aeab": "No contacts added yet.",
   "2f4ef70d15027bb0": "Notes",
   "b4ebef6d56db918c": "No notes recorded yet.",
-  "f7068768fdf3e96b": "Linked threads",
   "add90d534b880b55": "Link thread",
   "572796cf5f5bb984": "No threads linked to this client yet.",
   "0873c92c97f73f56": "Unlink",
@@ -9655,6 +9688,15 @@
     }
   ],
   "1b8cf1a434288299": "Share this one-time code with the external client. Once accepted, they can view only their own CRM record and linked threads.",
+  "993f27bbba3066f6": [
+    "Expires",
+    " ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
   "add45f9682c06c43": [
     "Purge PII for ",
     {
@@ -9825,14 +9867,6 @@
   ],
   "c4c16915ad2600d4": "Loading project secrets…",
   "62d2d957ccde4893": "No secrets configured for this project yet.",
-  "04653200ff39e7a0": [
-    "Updated ",
-    {
-      "i": 1,
-      "k": "_gt_value_1",
-      "v": "v"
-    }
-  ],
   "a09ab001f479fd14": "Copied ref",
   "f800b8e6babcc6f1": "Copy ref",
   "6b1da89bf7daab6e": "Update",
@@ -9939,7 +9973,6 @@
   "366e370da9d8b04c": "Abrir navegador",
   "50c877d9fa8db3ec": "Copiar enlace de inicio de sesión",
   "663df6ba60de573b": "Abrir documentación",
-  "78a1a02732fc74e8": "Cerrar sesión",
   "e53ca6f665197e44": [
     "Introduce el código",
     " ",
@@ -12759,12 +12792,10 @@
   "e7c18f33bc1326f7": "Preparando",
   "26375cafb52d0503": "Objetivo",
   "ad78fae7d373cf21": "Trabajando",
-  "0a260c7744afd0be": "Esperando",
   "32ac331a7b1e7efd": "Aprobación",
   "a484e4248b460c95": "Respuesta",
   "0ab9086d50e83ca7": "Solicitud",
   "4ad56740ee2f814b": "Limitado",
-  "37ffec8201f153c1": "Falló",
   "984b361806ce8d25": "Reactivado",
   "c6e8abc00ae470d2": "Hecho",
   "f31a95961de19433": "Incidencia {key}: {title}, {state}",

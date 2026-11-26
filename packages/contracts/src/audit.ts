@@ -146,3 +146,17 @@ export const ListAuditEventsResult = Schema.Struct({
   nextCursor: Schema.NullOr(NonNegativeInt),
 });
 export type ListAuditEventsResult = typeof ListAuditEventsResult.Type;
+
+const AuditChainBrokenReason = Schema.Literals([
+  "missing_hash",
+  "prev_hash_mismatch",
+  "hash_mismatch",
+]);
+
+export const AuditChainVerificationResult = Schema.Struct({
+  valid: Schema.Boolean,
+  checked: NonNegativeInt,
+  firstBrokenId: Schema.NullOr(NonNegativeInt),
+  reason: Schema.NullOr(AuditChainBrokenReason),
+});
+export type AuditChainVerificationResult = typeof AuditChainVerificationResult.Type;

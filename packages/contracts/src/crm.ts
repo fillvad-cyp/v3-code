@@ -11,6 +11,7 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { Invitation } from "./membership.ts";
+import { OrchestrationV2ShellThreadStatus } from "./orchestrationV2.ts";
 
 export const CrmClientStatus = Schema.Literals(["lead", "active", "inactive", "archived"]);
 export type CrmClientStatus = typeof CrmClientStatus.Type;
@@ -186,3 +187,22 @@ export const CrmClientInviteResult = Schema.Struct({
   code: TrimmedNonEmptyString,
 });
 export type CrmClientInviteResult = typeof CrmClientInviteResult.Type;
+
+export const CrmPortalThread = Schema.Struct({
+  threadId: ThreadId,
+  projectId: ProjectId,
+  title: Schema.String,
+  status: OrchestrationV2ShellThreadStatus,
+  archivedAt: Schema.NullOr(IsoDateTime),
+  linkedAt: IsoDateTime,
+  updatedAt: Schema.NullOr(IsoDateTime),
+});
+export type CrmPortalThread = typeof CrmPortalThread.Type;
+
+export const CrmPortalView = Schema.Struct({
+  projectTitle: Schema.NullOr(Schema.String),
+  client: CrmClient,
+  contacts: Schema.Array(CrmContact),
+  threads: Schema.Array(CrmPortalThread),
+});
+export type CrmPortalView = typeof CrmPortalView.Type;
