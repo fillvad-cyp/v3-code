@@ -110,11 +110,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
           Effect.provideService(HostProcess.Environment, {}),
         );
         expect(descriptor.capabilities.serverInstallation).toEqual(
-          mode === "web" && platform !== "win32" ? { kind: "npm-global", prefix } : undefined,
+          platform !== "win32" ? { kind: "npm-global", prefix } : undefined,
         );
-        expect(descriptor.capabilities.serverSelfUpdate).toBe(
-          mode === "web" ? undefined : "desktop-managed",
-        );
+        expect(descriptor.capabilities.serverSelfUpdate).toBeUndefined();
         expect(descriptor.capabilities).toMatchObject({
           settledWorktreeCleanup: true,
           storageCleanupRun: true,
@@ -125,12 +123,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
       }
     }),
   );
-  it.effect.each([
-    { desktopAppUpdate: false, advertised: undefined },
-    { desktopAppUpdate: true, advertised: true },
-  ])(
-    "advertises desktop app updates only when the desktop can install them ($desktopAppUpdate)",
-    ({ desktopAppUpdate, advertised }) =>
+  it.effect.each([{ desktopAppUpdate: false }, { desktopAppUpdate: true }])(
+    "never advertises desktop app updates while self-updates are disabled ($desktopAppUpdate)",
+    ({ desktopAppUpdate }) =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const baseDir = yield* fs.makeTempDirectoryScoped();
@@ -162,10 +157,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
           desktopAppChannelSwitch: capabilities.desktopAppChannelSwitch,
           serverSelfUpdateProgress: capabilities.serverSelfUpdateProgress,
         }).toEqual({
-          serverSelfUpdate: "desktop-managed",
-          desktopAppUpdate: advertised,
-          desktopAppChannelSwitch: advertised,
-          serverSelfUpdateProgress: advertised,
+          serverSelfUpdate: undefined,
+          desktopAppUpdate: undefined,
+          desktopAppChannelSwitch: undefined,
+          serverSelfUpdateProgress: undefined,
         });
       }),
   );
@@ -185,8 +180,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
               ConfigProvider.layer(
                 ConfigProvider.fromEnv({
                   env: {
-                    T3CODE_ENVIRONMENT_LABEL: " MacBook ",
-                    T3CODE_ENVIRONMENT_MACHINE_KIND: "laptop",
+                    V3CODE_ENVIRONMENT_LABEL: " MacBook ",
+                    V3CODE_ENVIRONMENT_MACHINE_KIND: "laptop",
                   },
                 }),
               ),
@@ -328,7 +323,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
     }),
   );
 
-  it.effect("reports agent activity publishing from the current secret state", () =>
+  it.effect("keeps agent activity publishing disabled regardless of relay secret state", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
@@ -358,7 +353,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
 
         yield* secrets.set(RELAY_URL_SECRET, encode("https://relay.example"));
         const linked = yield* serverEnvironment.getDescriptor;
-        expect(linked.capabilities.agentActivityPublishing).toBe(true);
+        expect(linked.capabilities.agentActivityPublishing).toBe(false);
 
         yield* secrets.set(PUBLISH_AGENT_ACTIVITY_SECRET, encode("false"));
         const disabled = yield* serverEnvironment.getDescriptor;

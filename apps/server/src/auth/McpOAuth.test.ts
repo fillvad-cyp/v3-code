@@ -14,6 +14,7 @@ import {
   ceilingScopes,
   mcpClientScopes,
 } from "@t3tools/contracts";
+import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/connectAuth";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
 import { expect, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
@@ -903,7 +904,9 @@ it.effect(
 
       const onTunnel = yield* handoff("box.example.ts.net");
       const hosted = new URL(onTunnel.location);
-      expect(`${hosted.origin}${hosted.pathname}`).toBe("https://app.t3.codes/approve-agent");
+      expect(hosted.origin).toBe(DEFAULT_HOSTED_APP_URL);
+      expect(hosted.hostname).toBe("127.0.0.1");
+      expect(`${hosted.origin}${hosted.pathname}`).toBe(`${DEFAULT_HOSTED_APP_URL}/approve-agent`);
       expect(hosted.searchParams.get("environment")).toEqual(expect.any(String));
       hosted.searchParams.delete("environment");
       expect(hosted.searchParams.toString()).toBe(onTunnel.query);

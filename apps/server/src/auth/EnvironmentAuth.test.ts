@@ -4,6 +4,7 @@ import {
   authScopeResponse,
   AuthAdministrativeClientScopes,
   connectDeviceVerificationCode,
+  mcpClientScopes,
   PrincipalId,
   ProjectId,
 } from "@t3tools/contracts";
@@ -669,7 +670,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
         Effect.gen(function* () {
           const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
           const pairing = yield* serverAuth.issuePairingCredential({
-            scopes: ["orchestration:read"],
+            scopes: [...mcpClientScopes("read-only")],
           });
 
           const rejected = yield* Effect.flip(

@@ -281,7 +281,9 @@ it.effect(
       ).pipe(Layer.provideMerge(layerAuth));
 
       const ctx = yield* Layer.build(
-        Layer.mergeAll(layerIdentity, layerConfig, NodeServices.layer, NodeCrypto.layer),
+        Layer.merge(layerIdentity, layerConfig).pipe(
+          Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+        ),
       );
       const provided = Layer.succeedContext(ctx);
       const httpLayer = HttpApiBuilder.layer(AuthTestApi).pipe(

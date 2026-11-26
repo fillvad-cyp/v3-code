@@ -417,7 +417,8 @@ const resumeSkipsUnknownTypes = (scope: "thread" | "shell") =>
       } as unknown as ProjectService.ProjectService["Service"]),
       Effect.provideService(ProjectEnrichment.ProjectEnrichmentService, {
         subscribeChanges: PubSub.subscribe(updates),
-      } as ProjectEnrichment.ProjectEnrichmentService["Service"]),
+        getAvailable: () => Effect.succeed({} as never),
+      } as unknown as ProjectEnrichment.ProjectEnrichmentService["Service"]),
     );
     assert.deepEqual(
       items.map((item) => item.kind),
@@ -585,6 +586,7 @@ it.effect("shell groups read distinct threads once and keep each event's own seq
               (changes) =>
                 ({
                   subscribeChanges: PubSub.subscribe(changes),
+                  getAvailable: () => Effect.succeed({} as never),
                 }) as unknown as ProjectEnrichment.ProjectEnrichmentService["Service"],
             ),
           ),
@@ -808,6 +810,7 @@ it.effect("shell snapshots omit idle children and older settled threads only on 
               (changes) =>
                 ({
                   subscribeChanges: PubSub.subscribe(changes),
+                  getAvailable: () => Effect.succeed({} as never),
                 }) as unknown as ProjectEnrichment.ProjectEnrichmentService["Service"],
             ),
           ),

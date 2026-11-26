@@ -1,6 +1,7 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  AuthAccessReadScope,
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
@@ -11,6 +12,7 @@ import {
   AuthStandardClientScopes,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  mcpClientScopes,
   PrincipalId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -417,22 +419,18 @@ it.effect("hands out a link code or a guest link only within what the session it
       yield* manager[WS_METHODS.peerLinksPairLink]({ environmentId, access: "read-only" }).pipe(
         Effect.flip,
       ),
-    ).toMatchObject({ requiredPermission: AuthOrchestrationReadScope });
+    ).toMatchObject({ requiredPermission: AuthAccessReadScope });
     expect(
       yield* manager[WS_METHODS.guestShareCreate]({ threadId }).pipe(Effect.flip),
     ).toMatchObject({ requiredPermission: AuthOrchestrationReadScope });
 
-    const supervisor = yield* clientWith([
-      AuthAccessWriteScope,
-      AuthOrchestrationReadScope,
-      AuthOrchestrationOperateScope,
-    ]);
+    const supervisor = yield* clientWith([AuthAccessWriteScope, ...mcpClientScopes("auto")]);
     expect(
       yield* supervisor[WS_METHODS.peerLinksPairLink]({
         environmentId,
         access: "full-access",
       }).pipe(Effect.flip),
-    ).toMatchObject({ requiredPermission: AuthSettingsWriteScope });
+    ).toMatchObject({ requiredPermission: AuthProvidersManageScope });
     expect(handled).toBe(0);
 
     expect(

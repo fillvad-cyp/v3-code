@@ -131,7 +131,7 @@ it.effect(
             );
           }),
         );
-      }).pipe(Effect.provide(baseLayer), Effect.provide(Logger.layer([captureLogger])));
+      }).pipe(Effect.provide(Layer.merge(baseLayer, Logger.layer([captureLogger]))));
 
       const pruneLogs = logged.filter((entry) =>
         Array.isArray(entry)
