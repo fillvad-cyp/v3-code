@@ -3,6 +3,7 @@ import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Match from "effect/Match";
+import * as Option from "effect/Option";
 import * as Schedule from "effect/Schedule";
 import * as Semaphore from "effect/Semaphore";
 import { ChildProcessSpawner } from "effect/process";
@@ -22,6 +23,7 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import type { SourceControlProcessInput } from "@t3tools/source-control-core/server/SourceControlHost";
 
+import * as ProjectIsolation from "../isolation/ProjectIsolation.ts";
 import { gitCommandDuration, gitCommandsTotal, withMetrics } from "../observability/Metrics.ts";
 import * as ProcessRunner from "../processRunner.ts";
 
@@ -229,6 +231,7 @@ const canRetryFullFsync = (stderr: string) =>
 export const make = Effect.gen(function* () {
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const hostPlatform = yield* HostProcess.Platform;
+  const projectIsolation = yield* Effect.serviceOption(ProjectIsolation.ProjectIsolation);
   const vcsProcesses = yield* Semaphore.make(VCS_PROCESS_CONCURRENCY);
   const nonGitProcesses = yield* Semaphore.make(NON_GIT_PROCESS_CONCURRENCY);
   const backgroundProcesses = yield* Semaphore.make(NON_GIT_PROCESS_CONCURRENCY - 1);
@@ -247,6 +250,20 @@ export const make = Effect.gen(function* () {
     baseError: VcsProcessErrorContext,
   ) {
     let failedExit = false;
+    const baseCommandEnv: NodeJS.ProcessEnv = {
+      ...(input.command === "git" ? unsetInheritedRepositoryEnv(process.env, hostPlatform) : {}),
+      // Failures are read by English patterns; without LANG, macOS Git follows the system language.
+      // LANGUAGE leaves LC_CTYPE, which hooks inherit, alone.
+      ...(input.command === "git" ? { LANGUAGE: "C" } : {}),
+      ...input.env,
+      ...serverGitConfigEnv({ ...process.env, ...input.env }, hostPlatform),
+    };
+    const isolatedGitEnv =
+      input.command === "git" && Option.isSome(projectIsolation)
+        ? yield* projectIsolation.value
+            .resolveGitEnvForPath(input.cwd, { ...process.env, ...baseCommandEnv })
+            .pipe(Effect.orElseSucceed(() => ({})))
+        : {};
     const execution = processRunner
       .run({
         command: input.command,
@@ -257,14 +274,8 @@ export const make = Effect.gen(function* () {
         ...(input.onStdoutChunk !== undefined ? { onStdoutChunk: input.onStdoutChunk } : {}),
         ...(input.onSpawn !== undefined ? { onSpawn: input.onSpawn } : {}),
         env: {
-          ...(input.command === "git"
-            ? unsetInheritedRepositoryEnv(process.env, hostPlatform)
-            : {}),
-          // Failures are read by English patterns; without LANG, macOS Git follows the system language.
-          // LANGUAGE leaves LC_CTYPE, which hooks inherit, alone.
-          ...(input.command === "git" ? { LANGUAGE: "C" } : {}),
-          ...input.env,
-          ...serverGitConfigEnv({ ...process.env, ...input.env }, hostPlatform),
+          ...baseCommandEnv,
+          ...isolatedGitEnv,
         },
         timeout: input.timeoutMs ?? DEFAULT_TIMEOUT_MS,
         maxOutputBytes: input.maxOutputBytes ?? DEFAULT_MAX_OUTPUT_BYTES,

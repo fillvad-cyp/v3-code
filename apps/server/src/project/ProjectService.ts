@@ -6,6 +6,7 @@ import {
   ProjectId,
   type Project,
   type ProjectCreatePayload,
+  type ProjectIsolationLevel,
   type ProjectTrackedFolder,
   type ProjectUpdatePayload,
   type ProjectSnapshot,
@@ -30,6 +31,7 @@ import * as Schema from "effect/Schema";
 import * as ProjectAccess from "../access/ProjectAccess.ts";
 import * as ServerConfig from "../config.ts";
 import * as MembershipService from "../identity/MembershipService.ts";
+import * as ProjectIsolation from "../isolation/ProjectIsolation.ts";
 import { withCommandMetrics } from "../observability/Metrics.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
@@ -136,6 +138,7 @@ export class ProjectOperationError extends Schema.TaggedError<ProjectOperationEr
       "dispatch-project-command",
       "set-ownership",
       "grant-creator-membership",
+      "update-isolation",
     ]),
     projectId: Schema.optional(ProjectId),
     workspaceRoot: Schema.optional(Schema.String),
@@ -217,6 +220,7 @@ export const make = Effect.gen(function* () {
   const threadCommands = yield* ThreadCommandExecutor.ThreadCommandExecutor;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const membershipService = yield* Effect.serviceOption(MembershipService.MembershipService);
+  const projectIsolation = yield* Effect.serviceOption(ProjectIsolation.ProjectIsolation);
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const isManagedWorktreePath = yield* makeIsManagedWorktreePath;
@@ -230,6 +234,7 @@ export const make = Effect.gen(function* () {
   const toProject = (
     row: ProjectStore.ProjectRow,
     enrichment: ProjectEnrichmentService.ProjectEnrichment | null,
+    isolationLevel?: ProjectIsolationLevel,
   ): Project => ({
     id: row.projectId,
     title: row.title,
@@ -242,6 +247,7 @@ export const make = Effect.gen(function* () {
     projectIcon: row.projectIcon,
     scripts: row.scripts,
     trackedFolders: row.trackedFolders,
+    ...(isolationLevel === undefined ? {} : { isolationLevel }),
     pinnedAt: row.pinnedAt,
     archivedAt: row.archivedAt,
     createdAt: row.createdAt,
@@ -290,7 +296,13 @@ export const make = Effect.gen(function* () {
       row.deletedAt === null
         ? yield* projectEnrichment.getAvailable(row.workspaceRoot)
         : yield* projectEnrichment.peek(row.workspaceRoot);
-    return toProject(row, enrichment);
+    const isolationLevel = Option.isSome(projectIsolation)
+      ? yield* projectIsolation.value.get(row.projectId).pipe(
+          Effect.map((record) => (Option.isSome(record) ? record.value.level : (0 as const))),
+          Effect.orElseSucceed(() => undefined),
+        )
+      : undefined;
+    return toProject(row, enrichment, isolationLevel);
   });
 
   const readRow = (projectId: ProjectId, options?: { readonly includeDeleted?: boolean }) =>
@@ -842,6 +854,25 @@ export const make = Effect.gen(function* () {
       );
       if (workspaceRoot !== previousRoot || input.faviconPath !== undefined) {
         yield* projectEnrichment.invalidate([previousRoot, workspaceRoot]);
+      }
+      if (input.isolationLevel !== undefined && Option.isSome(projectIsolation)) {
+        const transition =
+          input.isolationLevel === 1
+            ? projectIsolation.value.enable(input.projectId)
+            : projectIsolation.value.disable(input.projectId);
+        yield* transition.pipe(
+          Effect.mapError((cause) =>
+            cause._tag === "ProjectIsolationNotFoundError"
+              ? new ProjectNotFoundError({ projectId: input.projectId })
+              : cause._tag === "ProjectIsolationPortExhaustedError"
+                ? new ProjectInvalidError({ projectId: input.projectId, detail: cause.message })
+                : new ProjectOperationError({
+                    operation: "update-isolation",
+                    projectId: input.projectId,
+                    cause,
+                  }),
+          ),
+        );
       }
       return yield* readCommitted(input.projectId);
     },

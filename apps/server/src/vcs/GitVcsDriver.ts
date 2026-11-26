@@ -170,6 +170,8 @@ export interface CreateWorktreeOptions {
   readonly worktreesDirectory?: string;
   /** Clone the checkout from the macOS worktree checkout cache. */
   readonly fastCheckout?: boolean;
+  /** Optional owning project id used for per-project L1 worktree placement and ownership. */
+  readonly projectId?: string | null;
 }
 
 export interface GitCommitProgress {

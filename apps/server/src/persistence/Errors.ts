@@ -123,10 +123,12 @@ export type InvitationRepositoryError = PersistenceSqlError | PersistenceDecodeE
 export type ApiTokenRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type AuditEventRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type ProjectQuotaRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type ProjectIsolationRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type ProjectSecretRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type ProjectUsageSampleRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type MemberLimitsRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type SessionPrincipalRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type RecoveryCodeRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type CrmRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 
 export type ProjectionRepositoryError = PersistenceSqlError | PersistenceDecodeError;

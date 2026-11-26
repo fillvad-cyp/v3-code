@@ -2100,19 +2100,23 @@ export function requiredScopesForServerSettingsPatch(
   ];
 }
 
-/** Host-executed project scripts require settings-write authority in addition to orchestration:operate. */
+/** Host-executed project scripts and isolation changes require settings-write authority in addition to orchestration:operate. */
 export function requiredScopesForProjectMutation(
   mutation: ProjectMutation,
 ): ReadonlyArray<AuthEnvironmentScope> {
-  if (mutation.type === "project.delete" || mutation.scripts === undefined) {
+  if (mutation.type === "project.delete") {
     return [AuthOrchestrationOperateScope];
   }
-  return [
-    ...new Set([
-      AuthOrchestrationOperateScope,
+  const scopes: Array<AuthEnvironmentScope> = [AuthOrchestrationOperateScope];
+  if (mutation.scripts !== undefined) {
+    scopes.push(
       ...requiredScopesForServerSettingsPatch({ defaultProjectScripts: mutation.scripts }),
-    ]),
-  ];
+    );
+  }
+  if (mutation.type === "project.update" && mutation.isolationLevel !== undefined) {
+    scopes.push(AuthSettingsWriteScope);
+  }
+  return [...new Set(scopes)];
 }
 
 export const ClientSettingsPatch = Schema.Struct({

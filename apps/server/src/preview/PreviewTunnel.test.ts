@@ -23,6 +23,7 @@ import * as Stream from "effect/Stream";
 import { HttpRouter, HttpServer } from "effect/http";
 
 import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ProjectIsolation from "../isolation/ProjectIsolation.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -217,44 +218,46 @@ const makeProjectAccessLayer = () => {
 const serveTunnel = (
   sessionInvalidated: Effect.Effect<void> = Effect.never,
   settings?: Layer.Layer<ServerSettingsService>,
+  isolation?: Layer.Layer<ProjectIsolation.ProjectIsolation>,
 ) =>
   Effect.gen(function* () {
     const settingsLayer = settings ?? (yield* makeSettings()).layer;
-    const services = yield* Layer.build(
-      HttpRouter.serve(PreviewTunnel.routeLayer, { disableListenLog: true }).pipe(
-        Layer.provideMerge(NodeHttpServer.layerTest),
-        Layer.provide(PreviewTunnel.layer.pipe(Layer.provide(settingsLayer))),
-        Layer.provide(makeProjectAccessLayer()),
-        Layer.provide(
-          Layer.mock(SessionStore.SessionStore, {
-            cookieName: "t3_session",
-            legacyCookieName: undefined,
-            awaitInvalidation: () => sessionInvalidated,
-          }),
-        ),
-        Layer.provide(
-          Layer.mock(EnvironmentAuth.EnvironmentAuth, {
-            authenticateWebSocketUpgrade: (request) => {
-              const principalId = request.url.includes("wsTicket=member-operator")
-                ? OPERATOR_PRINCIPAL_ID
-                : request.url.includes("wsTicket=member-viewer")
-                  ? VIEWER_PRINCIPAL_ID
-                  : undefined;
-              return Effect.succeed({
-                sessionId: AuthSessionId.make("tunnel-test"),
-                subject: "tunnel-test",
-                method: "bearer-access-token",
-                scopes: request.url.includes("wsTicket=reader")
-                  ? [AuthOrchestrationReadScope]
-                  : [AuthOrchestrationReadScope, AuthTerminalOperateScope],
-                ...(principalId === undefined
-                  ? {}
-                  : { principalId, binding: { _tag: "principal" as const } }),
-              });
-            },
-          }),
-        ),
+    const baseLayer = HttpRouter.serve(PreviewTunnel.routeLayer, { disableListenLog: true }).pipe(
+      Layer.provideMerge(NodeHttpServer.layerTest),
+      Layer.provide(PreviewTunnel.layer.pipe(Layer.provide(settingsLayer))),
+      Layer.provide(makeProjectAccessLayer()),
+      Layer.provide(
+        Layer.mock(SessionStore.SessionStore, {
+          cookieName: "t3_session",
+          legacyCookieName: undefined,
+          awaitInvalidation: () => sessionInvalidated,
+        }),
       ),
+      Layer.provide(
+        Layer.mock(EnvironmentAuth.EnvironmentAuth, {
+          authenticateWebSocketUpgrade: (request) => {
+            const principalId = request.url.includes("wsTicket=member-operator")
+              ? OPERATOR_PRINCIPAL_ID
+              : request.url.includes("wsTicket=member-viewer")
+                ? VIEWER_PRINCIPAL_ID
+                : undefined;
+            return Effect.succeed({
+              sessionId: AuthSessionId.make("tunnel-test"),
+              subject: "tunnel-test",
+              method: "bearer-access-token",
+              scopes: request.url.includes("wsTicket=reader")
+                ? [AuthOrchestrationReadScope]
+                : [AuthOrchestrationReadScope, AuthTerminalOperateScope],
+              ...(principalId === undefined
+                ? {}
+                : { principalId, binding: { _tag: "principal" as const } }),
+            });
+          },
+        }),
+      ),
+    );
+    const services = yield* Layer.build(
+      isolation === undefined ? baseLayer : baseLayer.pipe(Layer.provide(isolation)),
     );
     const origin = new URL(
       HttpServer.formatAddress(Context.get(services, HttpServer.HttpServer).address),
@@ -482,5 +485,54 @@ it.effect.each([
     const response = yield* refusal(client);
     expect(response).toEqual({ status: 403, portRefused: false });
     expect(dialled).toBe(0);
+  }),
+);
+
+it.effect("enforces allocated project_isolation port ranges for L1 isolated projects", () =>
+  Effect.gen(function* () {
+    const allowedUpstream = yield* listen((socket) => {
+      socket.write(Uint8Array.of(0x77));
+    });
+    let refusedDialled = 0;
+    const refusedUpstream = yield* listen((socket) => {
+      refusedDialled++;
+      socket.destroy();
+    });
+
+    const isolationLayer = Layer.mock(ProjectIsolation.ProjectIsolation, {
+      isPortAllowedForProject: (projectId, port) =>
+        Effect.succeed(
+          projectId === PREVIEW_PROJECT_ID
+            ? {
+                allowed: port === allowedUpstream.port,
+                level: 1 as const,
+                portsFrom: allowedUpstream.port,
+                portsTo: allowedUpstream.port,
+              }
+            : { allowed: true, level: 0 as const, portsFrom: null, portsTo: null },
+        ),
+      findByPort: () => Effect.succeed(Option.none()),
+    });
+
+    const tunnel = yield* serveTunnel(Effect.never, undefined, isolationLayer);
+
+    const allowedClient = yield* openTunnel(
+      `${tunnel.origin}/api/preview/tunnel?port=${allowedUpstream.port}&projectId=${PREVIEW_PROJECT_ID}&wsTicket=member-operator`,
+    );
+    const received = yield* Effect.promise(
+      () =>
+        new Promise<number[]>((resolve, reject) => {
+          allowedClient.on("error", reject);
+          allowedClient.on("message", (data: Buffer) => resolve([...data]));
+        }),
+    );
+    expect(received).toEqual([0x77]);
+
+    const deniedClient = yield* openTunnel(
+      `${tunnel.origin}/api/preview/tunnel?port=${refusedUpstream.port}&projectId=${PREVIEW_PROJECT_ID}&wsTicket=member-operator`,
+    );
+    const denied = yield* refusal(deniedClient);
+    expect(denied).toEqual({ status: 403, portRefused: true });
+    expect(refusedDialled).toBe(0);
   }),
 );

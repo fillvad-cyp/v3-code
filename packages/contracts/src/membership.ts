@@ -3,9 +3,11 @@ import * as Schema from "effect/Schema";
 import {
   ApiTokenId,
   AuthSessionId,
+  CrmClientId,
   InvitationId,
   IsoDateTime,
   NonNegativeInt,
+  PositiveInt,
   PrincipalId,
   ProjectId,
   TrimmedNonEmptyString,
@@ -106,6 +108,8 @@ export const Invitation = Schema.Struct({
   projectId: Schema.NullOr(ProjectId),
   /** Non-null when this code logs an existing principal in instead of creating a new one. */
   principalId: Schema.optionalKey(Schema.NullOr(PrincipalId)),
+  /** Non-null when this client invitation binds the accepted external principal to a CRM client. */
+  crmClientId: Schema.optionalKey(Schema.NullOr(CrmClientId)),
   ceiling: Schema.Array(Schema.String),
   createdBy: PrincipalId,
   createdAt: IsoDateTime,
@@ -344,9 +348,10 @@ export const SessionPrincipal = Schema.Struct({
 export type SessionPrincipal = typeof SessionPrincipal.Type;
 
 export const InvitationCreateInput = Schema.Struct({
-  kind: Schema.optionalKey(Schema.Literal("staff")),
+  kind: Schema.optionalKey(Schema.Literals(["staff", "client", "external"])),
   role: ProjectRole,
   projectId: Schema.NullOr(ProjectId),
+  crmClientId: Schema.optionalKey(Schema.NullOr(CrmClientId)),
 });
 export type InvitationCreateInput = typeof InvitationCreateInput.Type;
 
@@ -495,3 +500,40 @@ export const ApiTokenRevokeResult = Schema.Struct({
   revoked: Schema.Boolean,
 });
 export type ApiTokenRevokeResult = typeof ApiTokenRevokeResult.Type;
+
+/**
+ * Project OS isolation level:
+ * - `0` (L0): logical filtering only (default, all OSes).
+ * - `1` (L1): per-project Linux OS service user (`svc-<slug>`) and group (`t3-<slug>`).
+ */
+export const ProjectIsolationLevel = Schema.Literals([0, 1]);
+export type ProjectIsolationLevel = typeof ProjectIsolationLevel.Type;
+
+export const ProjectIsolationAdoptionState = Schema.Literals([
+  "none",
+  "pending",
+  "adopted",
+  "fallback",
+  "disabled",
+]);
+export type ProjectIsolationAdoptionState = typeof ProjectIsolationAdoptionState.Type;
+
+export const ProjectIsolationRecord = Schema.Struct({
+  projectId: ProjectId,
+  level: ProjectIsolationLevel,
+  serviceUser: Schema.NullOr(TrimmedNonEmptyString),
+  serviceGroup: Schema.NullOr(TrimmedNonEmptyString),
+  portsFrom: Schema.NullOr(PositiveInt),
+  portsTo: Schema.NullOr(PositiveInt),
+  adoptionState: ProjectIsolationAdoptionState,
+  fallbackReason: Schema.NullOr(Schema.String),
+  adoptedAt: Schema.NullOr(IsoDateTime),
+  updatedAt: IsoDateTime,
+});
+export type ProjectIsolationRecord = typeof ProjectIsolationRecord.Type;
+
+/** Project secret names materialized for L1 Git SSH and HTTPS askpass credentials. */
+export const PROJECT_GIT_SSH_KEY_SECRET_NAME = "GIT_SSH_KEY";
+export const PROJECT_GIT_SSH_KNOWN_HOSTS_SECRET_NAME = "GIT_SSH_KNOWN_HOSTS";
+export const PROJECT_GIT_HTTP_TOKEN_SECRET_NAME = "GIT_HTTP_TOKEN";
+export const PROJECT_GIT_HTTP_USERNAME_SECRET_NAME = "GIT_HTTP_USERNAME";

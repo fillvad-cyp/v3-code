@@ -24,6 +24,7 @@ import {
   TerminalSessionLookupError,
   TerminalWriteError,
   type PrincipalId,
+  ProjectId,
   type TerminalAttachInput,
   type TerminalAttachStreamEvent,
   type TerminalClearInput,
@@ -80,6 +81,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import { increment, terminalSessionsTotal } from "../observability/Metrics.ts";
 import { expandHomeVariable } from "@t3tools/provider-core/server/pathExpansion";
 import * as ProcessRunner from "../processRunner.ts";
+import * as ProjectIsolation from "../isolation/ProjectIsolation.ts";
 import * as PortScanner from "../preview/PortScanner.ts";
 import * as NativeTelemetryClient from "../resourceTelemetry/NativeTelemetryClient.ts";
 import { terminalOutputStream } from "./OutputProtocol.ts";
@@ -1751,6 +1753,9 @@ interface TerminalManagerOptions {
     Record<string, string>,
     TerminalProviderInstanceNotFoundError | TerminalProviderEnvironmentError
   >;
+  resolveProjectIsolation?: (
+    projectId: ProjectId,
+  ) => Effect.Effect<Option.Option<ProjectIsolation.ProjectIsolationRuntimeContext>>;
   disableDiskLogs?: boolean;
 }
 
@@ -1806,6 +1811,7 @@ export const make = Effect.fn("TerminalManager.make")(function* (
   const portDiscovery = yield* PortScanner.PortDiscovery;
   const nativeTelemetry = yield* NativeTelemetryClient.NativeTelemetryClient;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const projectIsolation = yield* Effect.serviceOption(ProjectIsolation.ProjectIsolation);
   const path = yield* Path.Path;
   const resolveProviderInstanceEnvironment = Effect.fn(
     "terminal.resolveProviderInstanceEnvironment",
@@ -1831,6 +1837,9 @@ export const make = Effect.fn("TerminalManager.make")(function* (
     registerTerminalProcesses: portDiscovery.registerTerminalProcesses,
     unregisterTerminal: portDiscovery.unregisterTerminal,
     resolveProviderInstanceEnvironment,
+    ...(Option.isSome(projectIsolation)
+      ? { resolveProjectIsolation: projectIsolation.value.resolveForProject }
+      : {}),
     disableDiskLogs: noLogs === true,
   });
 });
@@ -2790,6 +2799,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     session: TerminalSessionState,
     index = 0,
     lastError: PtyAdapter.PtySpawnError | null = null,
+    isolationContext: ProjectIsolation.ProjectIsolationRuntimeContext | null = null,
   ): Effect.fn.Return<
     { process: PtyAdapter.PtyProcess; shell: string; shellLabel: string },
     PtyAdapter.PtySpawnError
@@ -2840,16 +2850,32 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         session,
         index + 1,
         new PtyAdapter.PtySpawnError({ adapter: "terminal-manager", shell: candidate.shell }),
+        isolationContext,
       );
     }
 
-    const launch = yield* agentScope.wrap({
-      command: executable,
-      args: candidate.args ?? [],
-      name: "terminal",
-      env: spawnEnv,
-      survivesRestart: true,
-    });
+    const launch =
+      isolationContext !== null
+        ? ProjectIsolation.buildSystemdRunCommand({
+            serviceUser: isolationContext.serviceUser,
+            serviceGroup: isolationContext.serviceGroup,
+            cwd: session.cwd,
+            command: executable,
+            args: candidate.args ?? [],
+            env: Object.fromEntries(
+              Object.entries(spawnEnv).filter(
+                (entry): entry is [string, string] => entry[1] !== undefined,
+              ),
+            ),
+            useSudo: isolationContext.useSudo,
+          })
+        : yield* agentScope.wrap({
+            command: executable,
+            args: candidate.args ?? [],
+            name: "terminal",
+            env: spawnEnv,
+            survivesRestart: true,
+          });
     const attempt = yield* Effect.result(
       options.ptyAdapter.spawn({
         shell: launch.command,
@@ -2874,7 +2900,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       return yield* spawnError;
     }
 
-    return yield* trySpawn(shellCandidates, spawnEnv, session, index + 1, spawnError);
+    return yield* trySpawn(
+      shellCandidates,
+      spawnEnv,
+      session,
+      index + 1,
+      spawnError,
+      isolationContext,
+    );
   });
 
   const startSession = Effect.fn("terminal.startSession")(function* (
@@ -2917,21 +2950,42 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       increment(terminalSessionsTotal, { lifecycle: eventType }).pipe(
         Effect.andThen(
           Effect.gen(function* () {
+            const projectIdFromEnv = session.runtimeEnv?.T3_PROJECT_ID?.trim();
+            const isolationContext =
+              platform === "linux" &&
+              projectIdFromEnv &&
+              options.resolveProjectIsolation !== undefined
+                ? Option.getOrNull(
+                    yield* options
+                      .resolveProjectIsolation(ProjectId.make(projectIdFromEnv))
+                      .pipe(Effect.orElseSucceed(() => Option.none())),
+                  )
+                : null;
             const shellCandidates = yield* resolveShellCandidates(
               shellResolver,
               platform,
               baseEnv,
               session.runtimeEnv?.T3CODE_TERMINAL_SHELL ?? baseEnv.T3CODE_TERMINAL_SHELL,
             ).pipe(Effect.provideService(FileSystem.FileSystem, fileSystem));
-            const terminalEnv = createTerminalSpawnEnv(
-              baseEnv,
-              session.runtimeEnv,
-              platform,
-              yield* HostProcess.HomeDirectory,
-              session.threadId,
-            );
-            // Append managed install directories so agent commands resolve without shadowing user/system tools.
+            const terminalEnv: NodeJS.ProcessEnv =
+              isolationContext !== null
+                ? ProjectIsolation.buildIsolatedTerminalEnv({
+                    serviceUser: isolationContext.serviceUser,
+                    serviceHome: isolationContext.serviceHome,
+                    projectId: isolationContext.projectId,
+                    memberId: session.runtimeEnv?.T3_MEMBER_ID ?? session.ownerPrincipalId,
+                    baseEnv,
+                  })
+                : createTerminalSpawnEnv(
+                    baseEnv,
+                    session.runtimeEnv,
+                    platform,
+                    yield* HostProcess.HomeDirectory,
+                    session.threadId,
+                  );
+            // Append managed install directories for L0; L1 keeps a strict env allowlist.
             if (
+              isolationContext === null &&
               options.managedBinaryCacheDir !== undefined &&
               options.managedBinaryToolsDir !== undefined
             ) {
@@ -2962,7 +3016,14 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
                 }
               }
             }
-            const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
+            const spawnResult = yield* trySpawn(
+              shellCandidates,
+              terminalEnv,
+              session,
+              0,
+              null,
+              isolationContext,
+            );
             ptyProcess = spawnResult.process;
             startedShell = spawnResult.shellLabel;
 

@@ -132,13 +132,26 @@
 
 ---
 
-## 4. Изоляция (текущий уровень — L0)
+## 4. Изоляция (L0 по умолчанию, L1 по флагу проекта)
 
-| Уровень                          | Что изолирует                                  | Где           | Статус      |
-| -------------------------------- | ---------------------------------------------- | ------------- | ----------- |
-| **L0 логический**                | серверная фильтрация ресурсов, путей и стримов | все ОС        | реализовано |
-| **L1 OS-пользователь на проект** | файлы, процессы, git-креды, env                | Linux-серверы | дальше      |
-| **L2 контейнер на проект**       | ФС, сеть, ресурсы                              | Linux, сервер | дальше      |
+| Уровень                          | Что изолирует                                  | Где           | Статус               |
+| -------------------------------- | ---------------------------------------------- | ------------- | -------------------- |
+| **L0 логический**                | серверная фильтрация ресурсов, путей и стримов | все ОС        | реализовано          |
+| **L1 OS-пользователь на проект** | файлы, процессы, git-креды, env, порты preview | Linux-серверы | реализовано (opt-in) |
+| **L2 контейнер на проект**       | ФС, сеть, ресурсы                              | Linux, сервер | дальше               |
+
+### 4.1 L1 (opt-in по проекту)
+
+Реализовано в [`ProjectIsolation.ts`](../../apps/server/src/isolation/ProjectIsolation.ts), миграции [`117_ProjectIsolation.ts`](../../apps/server/src/persistence/Migrations/117_ProjectIsolation.ts) и CLI `t3 project isolation <id> --level 0|1` (через `projectsMutate(project.update)`, требующий `project:settings`):
+
+- **ОС-учётка и ФС:** создаёт `svc-<slug>` и группу `t3-<slug>`, назначает `g+rws` корню проекта и его каталогу worktree (`<worktreesDir>/<projectId>`), а поддерево `<stateDir>/projects/<projectId>` переводит в `0700` с владельцем `svc-<slug>`. Без прав root (`sudo -n true`) или не на Linux безопасно откатывается на L0 с фиксацией `adoption_state = 'fallback'` и причины. `disable()` снимает членство без удаления рабочих файлов; `adoptExisting()` повторно применяет владение после обновлений.
+- **Терминал:** запускает shell через `systemd-run --scope --uid=svc-<slug> --gid=t3-<slug>` с жёстким env-allowlist (`PATH`, `HOME=/home/svc-*`, `T3_PROJECT_ID`, `T3_MEMBER_ID`, `LANG`, `TERM`); валидация `cwd` остаётся на `ProjectPaths`.
+- **Git и секреты проекта:** для L1-проектов добавляет проектный `safe.directory` и материализует креды в `<stateDir>/projects/<projectId>/git/` (`0600`/`0700`) по конвенции имён в `project_secrets`:
+  - `GIT_SSH_KEY` — приватный SSH-ключ для `GIT_SSH_COMMAND` (с `IdentitiesOnly=yes`, `BatchMode=yes` и сбросом `SSH_AUTH_SOCK`);
+  - `GIT_SSH_KNOWN_HOSTS` — опциональный `known_hosts`;
+  - `GIT_HTTP_TOKEN` — токен/пароль для `GIT_ASKPASS` (`GIT_TERMINAL_PROMPT=0`);
+  - `GIT_HTTP_USERNAME` — опциональный логин для `GIT_ASKPASS` (по умолчанию `x-access-token`).
+- **Worktree и порты preview:** worktree L1-проекта размещаются в `<worktreesDir>/<projectId>/...` с группой `t3-<slug>`; `PreviewTunnel` проверяет, что порт попадает в выделенный диапазон `ports_from..ports_to` из `project_isolation`.
 
 По поверхностям в L0:
 

@@ -192,6 +192,11 @@ import * as AuditService from "./identity/AuditService.ts";
 import * as PrincipalLimitsService from "./identity/PrincipalLimitsService.ts";
 import * as ProjectQuotaService from "./project/ProjectQuotaService.ts";
 import * as ProjectSecrets from "./project/ProjectSecrets.ts";
+import * as CrmService from "./crm/CrmService.ts";
+import * as CrmHttp from "./crm/http.ts";
+import * as CrmRepo from "./persistence/Crm.ts";
+import * as ProjectIsolation from "./isolation/ProjectIsolation.ts";
+import * as ProjectIsolationRepo from "./persistence/ProjectIsolationRepo.ts";
 import * as InvitationService from "./identity/InvitationService.ts";
 import * as MembershipService from "./identity/MembershipService.ts";
 import * as Passwords from "./identity/Passwords.ts";
@@ -629,6 +634,7 @@ const layerAccess = Layer.mergeAll(
   ),
   ResourceResolver.layer.pipe(
     Layer.provide(ProjectionStoreV2.layer),
+    Layer.provide(CrmRepo.layer),
     Layer.provide(layerPersistence),
   ),
 );
@@ -654,6 +660,14 @@ const layerProjectSecrets = ProjectSecrets.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
 );
 
+const layerProjectIsolation = ProjectIsolation.layer.pipe(
+  Layer.provide(ProjectIsolationRepo.layer),
+  Layer.provide(ProjectStore.layer),
+  Layer.provide(ProcessRunner.layer),
+  Layer.provide(layerPersistence),
+  Layer.provide(layerProjectSecrets),
+);
+
 const layerIdentity = Layer.mergeAll(
   layerMembership,
   layerAuditService,
@@ -677,6 +691,15 @@ const layerIdentity = Layer.mergeAll(
     Layer.provide(layerPersistence),
     Layer.provide(ServerSecretStore.layer),
   ),
+);
+
+const layerCrmService = CrmService.layer.pipe(
+  Layer.provide(CrmRepo.layer),
+  Layer.provide(layerIdentity),
+  Layer.provide(layerIdentityRepositories),
+  Layer.provide(layerAccess),
+  Layer.provide(layerPersistence),
+  Layer.provide(ServerSecretStore.layer),
 );
 
 const layerCloudManagedEndpointRuntime = Layer.mergeAll(
@@ -938,7 +961,9 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   Layer.provideMerge(layerAuth),
   Layer.provideMerge(layerAccess),
   Layer.provideMerge(layerProjectSecrets),
+  Layer.provideMerge(layerProjectIsolation),
   Layer.provideMerge(layerIdentity),
+  Layer.provideMerge(layerCrmService),
   Layer.provideMerge(AuditService.layerRetention.pipe(Layer.provide(layerAuditService))),
   Layer.provideMerge(
     Layer.mergeAll(AssetSigner.layer, EnvironmentKeys.layer, WorkspacePreviewRevisions.layer),
@@ -994,6 +1019,7 @@ const layerMakeRoutes = Layer.mergeAll(
       Layer.provide(OrchestrationHttp.layer),
       Layer.provide(PullRequestHttp.layer),
       Layer.provide(ProjectHttp.layer),
+      Layer.provide(CrmHttp.layer),
       Layer.provide(speechHttpApiLayer),
       Layer.provide(ServerHttp.layerServerEnvironmentHttpApi),
       Layer.provide(WebhookRoute.layer.pipe(Layer.provide(RelayDeliveryProof.layer))),
