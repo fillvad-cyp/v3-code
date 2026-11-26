@@ -127,6 +127,26 @@ describe("searchSettings", () => {
     expect(enabledIds.has("multi-user-mode")).toBe(true);
   });
 
+  it("finds Roles & permissions and My access from settings search", () => {
+    expect(searchSettings("roles")[0]).toMatchObject({
+      id: "roles-permissions",
+      to: "/settings/roles",
+    });
+    expect(searchSettings("my access")[0]).toMatchObject({
+      id: "my-access",
+      to: "/settings/my-access",
+    });
+    const russian = (message: string) => {
+      if (message === "Roles & permissions") return "Роли и права";
+      if (message === "My access") return "Мои доступы";
+      return message;
+    };
+    expect(searchSettings("роли и права", SETTINGS_SEARCH_ITEMS, russian)[0]?.id).toBe(
+      "roles-permissions",
+    );
+    expect(searchSettings("мои доступы", SETTINGS_SEARCH_ITEMS, russian)[0]?.id).toBe("my-access");
+  });
+
   it("finds where subagents and side chats open by any of its names", () => {
     for (const query of ["side panel", "subagent", "side chat", "linked thread", "middle click"]) {
       expect(searchSettings(query).map((item) => item.id)).toContain("side-thread-open-target");

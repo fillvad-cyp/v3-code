@@ -36,6 +36,8 @@ export type SettingsPath =
   | "/settings/worktrees"
   | "/settings/connections"
   | "/settings/access"
+  | "/settings/roles"
+  | "/settings/my-access"
   | "/settings/secrets"
   | "/settings/maintenance"
   | "/settings/labs"
@@ -119,6 +121,8 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/worktrees": msg("Worktrees"),
   "/settings/connections": msg("Environments"),
   "/settings/access": msg("Sharing & access"),
+  "/settings/roles": msg("Roles & permissions"),
+  "/settings/my-access": msg("My access"),
   "/settings/secrets": msg("Secrets"),
   "/settings/maintenance": msg("Maintenance"),
   "/settings/labs": msg("Labs"),
@@ -1538,6 +1542,24 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "roles-permissions",
+    title: msg("Roles & permissions"),
+    to: "/settings/roles",
+    searchTerms: [
+      msg(
+        "role matrix capabilities permissions viewer operator developer manager admin owner l0 terminal host create delete project",
+      ),
+    ],
+  },
+  {
+    id: "my-access",
+    title: msg("My access"),
+    to: "/settings/my-access",
+    searchTerms: [
+      msg("my projects role permissions capabilities login code sign out member owner"),
+    ],
+  },
+  {
     id: "connections-environment",
     title: msg("This machine"),
     to: "/settings/access",
@@ -1624,6 +1646,8 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/worktrees": "project-defaults",
   "/settings/connections": "connections",
   "/settings/access": "connections",
+  "/settings/roles": "connections",
+  "/settings/my-access": "connections",
   "/settings/secrets": null,
   "/settings/scheduled-tasks": null,
   "/settings/maintenance": null,
