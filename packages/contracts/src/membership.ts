@@ -273,3 +273,65 @@ export const MemberLoginCodeResult = Schema.Struct({
   expiresAt: IsoDateTime,
 });
 export type MemberLoginCodeResult = typeof MemberLoginCodeResult.Type;
+
+export const PasswordSetInput = Schema.Struct({
+  password: Schema.String,
+});
+export type PasswordSetInput = typeof PasswordSetInput.Type;
+
+export const PasswordSetResult = Schema.Struct({
+  updated: Schema.Literal(true),
+});
+export type PasswordSetResult = typeof PasswordSetResult.Type;
+
+export const PasswordLoginInput = Schema.Union([
+  Schema.Struct({
+    email: TrimmedNonEmptyString,
+    password: Schema.String,
+  }),
+  Schema.Struct({
+    principalId: PrincipalId,
+    password: Schema.String,
+  }),
+]);
+export type PasswordLoginInput = typeof PasswordLoginInput.Type;
+
+export const RecoveryIssueInput = Schema.Struct({
+  principalId: Schema.optionalKey(PrincipalId),
+});
+export type RecoveryIssueInput = typeof RecoveryIssueInput.Type;
+
+export const RecoveryIssueResult = Schema.Struct({
+  code: TrimmedNonEmptyString,
+  expiresAt: IsoDateTime,
+  principalId: PrincipalId,
+});
+export type RecoveryIssueResult = typeof RecoveryIssueResult.Type;
+
+export const RecoveryConfirmInput = Schema.Struct({
+  code: TrimmedNonEmptyString,
+  password: Schema.String,
+});
+export type RecoveryConfirmInput = typeof RecoveryConfirmInput.Type;
+
+export const RecoveryConfirmResult = Schema.Struct({
+  recovered: Schema.Literal(true),
+  principalId: PrincipalId,
+  revokedSessions: NonNegativeInt,
+  revokedDevices: NonNegativeInt,
+  revokedTokens: NonNegativeInt,
+});
+export type RecoveryConfirmResult = typeof RecoveryConfirmResult.Type;
+
+export const OwnerTransferInput = Schema.Struct({
+  toPrincipalId: PrincipalId,
+  confirmation: TrimmedNonEmptyString,
+});
+export type OwnerTransferInput = typeof OwnerTransferInput.Type;
+
+export const OwnerTransferResult = Schema.Struct({
+  previousOwner: Principal,
+  newOwner: Principal,
+  adminProjectIds: Schema.Array(ProjectId),
+});
+export type OwnerTransferResult = typeof OwnerTransferResult.Type;

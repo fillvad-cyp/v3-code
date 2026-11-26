@@ -1439,6 +1439,8 @@ it.effect(
         get: () => Effect.die("unused"),
         getAccessStatus: () => Effect.die("unused"),
         getByEmail: () => Effect.die("unused"),
+        getOwner: Effect.die("unused"),
+        countOwners: Effect.die("unused"),
         list: Effect.die("unused"),
         create: () => Effect.die("unused"),
         update: () => Effect.die("unused"),

@@ -1,11 +1,11 @@
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, type PasswordLoginInput } from "@t3tools/contracts";
 import { createFileRoute, redirect, useNavigate, useRouter } from "@tanstack/react-router";
 
 import { LoginRouteSurface } from "../components/auth/LoginRouteSurface";
-import { connectLoginCode } from "../connection/onboarding";
-import { submitMemberLoginCode } from "../environments/primary";
+import { connectLoginCode, connectPasswordLogin } from "../connection/onboarding";
+import { submitMemberLoginCode, submitMemberPasswordLogin } from "../environments/primary";
 import { m } from "../i18n/messages";
 import { isPopoutRoutePathname } from "../lib/threadPopout";
 import { useAtomCommand } from "../state/use-atom-command";
@@ -63,6 +63,7 @@ function LoginRouteView() {
   const search = Route.useSearch();
   const { authGateState } = Route.useRouteContext();
   const connectRemoteLogin = useAtomCommand(connectLoginCode, { reportFailure: false });
+  const connectRemotePassword = useAtomCommand(connectPasswordLogin, { reportFailure: false });
 
   const initialErrorMessage =
     !search.host && authGateState.status === "requires-auth"
@@ -90,6 +91,27 @@ function LoginRouteView() {
     await submitMemberLoginCode(code);
   };
 
+  const handleSubmitPassword = async (credentials: PasswordLoginInput) => {
+    if (search.host) {
+      const result = await connectRemotePassword({
+        host: search.host,
+        credentials,
+        ...(search.environmentId ? { expectedEnvironmentId: search.environmentId } : {}),
+      });
+      if (result._tag === "Failure") {
+        const failure = squashAtomCommandFailure(result);
+        const message =
+          failure instanceof Error
+            ? (thrownErrorMessage(failure, m) ?? failure.message)
+            : String(failure);
+        throw new Error(message);
+      }
+      return;
+    }
+
+    await submitMemberPasswordLogin(credentials);
+  };
+
   const handleAuthenticated = () => {
     if (search.host) {
       void navigate({ to: "/", replace: true });
@@ -107,6 +129,7 @@ function LoginRouteView() {
       {...(search.host ? { host: search.host } : {})}
       {...(initialErrorMessage ? { initialErrorMessage } : {})}
       onSubmitCode={handleSubmitCode}
+      onSubmitPassword={handleSubmitPassword}
       onAuthenticated={handleAuthenticated}
     />
   );

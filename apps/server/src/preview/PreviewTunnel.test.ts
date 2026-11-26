@@ -176,6 +176,8 @@ const makeProjectAccessLayer = () => {
             );
           },
           getByEmail: () => Effect.die("unused"),
+          getOwner: Effect.die("unused"),
+          countOwners: Effect.die("unused"),
           list: Effect.succeed([...principals.values()]),
           create: () => Effect.die("unused"),
           update: () => Effect.die("unused"),

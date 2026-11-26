@@ -125,5 +125,6 @@ export type AuditEventRepositoryError = PersistenceSqlError | PersistenceDecodeE
 export type ProjectQuotaRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type MemberLimitsRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 export type SessionPrincipalRepositoryError = PersistenceSqlError | PersistenceDecodeError;
+export type RecoveryCodeRepositoryError = PersistenceSqlError | PersistenceDecodeError;
 
 export type ProjectionRepositoryError = PersistenceSqlError | PersistenceDecodeError;

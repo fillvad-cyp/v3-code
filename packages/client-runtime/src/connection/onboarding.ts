@@ -1,6 +1,10 @@
 import { msg } from "gt-i18n";
 import { detailFromError, translatableDetail } from "../errors/translatable.ts";
-import type { DesktopSshEnvironmentTarget, EnvironmentId } from "@t3tools/contracts";
+import type {
+  DesktopSshEnvironmentTarget,
+  EnvironmentId,
+  PasswordLoginInput,
+} from "@t3tools/contracts";
 import { resolveRemotePairingTarget } from "@t3tools/shared/remote";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -15,6 +19,7 @@ import {
   bootstrapRemoteBearerSession,
   exchangeRemoteDpopAccessToken,
   loginRemoteInvitationCode,
+  loginRemotePassword,
 } from "../authorization/remote.ts";
 import {
   deriveWsBaseUrl,
@@ -60,6 +65,12 @@ export interface LoginCodeConnectionInput {
   readonly expectedEnvironmentId?: EnvironmentId;
 }
 
+export interface PasswordLoginConnectionInput {
+  readonly host: string;
+  readonly credentials: PasswordLoginInput;
+  readonly expectedEnvironmentId?: EnvironmentId;
+}
+
 export interface SshConnectionInput {
   readonly target: DesktopSshEnvironmentTarget;
   readonly label?: string;
@@ -83,6 +94,12 @@ export class ConnectionOnboarding extends Context.Service<
     >;
     readonly registerLoginCode: (
       input: LoginCodeConnectionInput,
+    ) => Effect.Effect<
+      EnvironmentId,
+      ConnectionAttemptError | Persistence.ConnectionPersistenceError
+    >;
+    readonly registerPasswordLogin: (
+      input: PasswordLoginConnectionInput,
     ) => Effect.Effect<
       EnvironmentId,
       ConnectionAttemptError | Persistence.ConnectionPersistenceError
@@ -307,6 +324,74 @@ const registerLoginCodeConnection = Effect.fn(
   return registration.target.environmentId;
 });
 
+const preparePasswordLoginRegistration = Effect.fn(
+  "clientRuntime.connection.onboarding.preparePasswordLoginRegistration",
+)(function* (input: PasswordLoginConnectionInput) {
+  const httpBaseUrl = yield* Effect.try({
+    try: () => normalizeHttpBaseUrl(input.host),
+    catch: (cause) =>
+      new ConnectionBlockedError({
+        reason: "configuration",
+        ...(cause instanceof Error
+          ? detailFromError(cause)
+          : translatableDetail(msg("The environment URL is invalid."))),
+      }),
+  });
+  const wsBaseUrl = deriveWsBaseUrl(httpBaseUrl);
+  const descriptor = yield* fetchRemoteEnvironmentDescriptor({
+    httpBaseUrl,
+  }).pipe(Effect.mapError(mapRemoteEnvironmentError));
+  if (
+    input.expectedEnvironmentId !== undefined &&
+    descriptor.environmentId !== input.expectedEnvironmentId
+  ) {
+    return yield* differentMachineError(descriptor.label);
+  }
+  const connectionId = bearerConnectionId(descriptor.environmentId, httpBaseUrl);
+  const route = {
+    target: new BearerConnectionTarget({
+      environmentId: descriptor.environmentId,
+      label: descriptor.label,
+      connectionId,
+    }),
+    profile: new BearerConnectionProfile({
+      connectionId,
+      environmentId: descriptor.environmentId,
+      label: descriptor.label,
+      httpBaseUrl,
+      wsBaseUrl,
+    }),
+  };
+  const compatibilityError = orchestrationProtocolCompatibilityError(descriptor);
+  if (compatibilityError !== null && compatibilityError.serverUpdateRequired !== true) {
+    return yield* compatibilityError;
+  }
+  const session = yield* loginRemotePassword({
+    httpBaseUrl,
+    credentials: input.credentials,
+  }).pipe(Effect.mapError(mapRemoteEnvironmentError));
+
+  return new BearerConnectionRegistration({
+    ...route,
+    credential: new BearerConnectionCredential({
+      token: session.token,
+    }),
+  });
+});
+
+const registerPasswordLoginConnection = Effect.fn(
+  "clientRuntime.connection.onboarding.registerPasswordLoginConnection",
+)(function* (input: PasswordLoginConnectionInput) {
+  const registration = yield* preparePasswordLoginRegistration(input);
+  const registry = yield* EnvironmentRegistry.EnvironmentRegistry;
+  yield* registry.register(registration);
+  yield* registry.setCompatibility(registration.target.environmentId, null);
+  yield* registry
+    .setEnabled(registration.target.environmentId, true)
+    .pipe(Effect.catchTags({ EnvironmentNotRegisteredError: () => Effect.void }));
+  return registration.target.environmentId;
+});
+
 const REACHABILITY_TIMEOUT_MS = 6_000;
 
 const reachesEnvironment = Effect.fn("clientRuntime.connection.onboarding.reachesEnvironment")(
@@ -481,6 +566,13 @@ export const make = Effect.gen(function* () {
     registerLoginCode: Effect.fnUntraced(
       function* (input) {
         return yield* registerLoginCodeConnection(input);
+      },
+      Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, registry),
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+    ),
+    registerPasswordLogin: Effect.fnUntraced(
+      function* (input) {
+        return yield* registerPasswordLoginConnection(input);
       },
       Effect.provideService(EnvironmentRegistry.EnvironmentRegistry, registry),
       Effect.provideService(HttpClient.HttpClient, httpClient),

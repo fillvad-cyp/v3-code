@@ -450,6 +450,8 @@ describe("ResourceResolver", () => {
             },
             getAccessStatus: () => Effect.succeedSome({ status: "active", accessRevision: 0 }),
             getByEmail: () => Effect.die("unused"),
+            getOwner: Effect.die("unused"),
+            countOwners: Effect.die("unused"),
             list: Effect.die("unused"),
             create: () => Effect.die("unused"),
             update: () => Effect.die("unused"),

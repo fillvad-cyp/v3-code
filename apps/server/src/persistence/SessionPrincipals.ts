@@ -65,6 +65,9 @@ export class SessionPrincipalRepository extends Context.Service<
     readonly listForPrincipal: (
       principalId: PrincipalId,
     ) => Effect.Effect<ReadonlyArray<AuthSessionId>, SessionPrincipalRepositoryError>;
+    readonly downgradeEnvironmentBindingsForPrincipal: (
+      principalId: PrincipalId,
+    ) => Effect.Effect<number, SessionPrincipalRepositoryError>;
   }
 >()("v3code/persistence/SessionPrincipals/SessionPrincipalRepository") {}
 
@@ -137,6 +140,18 @@ const make = Effect.gen(function* () {
       `,
   });
 
+  const downgradeEnvironmentRowsForPrincipal = SqlSchema.findAll({
+    Request: PrincipalId,
+    Result: SessionIdRow,
+    execute: (principalId) =>
+      sql`
+        UPDATE session_principals
+        SET binding_kind = 'principal', binding_json = NULL
+        WHERE principal_id = ${principalId} AND binding_kind = 'environment'
+        RETURNING session_id AS "sessionId"
+      `,
+  });
+
   return SessionPrincipalRepository.of({
     get: Effect.fn("SessionPrincipalRepository.get")((sessionId) =>
       getRow(sessionId).pipe(
@@ -180,6 +195,14 @@ const make = Effect.gen(function* () {
         NodeSqliteClient.readOnly,
         Effect.mapError(toSqlOrDecodeError("listPrincipalSessions", "AuthSessionId")),
         Effect.map((rows) => rows.map((row) => row.sessionId)),
+      ),
+    ),
+    downgradeEnvironmentBindingsForPrincipal: Effect.fn(
+      "SessionPrincipalRepository.downgradeEnvironmentBindingsForPrincipal",
+    )((principalId) =>
+      downgradeEnvironmentRowsForPrincipal(principalId).pipe(
+        Effect.mapError(toSqlOrDecodeError("downgradeEnvironmentBindings", "AuthSessionId")),
+        Effect.map((rows) => rows.length),
       ),
     ),
   } satisfies SessionPrincipalRepository["Service"]);

@@ -205,6 +205,7 @@ function RootRouteBranch() {
   if (
     pathname === "/pair" ||
     pathname === "/login" ||
+    pathname === "/recover" ||
     pathname === "/connect" ||
     pathname === "/connect-agent" ||
     pathname === "/approve-agent"

@@ -7,6 +7,7 @@ import {
   type AuthEnvironmentScope,
   type AuthWebSocketTicketResult,
   type AuthWebSocketTicketUse,
+  type PasswordLoginInput,
 } from "@t3tools/contracts";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
 import * as Effect from "effect/Effect";
@@ -132,6 +133,44 @@ export const loginRemoteInvitationCode = Effect.fn(
     }),
   );
 });
+
+export const loginRemotePassword = Effect.fn("clientRuntime.authorization.loginRemotePassword")(
+  function* (input: {
+    readonly httpBaseUrl: string;
+    readonly credentials: PasswordLoginInput;
+    readonly timeoutMs?: number;
+  }) {
+    const client = yield* makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "auth");
+    return yield* executeEnvironmentHttpRequest(
+      environmentEndpointUrl(input.httpBaseUrl, "/api/auth/login"),
+      input.timeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS,
+      client.loginPassword({
+        payload: input.credentials,
+      }),
+    );
+  },
+);
+
+export const confirmRemoteRecovery = Effect.fn("clientRuntime.authorization.confirmRemoteRecovery")(
+  function* (input: {
+    readonly httpBaseUrl: string;
+    readonly code: string;
+    readonly password: string;
+    readonly timeoutMs?: number;
+  }) {
+    const client = yield* makeEnvironmentHttpApiGroupClient(input.httpBaseUrl, "auth");
+    return yield* executeEnvironmentHttpRequest(
+      environmentEndpointUrl(input.httpBaseUrl, "/api/auth/recovery/confirm"),
+      input.timeoutMs ?? DEFAULT_REMOTE_REQUEST_TIMEOUT_MS,
+      client.confirmRecovery({
+        payload: {
+          code: input.code,
+          password: input.password,
+        },
+      }),
+    );
+  },
+);
 
 export const revokeRemoteCurrentSession = Effect.fn(
   "clientRuntime.authorization.revokeRemoteCurrentSession",

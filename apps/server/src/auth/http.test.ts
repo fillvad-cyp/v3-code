@@ -30,14 +30,17 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as AuditService from "../identity/AuditService.ts";
 import * as InvitationService from "../identity/InvitationService.ts";
 import * as MembershipService from "../identity/MembershipService.ts";
+import * as Passwords from "../identity/Passwords.ts";
 import * as ApiTokens from "../persistence/ApiTokens.ts";
 import * as AuditEvents from "../persistence/AuditEvents.ts";
 import * as Invitations from "../persistence/Invitations.ts";
 import * as MemberLimits from "../persistence/MemberLimits.ts";
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
+import * as RecoveryCodes from "../persistence/RecoveryCodes.ts";
 import * as SessionPrincipals from "../persistence/SessionPrincipals.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
@@ -70,6 +73,7 @@ const layerIdentityRepositories = Layer.mergeAll(
   AuditEvents.layer,
   ApiTokens.layer,
   MemberLimits.layer,
+  RecoveryCodes.layer,
   SessionPrincipals.layer,
 );
 const makeLayerEnvironmentAuth = (settingsOverrides?: { readonly multiUser?: boolean }) =>
@@ -95,6 +99,12 @@ const layerIdentity = Layer.mergeAll(
     Layer.provide(layerMembership),
     Layer.provide(layerAccess),
     Layer.provide(layerIdentityRepositories),
+  ),
+  Passwords.layer.pipe(Layer.provide(layerIdentityRepositories)),
+  AuditService.layer.pipe(
+    Layer.provide(layerAccess),
+    Layer.provide(layerIdentityRepositories),
+    Layer.provide(ServerSettings.layerTest()),
   ),
   layerMembership,
   layerAccess,
@@ -1442,6 +1452,601 @@ it.live(
               ),
             );
             expect(rateLimitedResp.status).toBe(429);
+          }),
+        (environment) => Effect.promise(() => environment.dispose()),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.live(
+  "GET /api/audit enforces owner/admin access, filters events, and paginates by id cursor",
+  () =>
+    Effect.gen(function* () {
+      const random = yield* SecureRandom.SecureRandom;
+      let capturedAudit: AuditEvents.AuditEventRepository["Service"] | undefined;
+      const captureLayer = Layer.effectDiscard(
+        Effect.gen(function* () {
+          capturedAudit = yield* AuditEvents.AuditEventRepository;
+        }),
+      );
+      const multiUserRoutes = makeLayerRoutes({ multiUser: true });
+      const testLayer = captureLayer.pipe(
+        Layer.provideMerge(multiUserRoutes),
+        Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      );
+      const requestContext = Context.make(SecureRandom.SecureRandom, random);
+
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => HttpRouter.toWebHandler(testLayer, { disableLogger: true })),
+        (environment) =>
+          Effect.gen(function* () {
+            // Unauthenticated request returns 401.
+            const unauthResp = yield* Effect.promise(() =>
+              environment.handler(new Request("http://127.0.0.1/api/audit"), requestContext),
+            );
+            expect(unauthResp.status).toBe(401);
+
+            const devResponse = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/browser-session", { credential: DEV_TOKEN }),
+                requestContext,
+              ),
+            );
+            const ownerCookie =
+              devResponse.headers
+                .getSetCookie()
+                .find((cookie) => cookie.startsWith("t3_dev_session_"))
+                ?.split(";", 1)[0] ?? "";
+
+            const projectA = ProjectId.make("audit-proj-a");
+            const projectB = ProjectId.make("audit-proj-b");
+
+            const inviteAndAccept = (
+              displayName: string,
+              role: "admin" | "developer",
+              projectId: ProjectId,
+            ) =>
+              Effect.gen(function* () {
+                const invResp = yield* Effect.promise(() =>
+                  environment.handler(
+                    postJson(
+                      "/api/auth/invitations",
+                      { kind: "staff", role, projectId },
+                      { cookie: ownerCookie },
+                    ),
+                    requestContext,
+                  ),
+                );
+                expect(invResp.status).toBe(200);
+                const inv = (yield* Effect.promise(() => invResp.json())) as { code: string };
+                const accResp = yield* Effect.promise(() =>
+                  environment.handler(
+                    postJson("/api/auth/invitations/accept", { code: inv.code, displayName }),
+                    requestContext,
+                  ),
+                );
+                expect(accResp.status).toBe(200);
+                const body = (yield* Effect.promise(() => accResp.json())) as {
+                  token: string;
+                  principal: { id: string };
+                };
+                return { principalId: body.principal.id, token: body.token };
+              });
+
+            const adminA = yield* inviteAndAccept("Admin A", "admin", projectA);
+            const devA = yield* inviteAndAccept("Dev A", "developer", projectA);
+
+            // Seed explicit audit events across projectA, projectB, and environment-wide (null).
+            const idEnv = yield* capturedAudit!.append({
+              at: "2026-11-26T01:00:00.000Z",
+              actorPrincipalId: InvitationService.OWNER_PRINCIPAL_ID,
+              actorSessionId: null,
+              action: "login.succeeded",
+              resourceType: "session",
+              resourceId: "sess-env",
+              projectId: null,
+              ip: "10.0.0.1",
+              userAgent: "test-agent",
+              outcome: "allow",
+              metadata: null,
+            });
+            const idProjA1 = yield* capturedAudit!.append({
+              at: "2026-11-26T02:00:00.000Z",
+              actorPrincipalId: adminA.principalId as never,
+              actorSessionId: null,
+              action: "terminal.opened",
+              resourceType: "terminal",
+              resourceId: "term-a1",
+              projectId: projectA,
+              ip: "10.0.0.2",
+              userAgent: null,
+              outcome: "allow",
+              metadata: null,
+            });
+            const idProjB = yield* capturedAudit!.append({
+              at: "2026-11-26T03:00:00.000Z",
+              actorPrincipalId: InvitationService.OWNER_PRINCIPAL_ID,
+              actorSessionId: null,
+              action: "secret.read",
+              resourceType: "secret",
+              resourceId: "sec-b1",
+              projectId: projectB,
+              ip: "10.0.0.3",
+              userAgent: null,
+              outcome: "allow",
+              metadata: null,
+            });
+            const idProjA2 = yield* capturedAudit!.append({
+              at: "2026-11-26T04:00:00.000Z",
+              actorPrincipalId: devA.principalId as never,
+              actorSessionId: null,
+              action: "authorization.denied",
+              resourceType: "project",
+              resourceId: projectA,
+              projectId: projectA,
+              ip: "10.0.0.4",
+              userAgent: null,
+              outcome: "deny",
+              metadata: null,
+            });
+
+            // Non-admin member (developer, even with access:read) gets 403.
+            const devResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/audit", {
+                  headers: { authorization: `Bearer ${devA.token}` },
+                }),
+                requestContext,
+              ),
+            );
+            expect(devResp.status).toBe(403);
+
+            // Owner sees everything (projectA, projectB, environment-wide).
+            const ownerAllResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/audit", {
+                  headers: { cookie: ownerCookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(ownerAllResp.status).toBe(200);
+            const ownerAllBody = (yield* Effect.promise(() => ownerAllResp.json())) as {
+              events: Array<{ id: number; projectId: string | null; action: string }>;
+              nextCursor: number | null;
+            };
+            const ownerIds = ownerAllBody.events.map((event) => event.id);
+            expect(ownerIds).toContain(idEnv);
+            expect(ownerIds).toContain(idProjA1);
+            expect(ownerIds).toContain(idProjB);
+            expect(ownerIds).toContain(idProjA2);
+            expect(ownerAllBody.nextCursor).toBeNull();
+
+            // Admin of projectA sees ONLY projectA events (never projectB or null projectId).
+            const adminResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/audit", {
+                  headers: { authorization: `Bearer ${adminA.token}` },
+                }),
+                requestContext,
+              ),
+            );
+            expect(adminResp.status).toBe(200);
+            const adminBody = (yield* Effect.promise(() => adminResp.json())) as {
+              events: Array<{ id: number; projectId: string | null }>;
+              nextCursor: number | null;
+            };
+            expect(adminBody.events.length).toBeGreaterThanOrEqual(2);
+            expect(adminBody.events.every((event) => event.projectId === projectA)).toBe(true);
+            expect(adminBody.events.map((event) => event.id)).toContain(idProjA1);
+            expect(adminBody.events.map((event) => event.id)).toContain(idProjA2);
+            expect(adminBody.events.map((event) => event.id)).not.toContain(idEnv);
+            expect(adminBody.events.map((event) => event.id)).not.toContain(idProjB);
+
+            // Admin of projectA asking explicitly for projectB gets 403.
+            const adminOtherProjResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(
+                  `http://127.0.0.1/api/audit?projectId=${encodeURIComponent(projectB)}`,
+                  {
+                    headers: { authorization: `Bearer ${adminA.token}` },
+                  },
+                ),
+                requestContext,
+              ),
+            );
+            expect(adminOtherProjResp.status).toBe(403);
+
+            // Filters: action + actorPrincipalId + from/to.
+            const filteredResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(
+                  `http://127.0.0.1/api/audit?action=authorization.denied&actorPrincipalId=${encodeURIComponent(devA.principalId)}&from=${encodeURIComponent("2026-11-26T03:30:00.000Z")}&to=${encodeURIComponent("2026-11-26T04:30:00.000Z")}`,
+                  { headers: { authorization: `Bearer ${adminA.token}` } },
+                ),
+                requestContext,
+              ),
+            );
+            expect(filteredResp.status).toBe(200);
+            const filteredBody = (yield* Effect.promise(() => filteredResp.json())) as {
+              events: Array<{ id: number }>;
+              nextCursor: number | null;
+            };
+            expect(filteredBody.events.map((event) => event.id)).toEqual([idProjA2]);
+            expect(filteredBody.nextCursor).toBeNull();
+
+            // Invalid timestamp returns 400.
+            const badFromResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/audit?from=not-a-timestamp", {
+                  headers: { cookie: ownerCookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(badFromResp.status).toBe(400);
+
+            // Pagination by cursor & limit walks every event in strictly descending id order.
+            const collected: number[] = [];
+            let cursor: number | null = null;
+            for (let page = 0; page < 20; page++) {
+              const url =
+                cursor === null
+                  ? "http://127.0.0.1/api/audit?limit=2"
+                  : `http://127.0.0.1/api/audit?limit=2&cursor=${cursor}`;
+              const pageResp = yield* Effect.promise(() =>
+                environment.handler(
+                  new Request(url, { headers: { cookie: ownerCookie } }),
+                  requestContext,
+                ),
+              );
+              expect(pageResp.status).toBe(200);
+              const pageBody = (yield* Effect.promise(() => pageResp.json())) as {
+                events: Array<{ id: number }>;
+                nextCursor: number | null;
+              };
+              expect(pageBody.events.length).toBeLessThanOrEqual(2);
+              for (const event of pageBody.events) {
+                collected.push(event.id);
+              }
+              cursor = pageBody.nextCursor;
+              if (cursor === null) break;
+            }
+            expect(cursor).toBeNull();
+            expect(collected).toEqual(ownerIds);
+            // Strictly descending, no duplicates.
+            for (let i = 1; i < collected.length; i++) {
+              expect(collected[i]!).toBeLessThan(collected[i - 1]!);
+            }
+          }),
+        (environment) => Effect.promise(() => environment.dispose()),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.effect(
+  "sets passwords, logs in with rate limiting, recovers accounts, and transfers ownership over HTTP",
+  () =>
+    Effect.gen(function* () {
+      const random = yield* SecureRandom.SecureRandom;
+      const requestContext = Context.make(SecureRandom.SecureRandom, random);
+      let capturedPrincipals: Principals.PrincipalRepository["Service"] | undefined;
+      let capturedSql: import("effect/sql/SqlClient").SqlClient | undefined;
+      let capturedAudit: AuditEvents.AuditEventRepository["Service"] | undefined;
+
+      const testLayer = Layer.effectDiscard(
+        Effect.gen(function* () {
+          capturedPrincipals = yield* Principals.PrincipalRepository;
+          capturedSql = yield* (yield* Effect.promise(() => import("effect/sql/SqlClient")))
+            .SqlClient;
+          capturedAudit = yield* AuditEvents.AuditEventRepository;
+        }),
+      ).pipe(Layer.provideMerge(makeLayerRoutes({ multiUser: true })));
+
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => HttpRouter.toWebHandler(testLayer, { disableLogger: true })),
+        (environment) =>
+          Effect.gen(function* () {
+            // Owner session via dev bootstrap token.
+            const ownerBootResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/browser-session", { credential: DEV_TOKEN }),
+                requestContext,
+              ),
+            );
+            expect(ownerBootResp.status).toBe(200);
+            const ownerCookie = ownerBootResp.headers.get("set-cookie")!.split(";")[0]!;
+
+            // Seed a project so owner transfer rewrites roles on it.
+            yield* capturedSql!`
+              INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+              VALUES ('proj-transfer-1', 'Transfer Project', '/srv/transfer', '[]', '2026-01-01', '2026-01-01')
+            `;
+
+            // Invite Alice into proj-transfer-1 as developer and accept.
+            const inviteResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/invitations",
+                  { role: "developer", projectId: "proj-transfer-1" },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(inviteResp.status).toBe(200);
+            const { code: inviteCode } = (yield* Effect.promise(() => inviteResp.json())) as {
+              code: string;
+            };
+            const acceptResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/invitations/accept", {
+                  code: inviteCode,
+                  displayName: "Alice",
+                }),
+                requestContext,
+              ),
+            );
+            expect(acceptResp.status).toBe(200);
+            const accepted = (yield* Effect.promise(() => acceptResp.json())) as {
+              token: string;
+              principal: { id: string };
+            };
+            const aliceId = accepted.principal.id;
+            const aliceAuth = { authorization: `Bearer ${accepted.token}` };
+
+            // Give Alice an email so we can test email login too.
+            yield* capturedPrincipals!.update({
+              id: aliceId as import("@t3tools/contracts").PrincipalId,
+              email: "alice@example.com",
+              updatedAt: DateTime.formatIso(yield* DateTime.now),
+            });
+
+            // Unauthenticated /api/auth/password/set is 401.
+            const unauthSetResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/password/set", { password: "long-enough-password" }),
+                requestContext,
+              ),
+            );
+            expect(unauthSetResp.status).toBe(401);
+
+            // Short password is 400.
+            const shortSetResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/password/set", { password: "tiny" }, aliceAuth),
+                requestContext,
+              ),
+            );
+            expect(shortSetResp.status).toBe(400);
+
+            // Alice sets her own password.
+            const aliceSetResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/password/set", { password: "alice-password-1234" }, aliceAuth),
+                requestContext,
+              ),
+            );
+            expect(aliceSetResp.status).toBe(200);
+            expect(yield* Effect.promise(() => aliceSetResp.json())).toEqual({ updated: true });
+
+            // Non-owner cannot set owner's password via /api/auth/members/:id/password.
+            const nonOwnerSetResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/members/owner/password",
+                  { password: "hijack-password-1234" },
+                  aliceAuth,
+                ),
+                requestContext,
+              ),
+            );
+            expect(nonOwnerSetResp.status).toBe(403);
+
+            // Owner sets Alice's password.
+            const ownerSetResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  `/api/auth/members/${aliceId}/password`,
+                  { password: "owner-set-password-1234" },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(ownerSetResp.status).toBe(200);
+
+            // Unknown principal and wrong password return identical 401 message.
+            const unknownLoginResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/login", {
+                  email: "ghost@example.com",
+                  password: "owner-set-password-1234",
+                }),
+                requestContext,
+              ),
+            );
+            expect(unknownLoginResp.status).toBe(401);
+            const unknownLoginBody = (yield* Effect.promise(() => unknownLoginResp.json())) as {
+              message: string;
+            };
+
+            const wrongPassResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/login",
+                  { email: "alice@example.com", password: "wrong-password-1" },
+                  { "x-forwarded-for": "198.51.100.10" },
+                ),
+                requestContext,
+              ),
+            );
+            expect(wrongPassResp.status).toBe(401);
+            const wrongPassBody = (yield* Effect.promise(() => wrongPassResp.json())) as {
+              message: string;
+            };
+            expect(wrongPassBody.message).toBe(unknownLoginBody.message);
+
+            // Login by email returns bearer session with principal binding.
+            const loginResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/login",
+                  { email: "alice@example.com", password: "owner-set-password-1234" },
+                  { "x-forwarded-for": "198.51.100.10" },
+                ),
+                requestContext,
+              ),
+            );
+            expect(loginResp.status).toBe(200);
+            const loginBody = (yield* Effect.promise(() => loginResp.json())) as {
+              authenticated: boolean;
+              token: string;
+              binding_kind: string;
+              principal: { id: string };
+            };
+            expect(loginBody.authenticated).toBe(true);
+            expect(loginBody.binding_kind).toBe("principal");
+            expect(loginBody.principal.id).toBe(aliceId);
+
+            // 5 failed logins from a single IP trigger 429 on the 6th.
+            for (let i = 0; i < 5; i += 1) {
+              const failResp = yield* Effect.promise(() =>
+                environment.handler(
+                  postJson(
+                    "/api/auth/login",
+                    { email: "alice@example.com", password: `bad-password-${i}` },
+                    { "x-forwarded-for": "198.51.100.55" },
+                  ),
+                  requestContext,
+                ),
+              );
+              expect(failResp.status).toBe(401);
+            }
+            const rateLimitedResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/login",
+                  { email: "alice@example.com", password: "owner-set-password-1234" },
+                  { "x-forwarded-for": "198.51.100.55" },
+                ),
+                requestContext,
+              ),
+            );
+            expect(rateLimitedResp.status).toBe(429);
+
+            // Recovery flow: owner issues code for Alice, confirm sets password & revokes sessions.
+            const issueRecoveryResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/recovery", { principalId: aliceId }, { cookie: ownerCookie }),
+                requestContext,
+              ),
+            );
+            expect(issueRecoveryResp.status).toBe(200);
+            const recoveryIssued = (yield* Effect.promise(() => issueRecoveryResp.json())) as {
+              code: string;
+              principalId: string;
+            };
+            expect(recoveryIssued.principalId).toBe(aliceId);
+
+            const confirmRecoveryResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/recovery/confirm", {
+                  code: recoveryIssued.code,
+                  password: "recovered-password-9999",
+                }),
+                requestContext,
+              ),
+            );
+            expect(confirmRecoveryResp.status).toBe(200);
+            const confirmBody = (yield* Effect.promise(() => confirmRecoveryResp.json())) as {
+              recovered: boolean;
+              revokedSessions: number;
+            };
+            expect(confirmBody.recovered).toBe(true);
+            expect(confirmBody.revokedSessions).toBeGreaterThanOrEqual(2);
+
+            // Second confirm with the same code is 409 Conflict.
+            const replayRecoveryResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/recovery/confirm", {
+                  code: recoveryIssued.code,
+                  password: "another-password-9999",
+                }),
+                requestContext,
+              ),
+            );
+            expect(replayRecoveryResp.status).toBe(409);
+
+            // Alice's previous bearer token is now revoked (session endpoint reports unauthenticated).
+            const oldSessionResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request("http://127.0.0.1/api/auth/session", {
+                  headers: { authorization: `Bearer ${loginBody.token}` },
+                }),
+                requestContext,
+              ),
+            );
+            const oldSessionBody = (yield* Effect.promise(() => oldSessionResp.json())) as {
+              authenticated: boolean;
+            };
+            expect(oldSessionBody.authenticated).toBe(false);
+
+            // Alice logs in with her recovered password via principalId.
+            const reloginResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/login", {
+                  principalId: aliceId,
+                  password: "recovered-password-9999",
+                }),
+                requestContext,
+              ),
+            );
+            expect(reloginResp.status).toBe(200);
+            const reloginBody = (yield* Effect.promise(() => reloginResp.json())) as {
+              token: string;
+            };
+
+            // Non-owner cannot transfer ownership (403).
+            const nonOwnerTransferResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/owner/transfer",
+                  { toPrincipalId: aliceId, confirmation: "TRANSFER" },
+                  { authorization: `Bearer ${reloginBody.token}` },
+                ),
+                requestContext,
+              ),
+            );
+            expect(nonOwnerTransferResp.status).toBe(403);
+
+            // Owner transfers ownership to Alice.
+            const transferResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/owner/transfer",
+                  { toPrincipalId: aliceId, confirmation: "TRANSFER" },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(transferResp.status).toBe(200);
+            const transferBody = (yield* Effect.promise(() => transferResp.json())) as {
+              previousOwner: { id: string; kind: string; status: string };
+              newOwner: { id: string; kind: string; status: string };
+              adminProjectIds: Array<string>;
+            };
+            expect(transferBody.previousOwner.id).toBe("owner");
+            expect(transferBody.previousOwner.kind).toBe("member");
+            expect(transferBody.previousOwner.status).toBe("active");
+            expect(transferBody.newOwner.id).toBe(aliceId);
+            expect(transferBody.newOwner.kind).toBe("owner");
+            expect(transferBody.newOwner.status).toBe("active");
+            expect(transferBody.adminProjectIds).toContain("proj-transfer-1");
+
+            const auditRows = yield* capturedAudit!.list({ action: "owner.transferred" });
+            expect(auditRows.length).toBe(1);
           }),
         (environment) => Effect.promise(() => environment.dispose()),
       );

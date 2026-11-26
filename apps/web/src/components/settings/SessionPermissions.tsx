@@ -18,6 +18,7 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { Button } from "../ui/button";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { supportsMembersCapability } from "./MembersSettings.logic";
+import { SetPasswordDialog } from "./SetPasswordDialog";
 
 export function SessionPermissions({
   environmentId,
@@ -40,6 +41,7 @@ export function SessionPermissions({
     reportFailure: false,
   });
   const [isSigningOut, setIsSigningOut] = useState(false);
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
 
   const isPrimary = primaryEnvironment?.environmentId === environmentId;
   const membersSupported = supportsMembersCapability(
@@ -48,6 +50,10 @@ export function SessionPermissions({
   const showSignOut =
     session.data?.authenticated === true &&
     (membersSupported || session.data.principal !== undefined);
+  const showPasswordAction =
+    session.data?.authenticated === true &&
+    session.data.principal !== undefined &&
+    session.data.principal.status === "active";
 
   const handleSignOut = async () => {
     if (isSigningOut) return;
@@ -130,18 +136,37 @@ export function SessionPermissions({
           ) : (
             <span />
           )}
-          {showSignOut ? (
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={isSigningOut}
-              onClick={() => void handleSignOut()}
-            >
-              {isSigningOut ? gt("Signing out…") : gt("Sign out")}
-            </Button>
+          {showPasswordAction || showSignOut ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {showPasswordAction ? (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  type="button"
+                  onClick={() => setPasswordDialogOpen(true)}
+                >
+                  <T>Password</T>
+                </Button>
+              ) : null}
+              {showSignOut ? (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={isSigningOut}
+                  onClick={() => void handleSignOut()}
+                >
+                  {isSigningOut ? gt("Signing out…") : gt("Sign out")}
+                </Button>
+              ) : null}
+            </div>
           ) : null}
         </div>
       ) : null}
+      <SetPasswordDialog
+        open={passwordDialogOpen}
+        onOpenChange={setPasswordDialogOpen}
+        environmentId={environmentId}
+      />
       <p className="text-muted-foreground">
         {routeContext ? (
           <T>

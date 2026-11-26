@@ -1,3 +1,4 @@
+import { PrincipalId, type PasswordLoginInput } from "@t3tools/contracts";
 import { expect, it, vi } from "vite-plus/test";
 
 import { render } from "../../../test/render";
@@ -51,4 +52,46 @@ it("walks through idle, validation error, submitting, server error, and authenti
   resolveLogin();
   await vi.waitFor(() => expect(onAuthenticated).toHaveBeenCalledTimes(1));
   expect(onSubmitCode).toHaveBeenLastCalledWith("VALI-DCOD-E234");
+});
+
+it("switches to password mode and submits email or member ID credentials", async () => {
+  const onSubmitCode = vi.fn<(code: string) => Promise<void>>().mockResolvedValue(undefined);
+  const onSubmitPassword = vi
+    .fn<(credentials: PasswordLoginInput) => Promise<void>>()
+    .mockRejectedValueOnce(new Error("Invalid credentials."))
+    .mockResolvedValueOnce(undefined);
+  const onAuthenticated = vi.fn();
+
+  await using screen = await render(
+    <LoginRouteSurface
+      environmentLabel="Work Hub"
+      onSubmitCode={onSubmitCode}
+      onSubmitPassword={onSubmitPassword}
+      onAuthenticated={onAuthenticated}
+    />,
+  );
+
+  await screen.getByRole("tab", { name: "Password" }).click();
+  await expect.element(screen.getByLabelText("Email or member ID")).toBeVisible();
+  await expect.element(screen.getByRole("link", { name: "Recover with a code" })).toBeVisible();
+
+  await screen.getByLabelText("Email or member ID").fill("alice@example.com");
+  await screen.getByLabelText("Password").fill("wrong-password");
+  await screen.getByRole("button", { name: "Sign in" }).click();
+
+  await expect.element(screen.getByText("Invalid credentials.")).toBeVisible();
+  expect(onSubmitPassword).toHaveBeenCalledWith({
+    email: "alice@example.com",
+    password: "wrong-password",
+  });
+
+  await screen.getByLabelText("Email or member ID").fill("alice-id");
+  await screen.getByLabelText("Password").fill("correct-password");
+  await screen.getByRole("button", { name: "Sign in" }).click();
+
+  await vi.waitFor(() => expect(onAuthenticated).toHaveBeenCalledTimes(1));
+  expect(onSubmitPassword).toHaveBeenLastCalledWith({
+    principalId: PrincipalId.make("alice-id"),
+    password: "correct-password",
+  });
 });

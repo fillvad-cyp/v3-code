@@ -15,6 +15,7 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ProjectAccess from "../access/ProjectAccess.ts";
@@ -672,4 +673,145 @@ it.effect("enforces invites/hour rate limit via canIssueInvite and InvitationSer
       "InvitationRateLimitedError",
     );
   }).pipe(Effect.provide(makeTestLayer())),
+);
+
+it.effect(
+  "transfers ownership transactionally with exactly one owner, admin roles, staff ceiling, and audit",
+  () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      const membershipService = yield* MembershipService.MembershipService;
+      const principals = yield* Principals.PrincipalRepository;
+      const memberships = yield* Memberships.MembershipRepository;
+      const sessionPrincipals = yield* SessionPrincipals.SessionPrincipalRepository;
+      const audit = yield* AuditEvents.AuditEventRepository;
+
+      const aliceId = PrincipalId.make("alice");
+      const bobId = PrincipalId.make("bob");
+      yield* seedMember({
+        id: aliceId,
+        displayName: "Alice",
+        projectId: PROJECT_A,
+        role: "developer",
+      });
+      yield* principals.create({
+        id: bobId,
+        kind: "member",
+        displayName: "Bob",
+        email: null,
+        status: "suspended",
+        ceiling: [...ceilingScopes("staff")],
+        createdAt: SEED_TIME,
+      });
+
+      // Seed two active projects and one deleted project.
+      yield* sql`
+        INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at)
+        VALUES ('project-a', 'Project A', '/srv/a', '[]', '2026-01-01', '2026-01-01'),
+               ('project-b', 'Project B', '/srv/b', '[]', '2026-01-01', '2026-01-01')
+      `;
+      yield* sql`
+        INSERT INTO projection_projects (project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at)
+        VALUES ('project-deleted', 'Deleted', '/srv/del', '[]', '2026-01-01', '2026-01-01', '2026-01-02')
+      `;
+
+      // Bind an environment session to the current owner so we can verify downgrade to principal binding.
+      const ownerSessionId = AuthSessionId.make("owner-live-session");
+      yield* sessionPrincipals.put({
+        sessionId: ownerSessionId,
+        principalId: OWNER_ID,
+        bindingKind: "environment",
+      });
+
+      const ownerActor = yield* resolveActor(OWNER_ID);
+      const aliceActor = yield* resolveActor(aliceId);
+
+      // Non-owner is forbidden.
+      yield* expectFailureTag(
+        membershipService.transferOwnership({
+          actor: aliceActor,
+          toPrincipalId: aliceId,
+          confirmation: "TRANSFER",
+        }),
+        "MembershipForbiddenError",
+      );
+
+      // Self-transfer, suspended target, and bad confirmation are rejected.
+      yield* expectFailureTag(
+        membershipService.transferOwnership({
+          actor: ownerActor,
+          toPrincipalId: OWNER_ID,
+          confirmation: "TRANSFER",
+        }),
+        "MembershipInvalidInputError",
+      );
+      yield* expectFailureTag(
+        membershipService.transferOwnership({
+          actor: ownerActor,
+          toPrincipalId: bobId,
+          confirmation: "TRANSFER",
+        }),
+        "MembershipInvalidInputError",
+      );
+      yield* expectFailureTag(
+        membershipService.transferOwnership({
+          actor: ownerActor,
+          toPrincipalId: aliceId,
+          confirmation: "wrong",
+        }),
+        "MembershipInvalidInputError",
+      );
+
+      // Valid ownership transfer.
+      const result = yield* membershipService.transferOwnership({
+        actor: ownerActor,
+        toPrincipalId: aliceId,
+        confirmation: "TRANSFER",
+      });
+
+      assert.strictEqual(result.previousOwner.id, OWNER_ID);
+      assert.strictEqual(result.previousOwner.kind, "member");
+      assert.strictEqual(result.previousOwner.status, "active");
+      assert.deepStrictEqual(result.previousOwner.ceiling, [...ceilingScopes("staff")]);
+
+      assert.strictEqual(result.newOwner.id, aliceId);
+      assert.strictEqual(result.newOwner.kind, "owner");
+      assert.strictEqual(result.newOwner.status, "active");
+      assert.deepStrictEqual(result.newOwner.ceiling, []);
+      assert.deepStrictEqual(result.adminProjectIds, [PROJECT_A, PROJECT_B]);
+
+      // Exactly one owner invariant holds in SQLite, and inserting a second owner is blocked by unique index.
+      assert.strictEqual(yield* principals.countOwners, 1);
+      const secondOwnerExit = yield* Effect.exit(
+        principals.create({
+          id: PrincipalId.make("rogue-owner"),
+          kind: "owner",
+          displayName: "Rogue",
+          email: null,
+          status: "active",
+          ceiling: [],
+          createdAt: SEED_TIME,
+        }),
+      );
+      assert.isTrue(Exit.isFailure(secondOwnerExit));
+
+      // Old owner became active admin on both active projects, not the deleted project.
+      const ownerMemA = yield* memberships.get(PROJECT_A, OWNER_ID);
+      const ownerMemB = yield* memberships.get(PROJECT_B, OWNER_ID);
+      const ownerMemDeleted = yield* memberships.get(ProjectId.make("project-deleted"), OWNER_ID);
+      assert.isTrue(Option.isSome(ownerMemA) && ownerMemA.value.role === "admin");
+      assert.isTrue(Option.isSome(ownerMemB) && ownerMemB.value.role === "admin");
+      assert.isTrue(Option.isNone(ownerMemDeleted));
+
+      // Old owner's environment-bound session was downgraded to principal binding.
+      const bindingAfter = yield* sessionPrincipals.get(ownerSessionId);
+      assert.isTrue(Option.isSome(bindingAfter) && bindingAfter.value.bindingKind === "principal");
+
+      // Audit event owner.transferred was recorded.
+      const events = yield* audit.list({ action: "owner.transferred" });
+      assert.strictEqual(events.length, 1);
+      assert.strictEqual(events[0]!.actorPrincipalId, OWNER_ID);
+      assert.strictEqual(events[0]!.resourceId, aliceId);
+      assert.strictEqual(events[0]!.outcome, "allow");
+    }).pipe(Effect.provide(makeTestLayer())),
 );

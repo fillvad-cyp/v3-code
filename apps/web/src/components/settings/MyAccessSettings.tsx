@@ -40,6 +40,7 @@ import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "./itemRows";
 import { MemberLoginCodeDialog } from "./MemberLoginCodeDialog";
+import { SetPasswordDialog } from "./SetPasswordDialog";
 import {
   CEILING_TEMPLATE_LABELS,
   formatMembershipErrorMessage,
@@ -148,6 +149,7 @@ function MyAccessSectionContent({
   const [loginCodeResult, setLoginCodeResult] = useState<MemberLoginCodeResult | null>(null);
   const [loginCodeLoading, setLoginCodeLoading] = useState(false);
   const [loginCodeError, setLoginCodeError] = useState<string | null>(null);
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
   const [signOutError, setSignOutError] = useState<string | null>(null);
 
@@ -263,8 +265,21 @@ function MyAccessSectionContent({
     ? inferCeilingTemplate(accessState.principal.ceiling)
     : null;
 
+  const canSetPassword =
+    accessState.principal !== null && accessState.principal.status === "active";
+
   const headerActions = (
     <div className="flex flex-wrap items-center gap-1.5">
+      {canSetPassword ? (
+        <Button
+          size="xs"
+          variant="outline"
+          type="button"
+          onClick={() => setPasswordDialogOpen(true)}
+        >
+          <T>Password</T>
+        </Button>
+      ) : null}
       {accessState.canIssueLoginCode ? (
         <Button
           size="xs"
@@ -309,7 +324,9 @@ function MyAccessSectionContent({
           ) : undefined
         }
         headerAction={
-          accessState.canIssueLoginCode || accessState.canSignOut ? headerActions : undefined
+          canSetPassword || accessState.canIssueLoginCode || accessState.canSignOut
+            ? headerActions
+            : undefined
         }
       >
         {signOutError ? (
@@ -531,6 +548,11 @@ function MyAccessSectionContent({
         loginCode={loginCodeResult}
         isLoading={loginCodeLoading}
         errorMessage={loginCodeError}
+      />
+      <SetPasswordDialog
+        open={passwordDialogOpen}
+        onOpenChange={setPasswordDialogOpen}
+        environmentId={environmentId}
       />
     </>
   );

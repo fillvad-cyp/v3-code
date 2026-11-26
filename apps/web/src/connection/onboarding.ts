@@ -36,6 +36,20 @@ export const connectLoginCode = createRuntimeCommand(connectionAtomRuntime, {
     ),
 });
 
+export const connectPasswordLogin = createRuntimeCommand(connectionAtomRuntime, {
+  label: "web:connection:connect-password-login",
+  scheduler: onboardingScheduler,
+  concurrency: {
+    mode: "singleFlight",
+    key: (input: ConnectionOnboarding.PasswordLoginConnectionInput) =>
+      `${input.host}:${"email" in input.credentials ? input.credentials.email : input.credentials.principalId}`,
+  },
+  execute: (input: ConnectionOnboarding.PasswordLoginConnectionInput) =>
+    ConnectionOnboarding.ConnectionOnboarding.pipe(
+      Effect.flatMap((onboarding) => onboarding.registerPasswordLogin(input)),
+    ),
+});
+
 export const connectSshEnvironment = createRuntimeCommand(connectionAtomRuntime, {
   label: "web:connection:connect-ssh",
   scheduler: onboardingScheduler,

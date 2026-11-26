@@ -496,6 +496,8 @@ describe("Live access revocation", () => {
                 getAccessStatus: () =>
                   Effect.succeedSome({ status: "active", accessRevision: revision }),
                 getByEmail: () => Effect.die("unused"),
+                getOwner: Effect.die("unused"),
+                countOwners: Effect.die("unused"),
                 list: Effect.die("unused"),
                 create: () => Effect.die("unused"),
                 update: () => Effect.die("unused"),

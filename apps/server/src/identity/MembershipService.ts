@@ -2,6 +2,7 @@ import {
   AuthEnvironmentScope,
   type AuthSessionId,
   type MemberWithMemberships,
+  type OwnerTransferResult,
   type Principal,
   type PrincipalCeilingTemplate,
   PrincipalId,
@@ -111,7 +112,13 @@ export class MembershipCeilingError extends Schema.TaggedError<MembershipCeiling
   }
 }
 
-const MembershipInvalidInputReason = Schema.Literals(["empty_update", "project_id_required"]);
+const MembershipInvalidInputReason = Schema.Literals([
+  "empty_update",
+  "project_id_required",
+  "cannot_transfer_to_self",
+  "invalid_transfer_target",
+  "invalid_transfer_confirmation",
+]);
 
 export class MembershipInvalidInputError extends Schema.TaggedError<MembershipInvalidInputError>()(
   "MembershipInvalidInputError",
@@ -125,6 +132,12 @@ export class MembershipInvalidInputError extends Schema.TaggedError<MembershipIn
         return "At least one of role, state, or ceiling must be provided.";
       case "project_id_required":
         return "projectId is required when updating membership role.";
+      case "cannot_transfer_to_self":
+        return "Ownership cannot be transferred to the current owner.";
+      case "invalid_transfer_target":
+        return "Ownership can only be transferred to an active member.";
+      case "invalid_transfer_confirmation":
+        return 'Confirmation must match the target member ID, display name, or "TRANSFER".';
     }
   }
 }
@@ -233,6 +246,13 @@ interface GrantCreatorAdminInput {
   readonly audit?: MembershipAuditContext;
 }
 
+interface TransferOwnershipInput {
+  readonly actor: ProjectAccess.AccessActor;
+  readonly toPrincipalId: PrincipalId;
+  readonly confirmation: string;
+  readonly audit?: MembershipAuditContext;
+}
+
 type MembershipMutationError =
   | MembershipForbiddenError
   | MembershipNotFoundError
@@ -242,6 +262,12 @@ type MembershipMutationError =
 type OwnerMutationError =
   | MembershipForbiddenError
   | MembershipNotFoundError
+  | MembershipInternalError;
+
+type TransferOwnershipError =
+  | MembershipForbiddenError
+  | MembershipNotFoundError
+  | MembershipInvalidInputError
   | MembershipInternalError;
 
 type UpdateMemberError = MembershipInvalidInputError | MembershipMutationError;
@@ -280,6 +306,9 @@ export class MembershipService extends Context.Service<
     readonly grantCreatorAdmin: (
       input: GrantCreatorAdminInput,
     ) => Effect.Effect<ProjectMembership, MembershipInternalError>;
+    readonly transferOwnership: (
+      input: TransferOwnershipInput,
+    ) => Effect.Effect<OwnerTransferResult, TransferOwnershipError>;
   }
 >()("v3code/identity/MembershipService") {}
 
@@ -1503,6 +1532,215 @@ const make = Effect.gen(function* () {
       );
   });
 
+  const transferOwnership = Effect.fn("MembershipService.transferOwnership")(function* (
+    input: TransferOwnershipInput,
+  ) {
+    const nowIso = DateTime.formatIso(yield* DateTime.now);
+    return yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          if (!input.actor.isOwner) {
+            return yield* new MembershipForbiddenError({ reason: "owner_required" });
+          }
+
+          const maybeOwner = yield* principals.getOwner.pipe(
+            Effect.mapError(
+              (cause) => new MembershipInternalError({ operation: "transferOwnership", cause }),
+            ),
+          );
+          if (Option.isNone(maybeOwner)) {
+            return yield* new MembershipInternalError({
+              operation: "transferOwnership",
+              cause: new Error("Environment has no owner principal."),
+            });
+          }
+          const currentOwner = maybeOwner.value;
+          if (currentOwner.id === input.toPrincipalId) {
+            return yield* new MembershipInvalidInputError({ reason: "cannot_transfer_to_self" });
+          }
+
+          const maybeTarget = yield* principals
+            .get(input.toPrincipalId)
+            .pipe(
+              Effect.mapError(
+                (cause) => new MembershipInternalError({ operation: "transferOwnership", cause }),
+              ),
+            );
+          if (Option.isNone(maybeTarget) || maybeTarget.value.status === "removed") {
+            return yield* new MembershipNotFoundError({
+              resource: "principal",
+              principalId: input.toPrincipalId,
+            });
+          }
+          const targetPrincipal = maybeTarget.value;
+          if (targetPrincipal.status !== "active" || targetPrincipal.kind !== "member") {
+            return yield* new MembershipInvalidInputError({ reason: "invalid_transfer_target" });
+          }
+
+          const trimmedConfirmation = input.confirmation.trim();
+          const confirmationMatches =
+            trimmedConfirmation === targetPrincipal.id ||
+            trimmedConfirmation === targetPrincipal.displayName ||
+            trimmedConfirmation === "TRANSFER";
+          if (!confirmationMatches) {
+            return yield* new MembershipInvalidInputError({
+              reason: "invalid_transfer_confirmation",
+            });
+          }
+
+          const projectRows = yield* sql<{ readonly projectId: string }>`
+            SELECT project_id AS "projectId"
+            FROM projection_projects
+            WHERE deleted_at IS NULL
+            ORDER BY project_id
+          `.pipe(
+            Effect.mapError(
+              (cause) => new MembershipInternalError({ operation: "transferOwnership", cause }),
+            ),
+          );
+          const existingOwnerMemberships = yield* memberships
+            .listForPrincipal(currentOwner.id)
+            .pipe(
+              Effect.mapError(
+                (cause) => new MembershipInternalError({ operation: "transferOwnership", cause }),
+              ),
+            );
+
+          const adminProjectSet = new Set<ProjectId>();
+          for (const row of projectRows) {
+            adminProjectSet.add(ProjectId.make(row.projectId));
+          }
+          for (const membership of existingOwnerMemberships) {
+            if (membership.state !== "removed") {
+              adminProjectSet.add(membership.projectId);
+            }
+          }
+          const adminProjectIds = [...adminProjectSet].toSorted();
+
+          for (const projectId of adminProjectIds) {
+            yield* memberships
+              .upsert({
+                projectId,
+                principalId: currentOwner.id,
+                role: "admin",
+                state: "active",
+                invitedBy: currentOwner.id,
+                expiresAt: null,
+                updatedAt: nowIso,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) => new MembershipInternalError({ operation: "transferOwnership", cause }),
+                ),
+              );
+          }
+
+          const staffCeiling = [...ceilingScopes("staff")];
+          // Demote the outgoing owner first so the partial unique index (kind = 'owner') never collides.
+          yield* principals
+            .update({
+              id: currentOwner.id,
+              kind: "member",
+              status: "active",
+              ceiling: staffCeiling,
+              updatedAt: nowIso,
+              bumpAccessRevision: true,
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) => new MembershipInternalError({ operation: "transferOwnership", cause }),
+              ),
+            );
+          // Downgrade environment-bound sessions so live sessions immediately honor the new member role.
+          yield* sessionPrincipals
+            .downgradeEnvironmentBindingsForPrincipal(currentOwner.id)
+            .pipe(
+              Effect.mapError(
+                (cause) => new MembershipInternalError({ operation: "transferOwnership", cause }),
+              ),
+            );
+          yield* principals
+            .update({
+              id: targetPrincipal.id,
+              kind: "owner",
+              status: "active",
+              ceiling: [],
+              updatedAt: nowIso,
+              bumpAccessRevision: true,
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) => new MembershipInternalError({ operation: "transferOwnership", cause }),
+              ),
+            );
+
+          const ownerCount = yield* principals.countOwners.pipe(
+            Effect.mapError(
+              (cause) => new MembershipInternalError({ operation: "transferOwnership", cause }),
+            ),
+          );
+          if (ownerCount !== 1) {
+            return yield* new MembershipInternalError({
+              operation: "transferOwnership",
+              cause: new Error(`Expected exactly 1 owner after transfer, found ${ownerCount}.`),
+            });
+          }
+
+          yield* auditEvents
+            .append({
+              at: nowIso,
+              actorPrincipalId: currentOwner.id,
+              actorSessionId: actorSessionId(input.actor, input.audit),
+              action: "owner.transferred",
+              resourceType: "principal",
+              resourceId: targetPrincipal.id,
+              projectId: null,
+              ip: input.audit?.ip ?? null,
+              userAgent: input.audit?.userAgent ?? null,
+              outcome: "allow",
+              metadata: {
+                fromPrincipalId: currentOwner.id,
+                toPrincipalId: targetPrincipal.id,
+                adminProjectIds,
+              },
+            })
+            .pipe(
+              Effect.mapError(
+                (cause) => new MembershipInternalError({ operation: "transferOwnership", cause }),
+              ),
+            );
+
+          const previousOwner: Principal = {
+            ...currentOwner,
+            kind: "member",
+            status: "active",
+            ceiling: staffCeiling,
+            accessRevision: currentOwner.accessRevision + 1,
+            updatedAt: nowIso,
+          };
+          const newOwner: Principal = {
+            ...targetPrincipal,
+            kind: "owner",
+            status: "active",
+            ceiling: [],
+            accessRevision: targetPrincipal.accessRevision + 1,
+            updatedAt: nowIso,
+          };
+
+          return {
+            previousOwner,
+            newOwner,
+            adminProjectIds,
+          } satisfies OwnerTransferResult;
+        }),
+      )
+      .pipe(
+        Effect.mapError(
+          mapTransactionError<TransferOwnershipError>("transferOwnership", MUTATION_ERROR_TAGS),
+        ),
+      );
+  });
+
   return MembershipService.of({
     listForActor,
     setRole,
@@ -1515,6 +1753,7 @@ const make = Effect.gen(function* () {
     updateMember,
     canIssueInvite,
     grantCreatorAdmin,
+    transferOwnership,
   });
 });
 

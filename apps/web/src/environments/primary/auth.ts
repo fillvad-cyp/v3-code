@@ -1,5 +1,7 @@
 import {
+  confirmRemoteRecovery,
   loginRemoteInvitationCode,
+  loginRemotePassword,
   revokeRemoteCurrentSession,
 } from "@t3tools/client-runtime/authorization";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
@@ -10,6 +12,8 @@ import type {
   AuthConnectDeviceRequest,
   AuthEnvironmentScope,
   AuthInvitationSessionResult,
+  PasswordLoginInput,
+  RecoveryConfirmResult,
   ServerAuthSessionMethod,
   AuthSessionId,
   AuthSessionState,
@@ -394,6 +398,45 @@ export async function submitMemberLoginCode(code: string): Promise<AuthInvitatio
   markPersistedPopoutAuthSession();
   bootstrapPromise = null;
   explicitPairingRequested = false;
+  return result;
+}
+
+export async function submitMemberPasswordLogin(
+  credentials: PasswordLoginInput,
+): Promise<AuthInvitationSessionResult> {
+  resolvedAuthenticatedGateState = null;
+  const result = await Effect.runPromise(
+    loginRemotePassword({
+      httpBaseUrl: resolvePrimaryEnvironmentHttpUrl("/"),
+      credentials,
+    }).pipe(Effect.provide(layerRemoteHttpClient(primaryCookieFetch))),
+  );
+  await waitForAuthenticatedSessionAfterBootstrap();
+  resolvedAuthenticatedGateState = { status: "authenticated" };
+  markPersistedPopoutAuthSession();
+  bootstrapPromise = null;
+  explicitPairingRequested = false;
+  return result;
+}
+
+export async function submitPasswordRecoveryConfirm(input: {
+  readonly code: string;
+  readonly password: string;
+  readonly host?: string;
+}): Promise<RecoveryConfirmResult> {
+  const httpBaseUrl = input.host ? input.host : resolvePrimaryEnvironmentHttpUrl("/");
+  const result = await Effect.runPromise(
+    confirmRemoteRecovery({
+      httpBaseUrl,
+      code: input.code,
+      password: input.password,
+    }).pipe(Effect.provide(layerRemoteHttpClient(primaryCookieFetch))),
+  );
+  if (!input.host) {
+    resolvedAuthenticatedGateState = null;
+    bootstrapPromise = null;
+    explicitPairingRequested = false;
+  }
   return result;
 }
 

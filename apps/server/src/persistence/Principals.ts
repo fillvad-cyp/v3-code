@@ -63,6 +63,7 @@ export type CreatePrincipalInput = typeof CreatePrincipalInput.Type;
 
 export const UpdatePrincipalInput = Schema.Struct({
   id: PrincipalId,
+  kind: Schema.optionalKey(PrincipalKind),
   displayName: Schema.optionalKey(TrimmedNonEmptyString),
   email: Schema.optionalKey(Schema.NullOr(Schema.String)),
   status: Schema.optionalKey(PrincipalStatus),
@@ -94,6 +95,8 @@ export class PrincipalRepository extends Context.Service<
     readonly getByEmail: (
       email: string,
     ) => Effect.Effect<Option.Option<Principal>, PrincipalRepositoryError>;
+    readonly getOwner: Effect.Effect<Option.Option<Principal>, PrincipalRepositoryError>;
+    readonly countOwners: Effect.Effect<number, PrincipalRepositoryError>;
     readonly list: Effect.Effect<ReadonlyArray<Principal>, PrincipalRepositoryError>;
     readonly create: (input: CreatePrincipalInput) => Effect.Effect<void, PrincipalRepositoryError>;
     readonly update: (
@@ -183,6 +186,18 @@ const make = Effect.gen(function* () {
     execute: (email) => sql`${selectRow} WHERE email = ${email} COLLATE NOCASE`,
   });
 
+  const getOwnerRow = SqlSchema.findOneOption({
+    Request: Schema.Void,
+    Result: PrincipalRow,
+    execute: () => sql`${selectRow} WHERE kind = 'owner' LIMIT 1`,
+  });
+
+  const countOwnerRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: Schema.Struct({ count: Schema.Number }),
+    execute: () => sql`SELECT COUNT(*) AS "count" FROM principals WHERE kind = 'owner'`,
+  });
+
   const listRows = SqlSchema.findAll({
     Request: Schema.Void,
     Result: PrincipalRow,
@@ -206,7 +221,8 @@ const make = Effect.gen(function* () {
     execute: (input) =>
       sql`
         UPDATE principals
-        SET display_name = COALESCE(${input.displayName ?? null}, display_name),
+        SET kind = COALESCE(${input.kind ?? null}, kind),
+          display_name = COALESCE(${input.displayName ?? null}, display_name),
           email = CASE WHEN ${input.email === undefined ? 0 : 1} = 1
             THEN ${input.email ?? null} ELSE email END,
           status = COALESCE(${input.status ?? null}, status),
@@ -280,6 +296,13 @@ const make = Effect.gen(function* () {
       getRowByEmail(email).pipe(
         Effect.mapError(toSqlOrDecodeError("getPrincipalByEmail", "Principal")),
       ),
+    ),
+    getOwner: getOwnerRow(undefined).pipe(
+      Effect.mapError(toSqlOrDecodeError("getOwnerPrincipal", "Principal")),
+    ),
+    countOwners: countOwnerRows(undefined).pipe(
+      Effect.mapError(toSqlOrDecodeError("countOwnerPrincipals", "OwnerCount")),
+      Effect.map((rows) => rows[0]?.count ?? 0),
     ),
     list: listRows(undefined).pipe(
       Effect.mapError(toSqlOrDecodeError("listPrincipals", "Principal")),

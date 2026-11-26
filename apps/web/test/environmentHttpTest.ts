@@ -129,6 +129,12 @@ export async function installEnvironmentHttpTest(scenario: EnvironmentHttpTestSc
             .handle("updateMember", () => unexpectedEndpoint("auth.updateMember"))
             .handle("removeMember", () => unexpectedEndpoint("auth.removeMember"))
             .handle("issueMemberLoginCode", () => unexpectedEndpoint("auth.issueMemberLoginCode"))
+            .handle("setOwnPassword", () => unexpectedEndpoint("auth.setOwnPassword"))
+            .handle("setMemberPassword", () => unexpectedEndpoint("auth.setMemberPassword"))
+            .handle("loginPassword", () => unexpectedEndpoint("auth.loginPassword"))
+            .handle("issueRecoveryCode", () => unexpectedEndpoint("auth.issueRecoveryCode"))
+            .handle("confirmRecovery", () => unexpectedEndpoint("auth.confirmRecovery"))
+            .handle("transferOwnership", () => unexpectedEndpoint("auth.transferOwnership"))
             .handle("listAuditEvents", () => unexpectedEndpoint("auth.listAuditEvents")),
         ),
       ]),

@@ -7,6 +7,8 @@ export {
   signOutPrimaryEnvironment,
   stripPairingTokenFromUrl,
   submitMemberLoginCode,
+  submitMemberPasswordLogin,
+  submitPasswordRecoveryConfirm,
   submitServerAuthCredential,
   takePairingTokenFromUrl,
   type ServerClientSessionRecord,
