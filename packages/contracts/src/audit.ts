@@ -97,6 +97,23 @@ export const AppendAuditEventInput = Schema.Struct({
 });
 export type AppendAuditEventInput = typeof AppendAuditEventInput.Type;
 
+export const AUDIT_LIST_DEFAULT_LIMIT = 50;
+export const AUDIT_LIST_MAX_LIMIT = 200;
+
+const AuditListLimit = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: AUDIT_LIST_MAX_LIMIT }),
+);
+
+const AuditCursorFromString = Schema.FiniteFromString.check(
+  Schema.isInt(),
+  Schema.isGreaterThanOrEqualTo(0),
+);
+
+const AuditLimitFromString = Schema.FiniteFromString.check(
+  Schema.isInt(),
+  Schema.isBetween({ minimum: 1, maximum: AUDIT_LIST_MAX_LIMIT }),
+);
+
 /** Every field narrows the list; omitted ones do not filter. */
 export const ListAuditEventsInput = Schema.Struct({
   projectId: Schema.optionalKey(ProjectId),
@@ -104,6 +121,26 @@ export const ListAuditEventsInput = Schema.Struct({
   action: Schema.optionalKey(AuditAction),
   from: Schema.optionalKey(IsoDateTime),
   to: Schema.optionalKey(IsoDateTime),
-  limit: Schema.optionalKey(NonNegativeInt),
+  /** Return events strictly older than this event id (`id < cursor`). */
+  cursor: Schema.optionalKey(NonNegativeInt),
+  limit: Schema.optionalKey(AuditListLimit),
 });
 export type ListAuditEventsInput = typeof ListAuditEventsInput.Type;
+
+/** URL query form of `ListAuditEventsInput` where numeric parameters arrive as strings. */
+export const ListAuditEventsQuery = Schema.Struct({
+  projectId: ListAuditEventsInput.fields.projectId,
+  actorPrincipalId: ListAuditEventsInput.fields.actorPrincipalId,
+  action: ListAuditEventsInput.fields.action,
+  from: ListAuditEventsInput.fields.from,
+  to: ListAuditEventsInput.fields.to,
+  cursor: Schema.optionalKey(AuditCursorFromString),
+  limit: Schema.optionalKey(AuditLimitFromString),
+});
+export type ListAuditEventsQuery = typeof ListAuditEventsQuery.Type;
+
+export const ListAuditEventsResult = Schema.Struct({
+  events: Schema.Array(AuditEvent),
+  nextCursor: Schema.NullOr(NonNegativeInt),
+});
+export type ListAuditEventsResult = typeof ListAuditEventsResult.Type;

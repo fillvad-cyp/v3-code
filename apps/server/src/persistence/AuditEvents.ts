@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
 import {
+  AUDIT_LIST_DEFAULT_LIMIT,
   AppendAuditEventInput,
   AuditAction,
   AuditEvent,
@@ -12,6 +13,7 @@ import {
   AuditResourceType,
   AuthSessionId,
   ListAuditEventsInput,
+  NonNegativeInt,
   PrincipalId,
   ProjectId,
   TrimmedNonEmptyString,
@@ -24,12 +26,18 @@ import {
   PersistenceSqlError,
 } from "./Errors.ts";
 
-const DEFAULT_LIMIT = 100;
+/** Repository list input: contract filters plus an internal project allowlist for project admins. */
+export const ListAuditEventsRepositoryInput = Schema.Struct({
+  ...ListAuditEventsInput.fields,
+  projectIds: Schema.optionalKey(Schema.Array(ProjectId)),
+  limit: Schema.optionalKey(NonNegativeInt),
+});
+export type ListAuditEventsRepositoryInput = typeof ListAuditEventsRepositoryInput.Type;
 
 // Contract inputs carry ISO strings; the columns hold epoch milliseconds.
 const AppendRow = Schema.Struct({ ...AppendAuditEventInput.fields, at: EpochMillis });
 const ListRows = Schema.Struct({
-  ...ListAuditEventsInput.fields,
+  ...ListAuditEventsRepositoryInput.fields,
   from: Schema.optionalKey(EpochMillis),
   to: Schema.optionalKey(EpochMillis),
 });
@@ -59,7 +67,7 @@ export class AuditEventRepository extends Context.Service<
       input: AppendAuditEventInput,
     ) => Effect.Effect<number, AuditEventRepositoryError>;
     readonly list: (
-      input: ListAuditEventsInput,
+      input: ListAuditEventsRepositoryInput,
     ) => Effect.Effect<ReadonlyArray<AuditEvent>, AuditEventRepositoryError>;
     readonly pruneBefore: (before: EpochMillis) => Effect.Effect<number, AuditEventRepositoryError>;
   }
@@ -93,8 +101,12 @@ const make = Effect.gen(function* () {
   const listRows = SqlSchema.findAll({
     Request: ListRows,
     Result: AuditEventRow,
-    execute: (input) =>
-      sql`
+    execute: (input) => {
+      const projectIdsClause =
+        input.projectIds === undefined
+          ? sql`1 = 1`
+          : sql`project_id IN ${sql.in(input.projectIds)}`;
+      return sql`
         SELECT id AS "id", at AS "at", actor_principal_id AS "actorPrincipalId",
           actor_session_id AS "actorSessionId", action AS "action",
           resource_type AS "resourceType", resource_id AS "resourceId",
@@ -102,14 +114,17 @@ const make = Effect.gen(function* () {
           outcome AS "outcome", metadata_json AS "metadata"
         FROM audit_events
         WHERE (${input.projectId === undefined ? 1 : 0} = 1 OR project_id = ${input.projectId ?? null})
+          AND ${projectIdsClause}
           AND (${input.actorPrincipalId === undefined ? 1 : 0} = 1
             OR actor_principal_id = ${input.actorPrincipalId ?? null})
           AND (${input.action === undefined ? 1 : 0} = 1 OR action = ${input.action ?? null})
           AND (${input.from === undefined ? 1 : 0} = 1 OR at >= ${input.from ?? null})
           AND (${input.to === undefined ? 1 : 0} = 1 OR at <= ${input.to ?? null})
-        ORDER BY at DESC, id DESC
-        LIMIT ${input.limit ?? DEFAULT_LIMIT}
-      `,
+          AND (${input.cursor === undefined ? 1 : 0} = 1 OR id < ${input.cursor ?? null})
+        ORDER BY id DESC
+        LIMIT ${input.limit ?? AUDIT_LIST_DEFAULT_LIMIT}
+      `;
+    },
   });
 
   const pruneRows = SqlSchema.findAll({
@@ -125,9 +140,17 @@ const make = Effect.gen(function* () {
         Effect.map((rows) => rows[0]?.id ?? 0),
       ),
     ),
-    list: Effect.fn("AuditEventRepository.list")((input) =>
-      listRows(input).pipe(Effect.mapError(toSqlOrDecodeError("listAuditEvents", "AuditEvent"))),
-    ),
+    list: Effect.fn("AuditEventRepository.list")((input) => {
+      if (input.projectIds !== undefined && input.projectIds.length === 0) {
+        return Effect.succeed([]);
+      }
+      if (input.limit === 0) {
+        return Effect.succeed([]);
+      }
+      return listRows(input).pipe(
+        Effect.mapError(toSqlOrDecodeError("listAuditEvents", "AuditEvent")),
+      );
+    }),
     pruneBefore: Effect.fn("AuditEventRepository.pruneBefore")((before) =>
       pruneRows(before).pipe(
         Effect.mapError(toSqlOrDecodeError("pruneAuditEvents", "AuditEvent")),

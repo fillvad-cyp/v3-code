@@ -286,6 +286,102 @@ it.layer(repositories.pipe(Layer.provideMerge(Sqlite.layerMemory)))(
       }),
     );
 
+    it.effect("filters audit events by actor, action, projectIds, time range, and id cursor", () =>
+      Effect.gen(function* () {
+        const audit = yield* AuditEvents.AuditEventRepository;
+        const projA = ProjectId.make("audit-repo-a");
+        const projB = ProjectId.make("audit-repo-b");
+        const projC = ProjectId.make("audit-repo-c");
+        const actor1 = PrincipalId.make("audit-actor-1");
+        const actor2 = PrincipalId.make("audit-actor-2");
+        const template: AppendAuditEventInput = {
+          at: at("2026-11-26T00:00:00.000Z"),
+          actorPrincipalId: actor1,
+          actorSessionId: null,
+          action: "login.succeeded",
+          resourceType: "session",
+          resourceId: "s-1",
+          projectId: null,
+          ip: "127.0.0.1",
+          userAgent: null,
+          outcome: "allow",
+          metadata: null,
+        };
+
+        const id1 = yield* audit.append({
+          ...template,
+          at: at("2026-11-26T01:00:00.000Z"),
+          projectId: projA,
+          action: "preview.tunnel.opened",
+        });
+        const id2 = yield* audit.append({
+          ...template,
+          at: at("2026-11-26T02:00:00.000Z"),
+          actorPrincipalId: actor2,
+          projectId: projB,
+          action: "secret.read",
+        });
+        const id3 = yield* audit.append({
+          ...template,
+          at: at("2026-11-26T03:00:00.000Z"),
+          actorPrincipalId: actor1,
+          projectId: projA,
+          action: "authorization.denied",
+          outcome: "deny",
+        });
+        const id4 = yield* audit.append({
+          ...template,
+          at: at("2026-11-26T04:00:00.000Z"),
+          actorPrincipalId: actor2,
+          projectId: projC,
+          action: "preview.tunnel.opened",
+        });
+
+        assert.deepStrictEqual(
+          (yield* audit.list({ projectIds: [projA, projB] })).map((row) => row.id),
+          [id3, id2, id1],
+        );
+        assert.deepStrictEqual(yield* audit.list({ projectIds: [] }), []);
+        assert.deepStrictEqual(
+          (yield* audit.list({ actorPrincipalId: actor2 })).map((row) => row.id),
+          [id4, id2],
+        );
+        assert.deepStrictEqual(
+          (yield* audit.list({ action: "preview.tunnel.opened" })).map((row) => row.id),
+          [id4, id1],
+        );
+        assert.deepStrictEqual(
+          (yield* audit.list({
+            from: at("2026-11-26T01:30:00.000Z"),
+            to: at("2026-11-26T03:30:00.000Z"),
+          })).map((row) => row.id),
+          [id3, id2],
+        );
+
+        // Cursor pagination in descending id order.
+        const page1 = yield* audit.list({ projectIds: [projA, projB, projC], limit: 2 });
+        assert.deepStrictEqual(
+          page1.map((row) => row.id),
+          [id4, id3],
+        );
+        const page2 = yield* audit.list({
+          projectIds: [projA, projB, projC],
+          cursor: page1[page1.length - 1]!.id,
+          limit: 2,
+        });
+        assert.deepStrictEqual(
+          page2.map((row) => row.id),
+          [id2, id1],
+        );
+        const page3 = yield* audit.list({
+          projectIds: [projA, projB, projC],
+          cursor: page2[page2.length - 1]!.id,
+          limit: 2,
+        });
+        assert.deepStrictEqual(page3, []);
+      }),
+    );
+
     it.effect("stores quotas and limits per project and principal", () =>
       Effect.gen(function* () {
         const quotas = yield* ProjectQuotas.ProjectQuotaRepository;

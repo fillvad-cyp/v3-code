@@ -114,6 +114,8 @@ describe("searchSettings", () => {
     expect(disabledIds.has("project-members")).toBe(false);
     expect(disabledIds.has("environment-members")).toBe(false);
     expect(disabledIds.has("multi-user-mode")).toBe(false);
+    expect(disabledIds.has("audit-log")).toBe(false);
+    expect(disabledIds.has("audit-retention")).toBe(false);
 
     const enabledIds = new Set(
       filterAvailableSettingsSearchItems({
@@ -125,6 +127,8 @@ describe("searchSettings", () => {
     expect(enabledIds.has("project-members")).toBe(true);
     expect(enabledIds.has("environment-members")).toBe(true);
     expect(enabledIds.has("multi-user-mode")).toBe(true);
+    expect(enabledIds.has("audit-log")).toBe(true);
+    expect(enabledIds.has("audit-retention")).toBe(true);
   });
 
   it("finds Roles & permissions and My access from settings search", () => {

@@ -12,9 +12,13 @@ import {
   type AuthRevokePairingLinkInput,
   type EnvironmentId,
   type InvitationCreateInput,
+  type ListAuditEventsInput,
   type MemberUpdateInput,
+  type OwnerTransferInput,
+  type PasswordSetInput,
   type PrincipalId,
   type ProjectId,
+  type RecoveryIssueInput,
   sessionGrantsScope,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -111,6 +115,11 @@ export interface AuthRemoveMemberCommandInput {
 
 export interface AuthIssueMemberLoginCodeCommandInput {
   readonly principalId: PrincipalId;
+}
+
+export interface AuthSetMemberPasswordCommandInput {
+  readonly principalId: PrincipalId;
+  readonly password: string;
 }
 
 function createAuthScopePermissionAtom<R, E>(
@@ -322,6 +331,81 @@ export function createAuthEnvironmentAtoms<R, E>(
           }),
       }),
       { permissionAtom: authenticatedPermissionAtom },
+    ),
+    setOwnPassword: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:auth-set-own-password",
+        execute: (input: PasswordSetInput) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "POST",
+            url: (urls) => urls.setOwnPassword(),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) => client.setOwnPassword({ headers, payload: input }),
+          }),
+      }),
+      { permissionAtom: authenticatedPermissionAtom },
+    ),
+    setMemberPassword: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:auth-set-member-password",
+        execute: (input: AuthSetMemberPasswordCommandInput) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "POST",
+            url: (urls) => urls.setMemberPassword({ params: { principalId: input.principalId } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.setMemberPassword({
+                headers,
+                params: { principalId: input.principalId },
+                payload: { password: input.password },
+              }),
+          }),
+      }),
+      { permissionAtom: accessWritePermissionAtom },
+    ),
+    issueRecoveryCode: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:auth-issue-recovery-code",
+        execute: (input: RecoveryIssueInput) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "POST",
+            url: (urls) => urls.issueRecoveryCode(),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) => client.issueRecoveryCode({ headers, payload: input }),
+          }),
+      }),
+      { permissionAtom: authenticatedPermissionAtom },
+    ),
+    transferOwnership: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:auth-transfer-ownership",
+        execute: (input: OwnerTransferInput) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "POST",
+            url: (urls) => urls.transferOwnership(),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) => client.transferOwnership({ headers, payload: input }),
+          }),
+      }),
+      { permissionAtom: accessWritePermissionAtom },
+    ),
+    listAuditEvents: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:auth-list-audit-events",
+        execute: (input: ListAuditEventsInput) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "GET",
+            url: (urls) => urls.listAuditEvents({ query: input }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) => client.listAuditEvents({ headers, query: input }),
+          }),
+      }),
+      { permissionAtom: accessReadPermissionAtom },
     ),
     accessChanges: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:auth-access-changes",

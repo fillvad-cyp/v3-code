@@ -34,14 +34,17 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerHttp from "../http.ts";
+import * as AuditService from "../identity/AuditService.ts";
 import * as InvitationService from "../identity/InvitationService.ts";
 import * as MembershipService from "../identity/MembershipService.ts";
+import * as Passwords from "../identity/Passwords.ts";
 import * as ApiTokens from "../persistence/ApiTokens.ts";
 import * as AuditEvents from "../persistence/AuditEvents.ts";
 import * as Invitations from "../persistence/Invitations.ts";
 import * as MemberLimits from "../persistence/MemberLimits.ts";
 import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
+import * as RecoveryCodes from "../persistence/RecoveryCodes.ts";
 import * as SessionPrincipals from "../persistence/SessionPrincipals.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as AgentAwarenessRelay from "../relay/AgentAwarenessRelay.ts";
@@ -93,6 +96,7 @@ const layerIdentityRepositories = Layer.mergeAll(
   AuditEvents.layer,
   ApiTokens.layer,
   MemberLimits.layer,
+  RecoveryCodes.layer,
   SessionPrincipals.layer,
 );
 const layerAccess = ProjectAccess.layer.pipe(
@@ -108,6 +112,12 @@ const layerIdentity = Layer.mergeAll(
     Layer.provide(layerMembership),
     Layer.provide(layerAccess),
     Layer.provide(layerIdentityRepositories),
+  ),
+  Passwords.layer.pipe(Layer.provide(layerIdentityRepositories)),
+  AuditService.layer.pipe(
+    Layer.provide(layerAccess),
+    Layer.provide(layerIdentityRepositories),
+    Layer.provide(ServerSettings.layerTest()),
   ),
   layerMembership,
   layerAccess,

@@ -36,6 +36,7 @@ export type SettingsPath =
   | "/settings/worktrees"
   | "/settings/connections"
   | "/settings/access"
+  | "/settings/audit"
   | "/settings/roles"
   | "/settings/my-access"
   | "/settings/secrets"
@@ -121,6 +122,7 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/worktrees": msg("Worktrees"),
   "/settings/connections": msg("Environments"),
   "/settings/access": msg("Sharing & access"),
+  "/settings/audit": msg("Audit log"),
   "/settings/roles": msg("Roles & permissions"),
   "/settings/my-access": msg("My access"),
   "/settings/secrets": msg("Secrets"),
@@ -1542,6 +1544,22 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "audit-log",
+    title: msg("Audit log"),
+    to: "/settings/audit",
+    auditOnly: true,
+    searchTerms: [
+      msg("audit events security history logins invitations memberships actions filter"),
+    ],
+  },
+  {
+    id: "audit-retention",
+    title: msg("Audit retention"),
+    to: "/settings/audit",
+    auditOnly: true,
+    searchTerms: [msg("audit log retention days prune cleanup history delete")],
+  },
+  {
     id: "roles-permissions",
     title: msg("Roles & permissions"),
     to: "/settings/roles",
@@ -1646,6 +1664,7 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/worktrees": "project-defaults",
   "/settings/connections": "connections",
   "/settings/access": "connections",
+  "/settings/audit": "connections",
   "/settings/roles": "connections",
   "/settings/my-access": "connections",
   "/settings/secrets": null,

@@ -25,6 +25,7 @@ import {
   KeyRoundIcon,
   MicIcon,
   PaletteIcon,
+  ScrollTextIcon,
   SearchIcon,
   ServerIcon,
   Settings2Icon,
@@ -110,6 +111,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/worktrees": FolderTreeIcon,
   "/settings/connections": ServerIcon,
   "/settings/access": ShieldCheckIcon,
+  "/settings/audit": ScrollTextIcon,
   "/settings/roles": ShieldCheckIcon,
   "/settings/my-access": KeyRoundIcon,
   "/settings/secrets": KeyRoundIcon,
@@ -123,6 +125,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
 const SETTINGS_DETAIL_PAGE_PARENTS: Readonly<Record<string, SettingsPath>> = {
   "/settings/diagnostics": "/settings/maintenance",
   "/settings/open-source-licenses": "/settings/about",
+  "/settings/audit": "/settings/access",
   "/settings/roles": "/settings/access",
   "/settings/my-access": "/settings/access",
 };

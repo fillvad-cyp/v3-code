@@ -57,6 +57,7 @@ import {
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import { ListAuditEventsQuery, ListAuditEventsResult } from "./audit.ts";
 import {
   Invitation,
   InvitationAcceptInput,
@@ -68,6 +69,15 @@ import {
   MemberRemoveResult,
   MemberUpdateInput,
   MemberWithMemberships,
+  OwnerTransferInput,
+  OwnerTransferResult,
+  PasswordLoginInput,
+  PasswordSetInput,
+  PasswordSetResult,
+  RecoveryConfirmInput,
+  RecoveryConfirmResult,
+  RecoveryIssueInput,
+  RecoveryIssueResult,
   type SessionBinding,
 } from "./membership.ts";
 import {
@@ -479,6 +489,36 @@ const EnvironmentMemberLoginCodeErrors = [
   EnvironmentHttpTooManyRequestsError,
   EnvironmentInternalError,
 ] as const;
+const EnvironmentPasswordSetErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentPasswordLoginErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpUnauthorizedError,
+  EnvironmentHttpTooManyRequestsError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentRecoveryConfirmErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpConflictError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentOwnerTransferErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentHttpConflictError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentAuditListErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
 const EnvironmentProjectSnapshotErrors = [
   EnvironmentAuthInvalidError,
   EnvironmentScopeRequiredError,
@@ -830,6 +870,61 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       params: Schema.Struct({ principalId: PrincipalId }),
       success: MemberLoginCodeResult,
       error: EnvironmentMemberLoginCodeErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("setOwnPassword", "/api/auth/password/set", {
+      headers: OptionalBearerHeaders,
+      payload: PasswordSetInput,
+      success: PasswordSetResult,
+      error: EnvironmentPasswordSetErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("setMemberPassword", "/api/auth/members/:principalId/password", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ principalId: PrincipalId }),
+      payload: PasswordSetInput,
+      success: PasswordSetResult,
+      error: EnvironmentPasswordSetErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("loginPassword", "/api/auth/login", {
+      payload: PasswordLoginInput,
+      success: AuthInvitationSessionResult,
+      error: EnvironmentPasswordLoginErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("issueRecoveryCode", "/api/auth/recovery", {
+      headers: OptionalBearerHeaders,
+      payload: RecoveryIssueInput,
+      success: RecoveryIssueResult,
+      error: EnvironmentMemberLoginCodeErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("confirmRecovery", "/api/auth/recovery/confirm", {
+      payload: RecoveryConfirmInput,
+      success: RecoveryConfirmResult,
+      error: EnvironmentRecoveryConfirmErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("transferOwnership", "/api/auth/owner/transfer", {
+      headers: OptionalBearerHeaders,
+      payload: OwnerTransferInput,
+      success: OwnerTransferResult,
+      error: EnvironmentOwnerTransferErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listAuditEvents", "/api/audit", {
+      headers: OptionalBearerHeaders,
+      query: ListAuditEventsQuery,
+      success: ListAuditEventsResult,
+      error: EnvironmentAuditListErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 

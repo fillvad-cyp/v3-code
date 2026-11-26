@@ -187,14 +187,17 @@ import * as EnvironmentAuthPolicy from "./auth/EnvironmentAuthPolicy.ts";
 import * as ProjectAccess from "./access/ProjectAccess.ts";
 import * as ProjectPaths from "./access/ProjectPaths.ts";
 import * as ResourceResolver from "./access/ResourceResolver.ts";
+import * as AuditService from "./identity/AuditService.ts";
 import * as InvitationService from "./identity/InvitationService.ts";
 import * as MembershipService from "./identity/MembershipService.ts";
+import * as Passwords from "./identity/Passwords.ts";
 import * as ApiTokens from "./persistence/ApiTokens.ts";
 import * as AuditEvents from "./persistence/AuditEvents.ts";
 import * as Invitations from "./persistence/Invitations.ts";
 import * as MemberLimits from "./persistence/MemberLimits.ts";
 import * as Principals from "./persistence/Principals.ts";
 import * as Memberships from "./persistence/Memberships.ts";
+import * as RecoveryCodes from "./persistence/RecoveryCodes.ts";
 import * as SessionPrincipals from "./persistence/SessionPrincipals.ts";
 import * as CloudHttp from "./cloud/http.ts";
 import * as GuestHttp from "./guest/http.ts";
@@ -594,6 +597,7 @@ const layerIdentityRepositories = Layer.mergeAll(
   AuditEvents.layer,
   ApiTokens.layer,
   MemberLimits.layer,
+  RecoveryCodes.layer,
   SessionPrincipals.layer,
 ).pipe(Layer.provide(layerPersistence));
 
@@ -631,8 +635,21 @@ const layerMembership = MembershipService.layer.pipe(
   Layer.provide(layerPersistence),
 );
 
-const layerIdentity = Layer.merge(
+const layerAuditService = AuditService.layer.pipe(
+  Layer.provideMerge(layerIdentityRepositories),
+  Layer.provide(layerAccess),
+  Layer.provide(layerServerSettings),
+);
+
+const layerIdentity = Layer.mergeAll(
   layerMembership,
+  layerAuditService,
+  Passwords.layer.pipe(
+    Layer.provideMerge(layerIdentityRepositories),
+    Layer.provide(layerAuth),
+    Layer.provide(layerPersistence),
+    Layer.provide(ServerSecretStore.layer),
+  ),
   InvitationService.layer.pipe(
     Layer.provideMerge(layerIdentityRepositories),
     Layer.provide(layerMembership),
@@ -900,6 +917,7 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   Layer.provideMerge(layerAuth),
   Layer.provideMerge(layerAccess),
   Layer.provideMerge(layerIdentity),
+  Layer.provideMerge(AuditService.layerRetention.pipe(Layer.provide(layerAuditService))),
   Layer.provideMerge(
     Layer.mergeAll(AssetSigner.layer, EnvironmentKeys.layer, WorkspacePreviewRevisions.layer),
   ),
