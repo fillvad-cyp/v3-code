@@ -19,6 +19,7 @@ import {
 } from "@t3tools/shared/desktopReadinessProof";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
 import * as ByteSize from "effect/ByteSize";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -44,7 +45,12 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import { OtlpTracer, OtlpSerialization } from "effect/observability";
 
 import * as ServerConfig from "./config.ts";
-import { ASSET_ROUTE_PREFIX, readMcpAppHtml, resolveAsset } from "./assets/AssetAccess.ts";
+import {
+  ASSET_ROUTE_PREFIX,
+  type AssetRequestCredential,
+  readMcpAppHtml,
+  resolveAsset,
+} from "./assets/AssetAccess.ts";
 import { sourceControlMediaResponse } from "./assets/sourceControlMediaResponse.ts";
 import { statMediaFile, streamMediaFile, type OpenMediaFile } from "./assets/MediaFile.ts";
 import {
@@ -543,9 +549,36 @@ export const layerAssetRoute = HttpRouter.add(
       return HttpServerResponse.text("Not Found", { status: 404 });
     }
 
+    let credential: AssetRequestCredential | undefined;
+    const serverAuthOption = yield* Effect.serviceOption(EnvironmentAuth.EnvironmentAuth);
+    if (Option.isSome(serverAuthOption)) {
+      credential = yield* serverAuthOption.value.authenticateHttpRequest(request).pipe(
+        Effect.map((session): AssetRequestCredential => ({
+          _tag: "authenticated",
+          principalId: session.principalId,
+          binding: session.binding,
+        })),
+        Effect.catch((error) =>
+          Effect.succeed(
+            error._tag === "ServerAuthMissingCredentialError"
+              ? undefined
+              : ({ _tag: "invalid" } as const),
+          ),
+        ),
+        Effect.catchCauseIf(
+          (cause) => !Cause.hasInterruptsOnly(cause),
+          (cause) =>
+            Effect.logWarning("Failed to authenticate asset request.", { cause }).pipe(
+              Effect.as({ _tag: "invalid" } as const),
+            ),
+        ),
+      );
+    }
+
     const asset = yield* resolveAsset(
       suffix.slice(0, separatorIndex),
       suffix.slice(separatorIndex + 1),
+      credential === undefined ? undefined : { credential },
     );
     if (!asset) {
       return HttpServerResponse.text("Not Found", { status: 404 });

@@ -20,7 +20,11 @@ import {
   NativeAppIconReference,
   TurnItemId,
   EnvironmentThemeId,
+  type PrincipalId,
+  type SessionBinding,
+  boundProjectRole,
   passesProjectChecks,
+  roleHasCapability,
 } from "@t3tools/contracts";
 import {
   hostPreviewMimeTypeFromExtension,
@@ -41,6 +45,7 @@ import {
 } from "@t3tools/shared/projectFavicon";
 import { isNetworkPath } from "@t3tools/shared/path";
 import { MAX_TOOL_OUTPUT_IMAGE_BASE64_LENGTH, toolOutputImages } from "@t3tools/shared/toolOutput";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Clock from "effect/Clock";
 import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
@@ -49,6 +54,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
 import { base64UrlDecodeUtf8, base64UrlEncode } from "../auth/utils.ts";
@@ -59,6 +65,8 @@ import { parseAttachmentFileExtension, resolveAttachmentPathById } from "../atta
 import * as ServerConfig from "../config.ts";
 import { findThemeBackground } from "../environmentTheme.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import { isWithinRoot } from "../workspace/KnownWorkspaces.ts";
@@ -1016,9 +1024,125 @@ export const issueAssetUrl = Effect.fn("AssetAccess.issueAssetUrl")(function* (i
   };
 });
 
+export type AssetRequestCredential =
+  | { readonly _tag: "invalid" }
+  | {
+      readonly _tag: "authenticated";
+      readonly principalId?: PrincipalId | undefined;
+      readonly binding?: SessionBinding | undefined;
+    };
+
+const verifyProjectScopedAssetAccess = Effect.fn("AssetAccess.verifyProjectScopedAssetAccess")(
+  function* (input: {
+    readonly projectId: ProjectId;
+    readonly now: number;
+    readonly credential?: AssetRequestCredential | undefined;
+  }) {
+    const sqlOption = yield* Effect.serviceOption(SqlClient.SqlClient);
+    let projectOwnerId: PrincipalId | null = null;
+    if (Option.isSome(sqlOption)) {
+      const sql = sqlOption.value;
+      const rows = yield* sql<{ readonly ownerId: string | null }>`
+        SELECT owner_id AS "ownerId"
+        FROM projection_projects
+        WHERE project_id = ${input.projectId} AND deleted_at IS NULL
+        LIMIT 1
+      `.pipe(
+        NodeSqliteClient.readOnly,
+        Effect.tapError((cause) =>
+          Effect.logError("Failed to verify project existence for asset access.", {
+            projectId: input.projectId,
+            cause,
+          }),
+        ),
+        Effect.orElseSucceed(() => [] as ReadonlyArray<{ readonly ownerId: string | null }>),
+      );
+      if (rows.length === 0) {
+        return false;
+      }
+      const rawOwnerId = rows[0]?.ownerId ?? null;
+      projectOwnerId = rawOwnerId === null ? null : (rawOwnerId as PrincipalId);
+    }
+
+    const credential = input.credential;
+    if (credential === undefined) {
+      return true;
+    }
+    if (credential._tag === "invalid") {
+      return false;
+    }
+    if (credential.principalId === undefined) {
+      if (credential.binding?._tag === "projects") {
+        const role = boundProjectRole(credential.binding, input.projectId);
+        return role !== undefined && roleHasCapability(role, "project:read");
+      }
+      return true;
+    }
+
+    const principalsOption = yield* Effect.serviceOption(Principals.PrincipalRepository);
+    if (Option.isNone(principalsOption)) {
+      return false;
+    }
+    const maybePrincipal = yield* principalsOption.value.get(credential.principalId).pipe(
+      Effect.tapError((cause) =>
+        Effect.logError("Failed to verify principal for asset access.", {
+          principalId: credential.principalId,
+          cause,
+        }),
+      ),
+      Effect.orElseSucceed(() => Option.none()),
+    );
+    if (Option.isNone(maybePrincipal) || maybePrincipal.value.status !== "active") {
+      return false;
+    }
+    const principal = maybePrincipal.value;
+
+    if (credential.binding?._tag === "projects") {
+      const boundRole = boundProjectRole(credential.binding, input.projectId);
+      if (boundRole === undefined || !roleHasCapability(boundRole, "project:read")) {
+        return false;
+      }
+      if (principal.kind === "owner" || projectOwnerId === principal.id) {
+        return true;
+      }
+    } else if (principal.kind === "owner" || passesProjectChecks(credential.binding)) {
+      return true;
+    } else if (projectOwnerId === principal.id) {
+      return true;
+    }
+
+    const membershipsOption = yield* Effect.serviceOption(Memberships.MembershipRepository);
+    if (Option.isNone(membershipsOption)) {
+      return false;
+    }
+    const maybeMembership = yield* membershipsOption.value.get(input.projectId, principal.id).pipe(
+      Effect.tapError((cause) =>
+        Effect.logError("Failed to verify project membership for asset access.", {
+          projectId: input.projectId,
+          principalId: principal.id,
+          cause,
+        }),
+      ),
+      Effect.orElseSucceed(() => Option.none()),
+    );
+    if (Option.isNone(maybeMembership)) {
+      return false;
+    }
+    const membership = maybeMembership.value;
+    if (membership.state !== "active") {
+      return false;
+    }
+    if (membership.expiresAt !== null && Date.parse(membership.expiresAt) <= input.now) {
+      return false;
+    }
+    return roleHasCapability(membership.role, "project:read");
+  },
+);
+
 export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
   token: string,
   relativePath: string,
+  options?: { readonly credential?: AssetRequestCredential | undefined },
 ) {
   const [encodedPayload, signature] = token.split(".");
   if (!encodedPayload || !signature) return null;
@@ -1030,8 +1154,18 @@ export const resolveAsset = Effect.fn("AssetAccess.resolveAsset")(function* (
   );
   if (!verified) return null;
 
+  const now = yield* Clock.currentTimeMillis;
   const claims = decodeClaims(encodedPayload);
-  if (!claims || claims.expiresAt <= (yield* Clock.currentTimeMillis)) return null;
+  if (!claims || claims.expiresAt <= now) return null;
+
+  if ("projectId" in claims && claims.projectId !== undefined) {
+    const allowed = yield* verifyProjectScopedAssetAccess({
+      projectId: claims.projectId,
+      now,
+      credential: options?.credential,
+    });
+    if (!allowed) return null;
+  }
 
   if (claims.kind === "attachment") {
     const config = yield* ServerConfig.ServerConfig;

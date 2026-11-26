@@ -3088,6 +3088,12 @@
   "07f8fca2dd944865": "智能体登录",
   "55b9507b184ed4f1": "Cloud relay sign-in is disabled",
   "31a5b628601f8300": "V3 Code does not connect to T3 Connect. Approve agent access directly on your local or Tailscale V3 Code server.",
+  "726b71e31b176c58": "Staff",
+  "2b0205dde332c4f5": "Full project access up to admin capabilities.",
+  "70d231def4fb0350": "Restricted",
+  "2885af4edafa1dcc": "Operate threads, terminals, and previews; no file or source writes.",
+  "f53b119fafaf033c": "Client (read-only)",
+  "6a2bb216f2261c03": "Read threads, files, and project members only.",
   "9c5a2e144cefdf2f": "只读",
   "12d03e02951725b0": "读取项目和会话，不能启动会话、发送消息或进行任何更改。",
   "b6c9bd4137eca7b1": "环境返回了一个此页面不会打开的地址。",
@@ -3098,6 +3104,8 @@
   "95627df254e33301": "无法继续此次登录",
   "7c0fc818832927f4": "连接 {app}",
   "20ea7c78f1ea9a1e": "粘贴登录码",
+  "8fab0f72ffbbf3e8": "No ceiling",
+  "bf22b539715342c2": "Grant all scopes matching the chosen access level.",
   "d8749fb92ea75365": "正在批准…",
   "23b22da3b60feff0": "选择允许它做什么",
   "b8730e79d97d0b5a": "批准 {level}",
@@ -3192,6 +3200,10 @@
   "49e3cf16b3ac3e5f": "访问权限",
   "9699d255b374e215": "允许它做什么",
   "86f5769278f5fa4d": "除只读外，它还可以启动会话、向会话发消息和停止会话，且任何会话的权限都不会超过你选择的模式。",
+  "3a16e63273d7d383": "Projects",
+  "4753824b66ff3533": "Restricted to projects you administer. Select at least one project.",
+  "7ee8340a5b349507": "Leave unchecked for all projects, or select specific projects to limit access.",
+  "e93780d9ef0c8da1": "Scope ceiling",
   "1b9fda6296b3d704": "Sign-in failed.",
   "f214102f1bc1da23": "Enter your email or member ID and password to continue.",
   "5cb9336f416cf8b2": "Sign in to {environment}",
@@ -7514,7 +7526,6 @@
   "105d050defd72d99": "Project access",
   "b45a63dc41b5e0cb": "All accessible projects (follows memberships)",
   "46a6907752f95922": "Selected projects only",
-  "3a16e63273d7d383": "Projects",
   "918f1b5fee35bdf3": "No accessible projects are available for binding.",
   "2962ef443f907aa2": "Scopes",
   "4f113bb0bc732b3d": "Clear",
@@ -7666,6 +7677,8 @@
   "5c0d301ba1609a0f": "API token created",
   "a7174098dcff8e34": "Terminal opened",
   "52afac90f7de9287": "Secret read",
+  "027c42b46089abf5": "Project secret updated",
+  "e761a9797ce7ec24": "Project secret deleted",
   "470e06ee849ece79": "Asset URL issued",
   "682204d5a0e98639": "Preview tunnel opened",
   "e848b4a35c99daf6": "Authorization denied",
@@ -9664,6 +9677,76 @@
     " 个。继续输入以缩小列表范围。"
   ],
   "f08b0edca3adb547": "此连接无法浏览文件夹。请输入绝对路径。",
+  "753a680fc9eab10b": "Enter a secret name.",
+  "7c3171c4972c7458": "Use letters, digits, dots, hyphens, or underscores, starting with a letter, digit, or underscore.",
+  "308d591dae303ac6": "Enter a secret value.",
+  "938f2cfb0659f825": "Secret value is too long.",
+  "3b49c1b886aee94d": "Secret request failed. Try again.",
+  "0f253c75541d6256": "You do not have permission to manage secrets for this project.",
+  "5af93d3ad5346880": "This connection does not have permission to manage project secrets.",
+  "d8401c6df6be2c38": "This project or secret was not found.",
+  "ad2d6ec6c04db712": "API_TOKEN",
+  "f4dd9e81c199508e": "Paste the secret value…",
+  "b3494ee57f9579c3": "Secret saved",
+  "86fe6451f52e722a": "Fingerprint: {fingerprint}",
+  "ac4deba1f553f80c": "Project secrets · {environment}",
+  "3b42a9f0e4bd30a3": "Project secrets",
+  "affd6c1465cadda9": "Delete",
+  "913b5cc1ea421c64": [
+    "Update secret ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "1d1eb5dd5ca1e861": [
+    "Add secret to ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "1ff96e8bb9ced6f6": "Values are encrypted at rest on the server and are never shown again after saving. Only the SHA-256 fingerprint is displayed.",
+  "a60434fe035b9eb1": "Secret value",
+  "7dab314edf200527": "Update secret",
+  "f52d85dc91ae72dd": "Save secret",
+  "2a3fb5d7391611a6": "Add secret",
+  "195abd77b2939a6c": [
+    "Encrypted per-project secrets resolved server-side via",
+    " ",
+    {
+      "t": "code",
+      "i": 1,
+      "c": "secret://project/<projectId>/<name>"
+    },
+    ". Plaintext values are never returned to clients."
+  ],
+  "c4c16915ad2600d4": "Loading project secrets…",
+  "62d2d957ccde4893": "No secrets configured for this project yet.",
+  "04653200ff39e7a0": [
+    "Updated ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "a09ab001f479fd14": "Copied ref",
+  "f800b8e6babcc6f1": "Copy ref",
+  "6b1da89bf7daab6e": "Update",
+  "aba29e77e52bca46": "Delete",
+  "3207dd9d9e0d2c61": [
+    "Delete secret ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    "?"
+  ],
+  "54b279f9cddac113": "Any references to this secret will stop resolving immediately. This action cannot be undone.",
   "d79d3cfdd7864be5": "无法保存分组规则",
   "b76e857a764ea02a": "{environment} 上 {path} 的分组规则",
   "e6e55f343639ae71": "默认（{mode}）",

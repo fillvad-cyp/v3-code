@@ -79,6 +79,9 @@ import {
   PasswordLoginInput,
   PasswordSetInput,
   PasswordSetResult,
+  ProjectSecret,
+  ProjectSecretDeleteResult,
+  ProjectSecretSetInput,
   ProjectUsageResult,
   RecoveryConfirmInput,
   RecoveryConfirmResult,
@@ -1118,6 +1121,15 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+const EnvironmentProjectSecretsErrors = [
+  EnvironmentAuthInvalidError,
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentScopeRequiredError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentInternalError,
+] as const;
+
 class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
   .add(
     HttpApiEndpoint.get("snapshot", "/api/projects", {
@@ -1140,6 +1152,31 @@ class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
       params: Schema.Struct({ id: ProjectId }),
       success: ProjectUsageResult,
       error: EnvironmentProjectUsageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listSecrets", "/api/projects/:id/secrets", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId }),
+      success: Schema.Array(ProjectSecret),
+      error: EnvironmentProjectSecretsErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.put("setSecret", "/api/projects/:id/secrets/:name", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, name: Schema.String }),
+      payload: ProjectSecretSetInput,
+      success: ProjectSecret,
+      error: EnvironmentProjectSecretsErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("deleteSecret", "/api/projects/:id/secrets/:name", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, name: Schema.String }),
+      success: ProjectSecretDeleteResult,
+      error: EnvironmentProjectSecretsErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 

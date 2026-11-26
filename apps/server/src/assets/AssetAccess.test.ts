@@ -8,17 +8,36 @@ import {
   AssetCreateUrlInput,
   AssetPreviewTypeValidationError,
   AuthSessionId,
+  EventId,
   PrincipalId,
   ProjectId,
   SOURCE_CONTROL_MEDIA_ASSET,
   ThreadId,
   TurnItemId,
+  ceilingScopes,
+  roleScopes,
 } from "@t3tools/contracts";
 import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as PrincipalLimitsService from "../identity/PrincipalLimitsService.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ApiTokens from "../persistence/ApiTokens.ts";
+import * as AuditEvents from "../persistence/AuditEvents.ts";
+import * as Invitations from "../persistence/Invitations.ts";
+import * as MemberLimits from "../persistence/MemberLimits.ts";
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
+import * as RecoveryCodes from "../persistence/RecoveryCodes.ts";
+import * as SessionPrincipals from "../persistence/SessionPrincipals.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { PROJECT_FAVICON_FALLBACK_MARKER } from "@t3tools/shared/projectFavicon";
 import { MCP_APP_MAX_HTML_BYTES } from "@t3tools/shared/mcpApp";
 import { describe, expect, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
+import * as Digest from "effect/crypto/Digest";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -26,20 +45,23 @@ import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
-import { HttpClientRequest, HttpClientResponse, HttpServerResponse } from "effect/http";
+import { HttpClientRequest, HttpClientResponse, HttpRouter, HttpServerResponse } from "effect/http";
+import * as HttpPlatform from "effect/http/HttpPlatform";
 import { vi } from "vite-plus/test";
 
 import * as AssetSigner from "./AssetSigner.ts";
 import * as WorkspacePreviewRevisions from "./WorkspacePreviewRevisions.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import * as SessionStore from "../auth/SessionStore.ts";
 import * as ServerConfig from "../config.ts";
 import { makeFakeWslHost } from "../testUtils/fakeWsl.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "../project/T3ProjectFileLoader.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
-import { assetFileResponse } from "../http.ts";
+import { assetFileResponse, layerAssetRoute } from "../http.ts";
 import { ASSET_ROUTE_PREFIX, issueAssetUrl, readMcpAppHtml, resolveAsset } from "./AssetAccess.ts";
 import * as NativeAppIconResolver from "./NativeAppIconResolver.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
@@ -2122,6 +2144,342 @@ describe("AssetAccess", () => {
           _tag: "project_forbidden",
           requiredPermission: "project:read",
         });
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.live(
+    "revokes project-scoped assets on project deletion and membership removal (with credential), while keeping token-only requests valid until TTL",
+    () => {
+      const layerIdentityRepositories = Layer.mergeAll(
+        Principals.layer,
+        Memberships.layer,
+        Invitations.layer,
+        AuditEvents.layer,
+        ApiTokens.layer,
+        MemberLimits.layer,
+        RecoveryCodes.layer,
+        SessionPrincipals.layer,
+      );
+      const layerPrincipalLimits = PrincipalLimitsService.layer.pipe(
+        Layer.provide(layerIdentityRepositories),
+      );
+      const layerEnvAuth = EnvironmentAuth.layer.pipe(
+        Layer.provideMerge(ServerSettings.layerTest({ multiUser: true })),
+        Layer.provideMerge(ManagedPolicy.layerTest()),
+        Layer.provide(layerPrincipalLimits),
+        Layer.provide(layerIdentityRepositories),
+      );
+      const layerRevocation = Layer.mergeAll(
+        layerIdentityRepositories,
+        ProjectStore.layer,
+        layerEnvAuth,
+      ).pipe(
+        Layer.provideMerge(SqlitePersistence.layerMemory),
+        Layer.provideMerge(ServerEnvironment.layerIdentity),
+        Layer.provideMerge(layerTest),
+      );
+
+      return Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const sql = yield* SqlClient.SqlClient;
+        const projectStore = yield* ProjectStore.ProjectStoreV2;
+        const principals = yield* Principals.PrincipalRepository;
+        const memberships = yield* Memberships.MembershipRepository;
+        const envAuth = yield* EnvironmentAuth.EnvironmentAuth;
+
+        const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-asset-revocation-",
+        });
+        yield* fileSystem.writeFileString(
+          path.join(workspaceRoot, "index.html"),
+          "<html><body>Secret preview</body></html>",
+        );
+
+        const now = DateTime.formatIso(yield* DateTime.now);
+        const ownerId = PrincipalId.make("owner");
+        const memberId = PrincipalId.make("asset-member");
+        const projectId = ProjectId.make("asset-project-1");
+
+        yield* projectStore.apply({
+          sequence: 1,
+          type: "project.created",
+          eventId: EventId.make("evt-asset-proj-create"),
+          aggregateKind: "project",
+          aggregateId: projectId,
+          occurredAt: now,
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+          payload: {
+            projectId,
+            title: "Asset Project",
+            workspaceRoot,
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: now,
+            updatedAt: now,
+          },
+        });
+        yield* principals.create({
+          id: memberId,
+          kind: "member",
+          displayName: "Asset Member",
+          email: null,
+          status: "active",
+          ceiling: [...ceilingScopes("staff")],
+          createdAt: now,
+        });
+        yield* memberships.upsert({
+          projectId,
+          principalId: memberId,
+          role: "viewer",
+          state: "active",
+          invitedBy: ownerId,
+          expiresAt: null,
+          updatedAt: now,
+        });
+
+        const memberActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("asset-member-session"),
+          subject: "asset-member",
+          scopes: [...roleScopes("viewer")],
+          principalId: memberId,
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectId, "viewer"]]),
+        };
+
+        const memberToken = yield* envAuth.issuePrincipalSession({
+          principalId: memberId,
+          binding: { _tag: "principal" },
+          scopes: [...roleScopes("viewer")],
+          method: "bearer-access-token",
+          client: { deviceType: "desktop" },
+        });
+        const ownerToken = yield* envAuth.issuePrincipalSession({
+          principalId: ownerId,
+          binding: { _tag: "environment" },
+          scopes: [...roleScopes("owner")],
+          method: "bearer-access-token",
+          client: { deviceType: "desktop" },
+        });
+
+        const issued = yield* issueAssetUrl({
+          resource: {
+            _tag: "workspace-file",
+            threadId: ThreadId.make("thread-revocation"),
+            path: "index.html",
+          },
+          workspaceRoot,
+          projectId,
+          actor: memberActor,
+        });
+        const suffix = issued.relativeUrl.slice(`${ASSET_ROUTE_PREFIX}/`.length);
+        const separator = suffix.indexOf("/");
+        const token = suffix.slice(0, separator);
+        const relPath = suffix.slice(separator + 1);
+
+        // Active project + active membership: resolves token-only AND with member credential.
+        expect(yield* resolveAsset(token, relPath)).not.toBeNull();
+        expect(
+          yield* resolveAsset(token, relPath, {
+            credential: {
+              _tag: "authenticated",
+              principalId: memberId,
+              binding: { _tag: "principal" },
+            },
+          }),
+        ).not.toBeNull();
+
+        // Reuse the same in-memory services for HTTP route checks; HttpRouter handlers read
+        // services from the app's output context, so provideMerge keeps them live per request.
+        const sharedRouteServices = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          Layer.succeed(EnvironmentAuth.EnvironmentAuth, envAuth),
+          Layer.succeed(SessionStore.SessionStore, yield* SessionStore.SessionStore),
+          Layer.succeed(
+            ServerSecretStore.ServerSecretStore,
+            yield* ServerSecretStore.ServerSecretStore,
+          ),
+          Layer.succeed(Digest.Digest, yield* Digest.Digest),
+          Layer.succeed(ServerConfig.ServerConfig, yield* ServerConfig.ServerConfig),
+          Layer.succeed(ManagedPolicy.ManagedPolicy, yield* ManagedPolicy.ManagedPolicy),
+          Layer.succeed(
+            ServerSettings.ServerSettingsService,
+            yield* ServerSettings.ServerSettingsService,
+          ),
+          Layer.succeed(
+            ServerEnvironment.ServerEnvironmentIdentity,
+            yield* ServerEnvironment.ServerEnvironmentIdentity,
+          ),
+          Layer.succeed(SqlClient.SqlClient, sql),
+          Layer.succeed(Principals.PrincipalRepository, principals),
+          Layer.succeed(Memberships.MembershipRepository, memberships),
+          Layer.succeed(ApiTokens.ApiTokenRepository, yield* ApiTokens.ApiTokenRepository),
+          Layer.succeed(
+            SessionPrincipals.SessionPrincipalRepository,
+            yield* SessionPrincipals.SessionPrincipalRepository,
+          ),
+          Layer.succeed(AssetSigner.AssetSigner, yield* AssetSigner.AssetSigner),
+          Layer.succeed(WorkspacePaths.WorkspacePaths, yield* WorkspacePaths.WorkspacePaths),
+          Layer.succeed(
+            WorkspacePreviewRevisions.WorkspacePreviewRevisions,
+            yield* WorkspacePreviewRevisions.WorkspacePreviewRevisions,
+          ),
+          Layer.succeed(
+            NativeAppIconResolver.NativeAppIconResolver,
+            yield* NativeAppIconResolver.NativeAppIconResolver,
+          ),
+          Layer.succeed(Orchestrator.OrchestratorV2, yield* Orchestrator.OrchestratorV2),
+          Layer.succeed(FileSystem.FileSystem, fileSystem),
+          Layer.succeed(Path.Path, path),
+          Layer.succeed(HttpPlatform.HttpPlatform, yield* HttpPlatform.HttpPlatform),
+          Layer.succeed(BuiltInDrivers.SourceControlDrivers, []),
+          Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
+        );
+        const sharedRouteLayer = layerAssetRoute.pipe(Layer.provideMerge(sharedRouteServices));
+
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => HttpRouter.toWebHandler(sharedRouteLayer, { disableLogger: true })),
+          ({ handler }) =>
+            Effect.gen(function* () {
+              const fetchAsset = (bearer?: string) =>
+                Effect.promise(() =>
+                  handler(
+                    new Request(`http://127.0.0.1${issued.relativeUrl}`, {
+                      headers: bearer ? { authorization: `Bearer ${bearer}` } : {},
+                    }),
+                  ),
+                );
+
+              // Active membership -> 200 with member bearer and 200 token-only.
+              expect((yield* fetchAsset(memberToken.token)).status).toBe(200);
+              expect((yield* fetchAsset()).status).toBe(200);
+
+              // Invalid bearer -> 404 immediately.
+              expect((yield* fetchAsset("bogus-revoked-token")).status).toBe(404);
+
+              // Remove member from project -> member bearer immediately gets 404 / null.
+              yield* memberships.setState({
+                projectId,
+                principalId: memberId,
+                state: "removed",
+                updatedAt: now,
+              });
+              expect(
+                yield* resolveAsset(token, relPath, {
+                  credential: {
+                    _tag: "authenticated",
+                    principalId: memberId,
+                    binding: { _tag: "principal" },
+                  },
+                }),
+              ).toBeNull();
+              expect((yield* fetchAsset(memberToken.token)).status).toBe(404);
+
+              // Token-only request (no credential) keeps working until TTL, and owner keeps working.
+              expect(yield* resolveAsset(token, relPath)).not.toBeNull();
+              expect((yield* fetchAsset()).status).toBe(200);
+              expect((yield* fetchAsset(ownerToken.token)).status).toBe(200);
+
+              // Delete the project -> ALL requests (token-only and owner) immediately get 404 / null.
+              yield* projectStore.apply({
+                sequence: 2,
+                type: "project.deleted",
+                eventId: EventId.make("evt-asset-proj-delete"),
+                aggregateKind: "project",
+                aggregateId: projectId,
+                occurredAt: now,
+                commandId: null,
+                causationEventId: null,
+                correlationId: null,
+                metadata: {},
+                payload: {
+                  projectId,
+                  deletedAt: now,
+                },
+              });
+              expect(yield* resolveAsset(token, relPath)).toBeNull();
+              expect((yield* fetchAsset()).status).toBe(404);
+              expect((yield* fetchAsset(ownerToken.token)).status).toBe(404);
+            }),
+          ({ dispose }) => Effect.promise(() => dispose()),
+        );
+      }).pipe(Effect.provide(layerRevocation));
+    },
+  );
+
+  it.live(
+    "treats defects during HTTP asset auth resolution as an invalid credential instead of 500",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const workspaceRoot = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-asset-auth-defect-",
+        });
+        yield* fileSystem.writeFileString(
+          path.join(workspaceRoot, "index.html"),
+          "<html><body>Protected</body></html>",
+        );
+
+        const issued = yield* issueAssetUrl({
+          resource: {
+            _tag: "workspace-file",
+            threadId: ThreadId.make("thread-defect"),
+            path: "index.html",
+          },
+          workspaceRoot,
+          projectId: ProjectId.make("project-auth-defect"),
+        });
+
+        const defectingAuthRoute = layerAssetRoute.pipe(
+          Layer.provideMerge(
+            Layer.mergeAll(
+              NodeServices.layer,
+              NodeCrypto.layer,
+              Layer.mock(EnvironmentAuth.EnvironmentAuth)({
+                authenticateHttpRequest: () => Effect.die(new Error("auth dependency defect")),
+              }),
+              Layer.succeed(AssetSigner.AssetSigner, yield* AssetSigner.AssetSigner),
+              Layer.succeed(ServerConfig.ServerConfig, yield* ServerConfig.ServerConfig),
+              Layer.succeed(WorkspacePaths.WorkspacePaths, yield* WorkspacePaths.WorkspacePaths),
+              Layer.succeed(
+                WorkspacePreviewRevisions.WorkspacePreviewRevisions,
+                yield* WorkspacePreviewRevisions.WorkspacePreviewRevisions,
+              ),
+              Layer.succeed(
+                NativeAppIconResolver.NativeAppIconResolver,
+                yield* NativeAppIconResolver.NativeAppIconResolver,
+              ),
+              Layer.succeed(Orchestrator.OrchestratorV2, yield* Orchestrator.OrchestratorV2),
+              Layer.succeed(FileSystem.FileSystem, fileSystem),
+              Layer.succeed(Path.Path, path),
+              Layer.succeed(HttpPlatform.HttpPlatform, yield* HttpPlatform.HttpPlatform),
+              Layer.succeed(BuiltInDrivers.SourceControlDrivers, []),
+              Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
+            ),
+          ),
+        );
+
+        yield* Effect.acquireUseRelease(
+          Effect.sync(() => HttpRouter.toWebHandler(defectingAuthRoute, { disableLogger: true })),
+          ({ handler }) =>
+            Effect.gen(function* () {
+              const response = yield* Effect.promise(() =>
+                handler(
+                  new Request(`http://127.0.0.1${issued.relativeUrl}`, {
+                    headers: { authorization: "Bearer some-token" },
+                  }),
+                ),
+              );
+              expect(response.status).toBe(404);
+            }),
+          ({ dispose }) => Effect.promise(() => dispose()),
+        );
       }).pipe(Effect.provide(layerTest)),
   );
 });

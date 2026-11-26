@@ -127,6 +127,17 @@ export const ApiToken = Schema.Struct({
 });
 export type ApiToken = typeof ApiToken.Type;
 
+const PROJECT_SECRET_NAME_PATTERN = /^[A-Za-z0-9_][A-Za-z0-9._-]*$/;
+const PROJECT_SECRET_NAME_MAX_LENGTH = 128;
+const PROJECT_SECRET_VALUE_MAX_LENGTH = 65_536;
+const PROJECT_SECRET_REFERENCE_PREFIX = "secret://project/";
+
+export const ProjectSecretName = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(PROJECT_SECRET_NAME_MAX_LENGTH),
+  Schema.isPattern(PROJECT_SECRET_NAME_PATTERN),
+);
+export type ProjectSecretName = typeof ProjectSecretName.Type;
+
 export const ProjectSecret = Schema.Struct({
   projectId: ProjectId,
   name: TrimmedNonEmptyString,
@@ -134,6 +145,54 @@ export const ProjectSecret = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 export type ProjectSecret = typeof ProjectSecret.Type;
+
+export const ProjectSecretSetInput = Schema.Struct({
+  value: Schema.String.check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(PROJECT_SECRET_VALUE_MAX_LENGTH),
+  ),
+});
+export type ProjectSecretSetInput = typeof ProjectSecretSetInput.Type;
+
+export const ProjectSecretDeleteResult = Schema.Struct({
+  deleted: Schema.Boolean,
+});
+export type ProjectSecretDeleteResult = typeof ProjectSecretDeleteResult.Type;
+
+export function isProjectSecretReference(value: string): boolean {
+  return value.startsWith(PROJECT_SECRET_REFERENCE_PREFIX);
+}
+
+export function formatProjectSecretReference(projectId: ProjectId, name: string): string {
+  return `${PROJECT_SECRET_REFERENCE_PREFIX}${projectId}/${name}`;
+}
+
+export function parseProjectSecretReference(
+  reference: string,
+): { readonly projectId: ProjectId; readonly name: string } | null {
+  if (!reference.startsWith(PROJECT_SECRET_REFERENCE_PREFIX)) {
+    return null;
+  }
+  const remainder = reference.slice(PROJECT_SECRET_REFERENCE_PREFIX.length);
+  const slashIndex = remainder.indexOf("/");
+  if (slashIndex <= 0 || remainder.indexOf("/", slashIndex + 1) !== -1) {
+    return null;
+  }
+  const rawProjectId = remainder.slice(0, slashIndex).trim();
+  const rawName = remainder.slice(slashIndex + 1);
+  if (
+    rawProjectId.length === 0 ||
+    rawName.length === 0 ||
+    rawName.length > PROJECT_SECRET_NAME_MAX_LENGTH ||
+    !PROJECT_SECRET_NAME_PATTERN.test(rawName)
+  ) {
+    return null;
+  }
+  return {
+    projectId: ProjectId.make(rawProjectId),
+    name: rawName,
+  };
+}
 
 export const DEFAULT_MEMBER_MAX_SESSIONS = 5;
 export const DEFAULT_MEMBER_MAX_TERMINALS = 3;
