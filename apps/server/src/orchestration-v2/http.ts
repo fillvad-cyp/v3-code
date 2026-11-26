@@ -22,6 +22,7 @@ import {
   requireEnvironmentScope,
 } from "../auth/http.ts";
 import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ResourceResolver from "../access/ResourceResolver.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
@@ -38,6 +39,7 @@ import {
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import {
+  filterShellSnapshot,
   loadShellUnlessResumable,
   loadSubscriberShellSnapshot,
   projectIdentitiesDigest,
@@ -72,6 +74,21 @@ export const layer = HttpApiBuilder.group(
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
     const projectQuotas = yield* ProjectQuotaService.ProjectQuotaService;
     const projectAccess = yield* ProjectAccess.ProjectAccess;
+    const resourceResolverOption = yield* Effect.serviceOption(ResourceResolver.ResourceResolver);
+
+    const resolveExternalThreadIds = (
+      actor: ProjectAccess.AccessActor,
+    ): Effect.Effect<ReadonlySet<string> | undefined> => {
+      if (
+        actor.isOwner ||
+        actor.principalKind !== "external" ||
+        actor.principalId === undefined ||
+        resourceResolverOption._tag === "None"
+      ) {
+        return Effect.undefined;
+      }
+      return resourceResolverOption.value.resolveExternalPrincipalThreadIds(actor.principalId);
+    };
 
     const enrichProjectShells = Effect.fn("http.orchestration.enrichProjectShells")(
       (projects: ReadonlyArray<OrchestrationProjectShell>) =>
@@ -105,6 +122,7 @@ export const layer = HttpApiBuilder.group(
         readonly omitIdleSubagents: boolean;
         readonly omitOlderSettled: boolean;
         readonly allowedProjectIds?: ReadonlySet<string> | undefined;
+        readonly allowedThreadIds?: ReadonlySet<string> | undefined;
       }) {
         const projectIds =
           options.allowedProjectIds === undefined
@@ -128,8 +146,13 @@ export const layer = HttpApiBuilder.group(
           options,
           allowedProjectIds: options.allowedProjectIds,
         });
-        const projects = yield* enrichProjectShells(snapshot.projects);
-        return { ...snapshot, projects, projectIdentities: projectIdentitiesDigest(projects) };
+        const narrowed = filterShellSnapshot(
+          snapshot,
+          options.allowedProjectIds,
+          options.allowedThreadIds,
+        );
+        const projects = yield* enrichProjectShells(narrowed.projects);
+        return { ...narrowed, projects, projectIdentities: projectIdentitiesDigest(projects) };
       },
     );
 
@@ -141,6 +164,7 @@ export const layer = HttpApiBuilder.group(
         readonly resumeFrom?: string;
       },
       allowedProjectIds: ReadonlySet<string> | undefined,
+      allowedThreadIds: ReadonlySet<string> | undefined,
     ) => {
       const resumeFrom = query.resumeFrom === undefined ? Number.NaN : Number(query.resumeFrom);
       return loadShellUnlessResumable({
@@ -150,6 +174,7 @@ export const layer = HttpApiBuilder.group(
           omitIdleSubagents: query.omitIdleSubagents === "1",
           omitOlderSettled: query.omitOlderSettled === "1",
           allowedProjectIds,
+          allowedThreadIds,
         }),
       });
     });
@@ -261,6 +286,10 @@ export const layer = HttpApiBuilder.group(
         if (shell === null || !projectAccess.can(actor, shell.projectId, "project:read")) {
           return yield* failEnvironmentNotFound("thread_not_found");
         }
+        const allowedThreadIds = yield* resolveExternalThreadIds(actor);
+        if (allowedThreadIds !== undefined && !allowedThreadIds.has(threadId)) {
+          return yield* failEnvironmentNotFound("thread_not_found");
+        }
       },
     );
 
@@ -270,9 +299,11 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.orchestration.shellSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
           const actor = yield* resolveHttpActor("orchestration_snapshot_failed");
+          const allowedThreadIds = yield* resolveExternalThreadIds(actor);
           return yield* answerShellSnapshot(
             args.query,
             projectAccess.accessibleProjectIds(actor),
+            allowedThreadIds,
           ).pipe(
             traceLocalHandlerWork,
             Effect.catch((cause) =>

@@ -7,6 +7,7 @@ import {
   AuthEnvironmentScope,
   type AuthSessionId,
   PrincipalId,
+  type PrincipalKind,
   type ProjectCapability,
   ProjectForbiddenError,
   ProjectId,
@@ -67,6 +68,7 @@ export type AccessActor = {
   readonly subject: string;
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly principalId?: PrincipalId;
+  readonly principalKind?: PrincipalKind;
   readonly binding?: SessionBinding;
   readonly isOwner: boolean;
   readonly accessRevision?: number;
@@ -262,6 +264,7 @@ const make = Effect.gen(function* () {
       subject: session.subject,
       scopes: session.scopes,
       principalId: principal.id,
+      principalKind: principal.kind,
       ...bindingProps,
       isOwner,
       accessRevision: principal.accessRevision,

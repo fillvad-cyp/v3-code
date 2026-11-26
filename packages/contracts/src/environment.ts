@@ -230,6 +230,7 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   members: Schema.optionalKey(Schema.Boolean),
   audit: Schema.optionalKey(Schema.Boolean),
   projectSecrets: Schema.optionalKey(Schema.Boolean),
+  crm: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 

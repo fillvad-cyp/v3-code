@@ -50,6 +50,9 @@ import {
 } from "./environment.ts";
 import {
   ApiTokenId,
+  CrmClientId,
+  CrmContactId,
+  CrmNoteId,
   DpopFailureReason,
   AuthSessionId,
   InvitationId,
@@ -59,6 +62,25 @@ import {
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
 import { ListAuditEventsQuery, ListAuditEventsResult } from "./audit.ts";
+import {
+  CrmClient,
+  CrmClientCreateInput,
+  CrmClientDeleteResult,
+  CrmClientDetail,
+  CrmClientInviteResult,
+  CrmClientThread,
+  CrmClientThreadLinkInput,
+  CrmClientThreadUnlinkResult,
+  CrmClientUpdateInput,
+  CrmContact,
+  CrmContactCreateInput,
+  CrmContactDeleteResult,
+  CrmContactUpdateInput,
+  CrmNote,
+  CrmNoteCreateInput,
+  CrmNoteDeleteResult,
+  CrmNoteUpdateInput,
+} from "./crm.ts";
 import {
   ApiTokenCreateInput,
   ApiTokenCreateResult,
@@ -1180,6 +1202,204 @@ class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+const EnvironmentCrmErrors = [
+  EnvironmentAuthInvalidError,
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentHttpConflictError,
+  EnvironmentHttpTooManyRequestsError,
+  EnvironmentScopeRequiredError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentInternalError,
+] as const;
+
+class EnvironmentCrmHttpApi extends HttpApiGroup.make("crm")
+  .add(
+    HttpApiEndpoint.get("listClients", "/api/projects/:id/crm/clients", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId }),
+      success: Schema.Array(CrmClient),
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("createClient", "/api/projects/:id/crm/clients", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId }),
+      payload: CrmClientCreateInput,
+      success: CrmClient,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("getClient", "/api/projects/:id/crm/clients/:clientId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      success: CrmClientDetail,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.patch("updateClient", "/api/projects/:id/crm/clients/:clientId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      payload: CrmClientUpdateInput,
+      success: CrmClient,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("deleteClient", "/api/projects/:id/crm/clients/:clientId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      query: Schema.Struct({ purge: Schema.optionalKey(Schema.String) }),
+      success: CrmClientDeleteResult,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listContacts", "/api/projects/:id/crm/clients/:clientId/contacts", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      success: Schema.Array(CrmContact),
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("createContact", "/api/projects/:id/crm/clients/:clientId/contacts", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      payload: CrmContactCreateInput,
+      success: CrmContact,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.patch(
+      "updateContact",
+      "/api/projects/:id/crm/clients/:clientId/contacts/:contactId",
+      {
+        headers: OptionalBearerHeaders,
+        params: Schema.Struct({
+          id: ProjectId,
+          clientId: CrmClientId,
+          contactId: CrmContactId,
+        }),
+        payload: CrmContactUpdateInput,
+        success: CrmContact,
+        error: EnvironmentCrmErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete(
+      "deleteContact",
+      "/api/projects/:id/crm/clients/:clientId/contacts/:contactId",
+      {
+        headers: OptionalBearerHeaders,
+        params: Schema.Struct({
+          id: ProjectId,
+          clientId: CrmClientId,
+          contactId: CrmContactId,
+        }),
+        success: CrmContactDeleteResult,
+        error: EnvironmentCrmErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listNotes", "/api/projects/:id/crm/clients/:clientId/notes", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      success: Schema.Array(CrmNote),
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("createNote", "/api/projects/:id/crm/clients/:clientId/notes", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      payload: CrmNoteCreateInput,
+      success: CrmNote,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.patch("updateNote", "/api/projects/:id/crm/clients/:clientId/notes/:noteId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({
+        id: ProjectId,
+        clientId: CrmClientId,
+        noteId: CrmNoteId,
+      }),
+      payload: CrmNoteUpdateInput,
+      success: CrmNote,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("deleteNote", "/api/projects/:id/crm/clients/:clientId/notes/:noteId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({
+        id: ProjectId,
+        clientId: CrmClientId,
+        noteId: CrmNoteId,
+      }),
+      success: CrmNoteDeleteResult,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listClientThreads", "/api/projects/:id/crm/clients/:clientId/threads", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      success: Schema.Array(CrmClientThread),
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("linkClientThread", "/api/projects/:id/crm/clients/:clientId/threads", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      payload: CrmClientThreadLinkInput,
+      success: CrmClientThread,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete(
+      "unlinkClientThread",
+      "/api/projects/:id/crm/clients/:clientId/threads/:threadId",
+      {
+        headers: OptionalBearerHeaders,
+        params: Schema.Struct({
+          id: ProjectId,
+          clientId: CrmClientId,
+          threadId: ThreadId,
+        }),
+        success: CrmClientThreadUnlinkResult,
+        error: EnvironmentCrmErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("inviteClient", "/api/projects/:id/crm/clients/:clientId/invite", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      success: CrmClientInviteResult,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("exportCrm", "/api/projects/:id/crm/export", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId }),
+      query: Schema.Struct({ clientId: Schema.optionalKey(CrmClientId) }),
+      success: Schema.String.pipe(HttpApiSchema.asText({ contentType: "application/x-ndjson" })),
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
 class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").add(
   HttpApiEndpoint.post("diff", "/api/pull-requests/diff", {
     headers: OptionalBearerHeaders,
@@ -1457,6 +1677,7 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
   .add(EnvironmentProjectsHttpApi)
+  .add(EnvironmentCrmHttpApi)
   .add(EnvironmentVoiceHttpApi)
   .add(EnvironmentConnectHttpApi)
   .add(EnvironmentWebhooksHttpApi)

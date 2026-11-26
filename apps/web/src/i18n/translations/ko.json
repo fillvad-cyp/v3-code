@@ -9514,6 +9514,125 @@
   "2aaeffe4fe3d29d7": "t3.json에서 가져오기",
   "84f1752d64c3152e": "이 체크아웃에 선언된 작업을 편집하지 않고 바로 추가합니다.",
   "3b893da0373ab50e": "작업 추가",
+  "e5ab619f4eafb1c5": "Lead",
+  "a7a4aca7623ccc45": "Active",
+  "b388d57b36adef6f": "Inactive",
+  "c7f2d91567bd60a7": "Archived",
+  "0716b53f124fdc44": "CRM request failed. Try again.",
+  "cfd4989b5a0e2459": "You do not have permission to perform this CRM action on this project.",
+  "f5e89da564316912": "The requested CRM record was not found in this project.",
+  "53ecf848ad1302d8": "This client record has been purged and can no longer be edited.",
+  "a47377a0aa528fc4": "Enter a client name.",
+  "b1feb51008884469": "Acme Corp",
+  "419c354e869d65df": "Optional company name",
+  "a3a4496aa822477e": "Client status",
+  "01810eda239a03d2": "Email will be cleared",
+  "5f1247ed61783034": "Current: {masked}",
+  "a32dcd4c17ef783b": "client@example.com",
+  "78e771be9ee64aa2": "Phone will be cleared",
+  "bb5f2c5197b3ed55": "+1 555 0100",
+  "a2cc67524ab0e902": "Enter a contact name.",
+  "99e9e11116af22bd": "Jane Doe",
+  "c03cbac21ba7ca8e": "Account Manager",
+  "9d40a0f05fd025a7": "contact@example.com",
+  "6280ec877f8e53ca": "+1 555 0199",
+  "9b9543945da4daea": "Enter note text.",
+  "49c56321f063d292": "Write a client note…",
+  "b44face454eefe93": "[redacted]",
+  "90702340aa170bab": "Select a thread to link",
+  "4fd35b69fb54a57a": "No unlinked threads in this project",
+  "a85b608b9e2b777a": "Select a project thread…",
+  "d00a0c676cf779eb": "Client PII purged",
+  "b920fd5486490285": "Encrypted contact data was cleared and the redacted record was preserved.",
+  "481507056e4be442": "CRM export ready",
+  "3683f028aae33c4c": "Downloaded {filename}",
+  "f19707e82e37ceba": "CRM · {environment}",
+  "4979fdf4e89bc653": "CRM",
+  "8d07a5a430cb27c5": [
+    "Edit client ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "050fd49c00de3354": [
+    "Add client to ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "5153cd2077a0f6b5": "Email and phone values are encrypted at rest and displayed masked. Leave blank when editing to keep existing encrypted values.",
+  "8686297d8ead4c4a": "Company",
+  "204167c06dc9fb6e": "Status",
+  "effdcd633af15789": "Email",
+  "9bcb01813a7d3498": "Keep existing",
+  "6b8ae44fff047836": "Clear email",
+  "54b1533db780e117": "Phone",
+  "ff89a06add1f3772": "Clear phone",
+  "7dcb3e8a8d31c7d9": "Add client",
+  "5e6fc18edb0cf6f1": [
+    "Edit contact ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "ce4c4dd83c1c94d1": "Add contact",
+  "13d0f1d25763da1a": "Contact email and phone are encrypted at rest and displayed masked.",
+  "5404d59e7fdd9dfa": "Role or title",
+  "443e300c87c176ae": "Save contact",
+  "2d5f9fc73d29506b": "Edit note",
+  "4e3fc0fd5484575f": "Add note",
+  "7883e287a63c35ad": "Save note",
+  "dd4a6775ff9798da": "Edit client",
+  "80bd9cb205981e03": "Invite client",
+  "f310726a2af97d6e": "Export JSONL",
+  "3db76bd28949c53f": "Purge PII",
+  "f03cd6b98a81ca8a": "Loading client details…",
+  "e340cf194b1d904d": "Contacts",
+  "defbc2ce3201aeab": "No contacts added yet.",
+  "2f4ef70d15027bb0": "Notes",
+  "b4ebef6d56db918c": "No notes recorded yet.",
+  "f7068768fdf3e96b": "Linked threads",
+  "add90d534b880b55": "Link thread",
+  "572796cf5f5bb984": "No threads linked to this client yet.",
+  "0873c92c97f73f56": "Unlink",
+  "638b1be4830f4d5e": "Project-scoped clients, contacts, notes, and linked threads. Email and phone numbers are encrypted at rest and displayed masked.",
+  "dc72fb6d4e7f5028": "Loading CRM clients…",
+  "251f987d5bc4bb67": "No CRM clients in this project yet.",
+  "17916fcb6923a2ca": "Portal linked",
+  "d89cfe21c8bd831a": "Purged",
+  "816b314a57641a18": [
+    "Purged ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "fa5b7755a066484a": [
+    "Client invitation for ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    }
+  ],
+  "1b8cf1a434288299": "Share this one-time code with the external client. Once accepted, they can view only their own CRM record and linked threads.",
+  "add45f9682c06c43": [
+    "Purge PII for ",
+    {
+      "i": 1,
+      "k": "_gt_value_1",
+      "v": "v"
+    },
+    "?"
+  ],
+  "2fed01ae1bb0ff14": "This permanently clears encrypted email and phone fields, contact PII, and note bodies, sets a redaction timestamp, and keeps the redacted row for audit integrity. This action cannot be undone.",
   "5afea423d829496e": "이 환경에서는 이 제공자를 사용할 수 없습니다.",
   "a2b8aa200983f586": "{provider}이(가) 꺼져 있습니다.",
   "3cbe218647595efb": "{provider}을(를) 사용할 수 없습니다.",

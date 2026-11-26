@@ -1,20 +1,90 @@
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import {
+  CrmClientId,
   ORCHESTRATION_V2_WS_METHODS,
+  PrincipalId,
   type ProjectCapability,
+  ProjectId,
   ThreadId,
   WS_METHODS,
 } from "@t3tools/contracts";
 
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as CrmRepo from "../persistence/Crm.ts";
 
 export interface RpcResource {
   readonly projectId?: string;
   readonly threadId?: string;
   readonly terminalId?: string;
   readonly projectIds?: ReadonlyArray<string>;
+}
+
+export type CrmHttpEndpointName =
+  | "listClients"
+  | "createClient"
+  | "getClient"
+  | "updateClient"
+  | "deleteClient"
+  | "listContacts"
+  | "createContact"
+  | "updateContact"
+  | "deleteContact"
+  | "listNotes"
+  | "createNote"
+  | "updateNote"
+  | "deleteNote"
+  | "listClientThreads"
+  | "linkClientThread"
+  | "unlinkClientThread"
+  | "inviteClient"
+  | "exportCrm";
+
+export interface CrmHttpResource {
+  readonly projectId: ProjectId;
+  readonly clientId?: CrmClientId;
+  readonly threadId?: ThreadId;
+  readonly capability: ProjectCapability;
+}
+
+/** Required project capability for each `/api/projects/:id/crm/*` HTTP endpoint. */
+const CRM_HTTP_CAPABILITIES: Readonly<Record<CrmHttpEndpointName, ProjectCapability>> = {
+  listClients: "project:crm.read",
+  createClient: "project:crm.write",
+  getClient: "project:crm.read",
+  updateClient: "project:crm.write",
+  deleteClient: "project:crm.write",
+  listContacts: "project:crm.read",
+  createContact: "project:crm.write",
+  updateContact: "project:crm.write",
+  deleteContact: "project:crm.write",
+  listNotes: "project:crm.read",
+  createNote: "project:crm.write",
+  updateNote: "project:crm.write",
+  deleteNote: "project:crm.write",
+  listClientThreads: "project:crm.read",
+  linkClientThread: "project:crm.write",
+  unlinkClientThread: "project:crm.write",
+  inviteClient: "project:crm.invite_client",
+  exportCrm: "project:crm.read",
+};
+
+function resourceForCrmHttpEndpoint(
+  endpoint: CrmHttpEndpointName,
+  params: {
+    readonly projectId: ProjectId;
+    readonly clientId?: CrmClientId | undefined;
+    readonly threadId?: ThreadId | undefined;
+  },
+): CrmHttpResource {
+  return {
+    projectId: params.projectId,
+    ...(params.clientId === undefined ? {} : { clientId: params.clientId }),
+    ...(params.threadId === undefined ? {} : { threadId: params.threadId }),
+    capability: CRM_HTTP_CAPABILITIES[endpoint],
+  };
 }
 
 const THREAD_MANAGE_COMMANDS = new Set<string>([
@@ -407,14 +477,36 @@ export class ResourceResolver extends Context.Service<
       method: string,
       payload?: unknown,
     ) => ProjectCapability | undefined;
+    readonly resourceForCrmHttpEndpoint: (
+      endpoint: CrmHttpEndpointName,
+      params: {
+        readonly projectId: ProjectId;
+        readonly clientId?: CrmClientId | undefined;
+        readonly threadId?: ThreadId | undefined;
+      },
+    ) => CrmHttpResource;
     readonly resolveThreadProject: (
       threadId: ThreadId | string,
     ) => Effect.Effect<string | undefined>;
+    readonly resolveCrmClientPrincipal: (
+      clientId: CrmClientId | string,
+    ) => Effect.Effect<PrincipalId | undefined>;
+    readonly resolveCrmClientProject: (
+      clientId: CrmClientId | string,
+    ) => Effect.Effect<ProjectId | undefined>;
+    readonly resolveExternalPrincipalThreadIds: (
+      principalId: PrincipalId,
+    ) => Effect.Effect<ReadonlySet<string>>;
+    readonly isThreadAccessibleByExternalPrincipal: (
+      principalId: PrincipalId,
+      threadId: ThreadId | string,
+    ) => Effect.Effect<boolean>;
   }
 >()("v3code/access/ResourceResolver") {}
 
 const make = Effect.gen(function* () {
   const projections = yield* ProjectionStore.ProjectionStoreV2;
+  const crmRepoOption = yield* Effect.serviceOption(CrmRepo.CrmRepository);
 
   const resolveThreadProject = Effect.fn("ResourceResolver.resolveThreadProject")(function* (
     threadId: ThreadId | string,
@@ -428,10 +520,56 @@ const make = Effect.gen(function* () {
     return thread?.projectId;
   });
 
+  const resolveCrmClientPrincipal = Effect.fn("ResourceResolver.resolveCrmClientPrincipal")(
+    function* (clientId: CrmClientId | string) {
+      const trimmed = clientId.trim();
+      if (trimmed.length === 0 || Option.isNone(crmRepoOption)) return undefined;
+      const client = yield* crmRepoOption.value
+        .getClientById(CrmClientId.make(trimmed))
+        .pipe(Effect.orElseSucceed(() => Option.none()));
+      return Option.isSome(client) ? (client.value.principalId ?? undefined) : undefined;
+    },
+  );
+
+  const resolveCrmClientProject = Effect.fn("ResourceResolver.resolveCrmClientProject")(function* (
+    clientId: CrmClientId | string,
+  ) {
+    const trimmed = clientId.trim();
+    if (trimmed.length === 0 || Option.isNone(crmRepoOption)) return undefined;
+    const client = yield* crmRepoOption.value
+      .getClientById(CrmClientId.make(trimmed))
+      .pipe(Effect.orElseSucceed(() => Option.none()));
+    return Option.isSome(client) ? client.value.projectId : undefined;
+  });
+
+  const resolveExternalPrincipalThreadIds = Effect.fn(
+    "ResourceResolver.resolveExternalPrincipalThreadIds",
+  )(function* (principalId: PrincipalId) {
+    if (Option.isNone(crmRepoOption)) return new Set<string>();
+    const threadIds = yield* crmRepoOption.value
+      .listThreadIdsForPrincipal(principalId)
+      .pipe(Effect.orElseSucceed(() => [] as ReadonlyArray<ThreadId>));
+    return new Set<string>(threadIds);
+  });
+
+  const isThreadAccessibleByExternalPrincipal = Effect.fn(
+    "ResourceResolver.isThreadAccessibleByExternalPrincipal",
+  )(function* (principalId: PrincipalId, threadId: ThreadId | string) {
+    const trimmed = threadId.trim();
+    if (trimmed.length === 0) return false;
+    const allowed = yield* resolveExternalPrincipalThreadIds(principalId);
+    return allowed.has(trimmed);
+  });
+
   return ResourceResolver.of({
     resourcesForRpcCall,
     capabilityForRpcCall,
+    resourceForCrmHttpEndpoint,
     resolveThreadProject,
+    resolveCrmClientPrincipal,
+    resolveCrmClientProject,
+    resolveExternalPrincipalThreadIds,
+    isThreadAccessibleByExternalPrincipal,
   });
 });
 

@@ -466,7 +466,9 @@ export function makeAccessGate(
     readonly resolver: Pick<
       ResourceResolver.ResourceResolver["Service"],
       "capabilityForRpcCall" | "resourcesForRpcCall" | "resolveThreadProject"
-    >;
+    > & {
+      readonly isThreadAccessibleByExternalPrincipal?: ResourceResolver.ResourceResolver["Service"]["isThreadAccessibleByExternalPrincipal"];
+    };
     readonly onRevoked?: (code: RevocationCloseCode, reason: string) => Effect.Effect<void>;
   },
 ): RpcAccessGate {
@@ -553,6 +555,24 @@ export function makeAccessGate(
         ...authScopeRequiredResponse(AuthOrchestrationReadScope),
       });
     }
+    if (
+      !actor.isOwner &&
+      actor.principalKind === "external" &&
+      actor.principalId !== undefined &&
+      input.resolver.isThreadAccessibleByExternalPrincipal !== undefined
+    ) {
+      const allowed = yield* input.resolver.isThreadAccessibleByExternalPrincipal(
+        actor.principalId,
+        threadId,
+      );
+      if (!allowed) {
+        yield* notifyRevoked(WS_CLOSE_CODE_FORBIDDEN, "resource_access_revoked");
+        return yield* new EnvironmentAuthorizationError({
+          message: "The authenticated session does not have access to this thread.",
+          ...authScopeRequiredResponse(AuthOrchestrationReadScope),
+        });
+      }
+    }
     return projectId;
   });
 
@@ -605,6 +625,24 @@ export function makeAccessGate(
       const threadProjectId = yield* input.resolver.resolveThreadProject(resources.threadId);
       if (threadProjectId !== undefined && threadProjectId !== resources.projectId) {
         yield* input.access.assert(actor, threadProjectId, capability);
+      }
+      if (
+        !actor.isOwner &&
+        actor.principalKind === "external" &&
+        actor.principalId !== undefined &&
+        input.resolver.isThreadAccessibleByExternalPrincipal !== undefined
+      ) {
+        const allowed = yield* input.resolver.isThreadAccessibleByExternalPrincipal(
+          actor.principalId,
+          resources.threadId,
+        );
+        if (!allowed) {
+          return yield* new ProjectForbiddenError({
+            message: "External principal does not have access to this thread.",
+            projectId: ProjectId.make(threadProjectId ?? resources.projectId ?? "environment"),
+            requiredPermission: capability,
+          });
+        }
       }
     }
   });

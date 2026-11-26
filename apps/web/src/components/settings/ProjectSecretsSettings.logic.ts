@@ -120,7 +120,8 @@ export function formatProjectSecretErrorMessage(
 ): string {
   const message =
     errorDisplayMessage(error, resolve) ??
-    thrownErrorMessage(error, resolve(msg("Secret request failed. Try again.")));
+    thrownErrorMessage(error, resolve) ??
+    resolve(msg("Secret request failed. Try again."));
   const lowered = message.toLowerCase();
   if (lowered.includes("project:secrets") || lowered.includes("forbidden")) {
     return resolve(msg("You do not have permission to manage secrets for this project."));

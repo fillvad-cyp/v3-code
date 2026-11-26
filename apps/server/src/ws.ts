@@ -153,6 +153,7 @@ import {
   composeShellStreamWithEnrichment,
   dedupeShellEnrichment,
   domainEventProjectId,
+  filterShellSnapshot,
   filterShellStream,
   filterShellStreamItem,
   loadOlderSettledThreadsPage,
@@ -1145,6 +1146,8 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       ReadonlySet<string> | undefined,
       RefreshError
     >;
+    readonly allowedThreadIds?: ReadonlySet<string> | undefined;
+    readonly refreshAllowedThreadIds?: Effect.Effect<ReadonlySet<string> | undefined, RefreshError>;
   }) {
     const sql = yield* SqlClient.SqlClient;
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
@@ -1154,6 +1157,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
     const projectQuotas = yield* ProjectQuotaService.ProjectQuotaService;
     const staticAllowedProjectIds = input.allowedProjectIds;
+    const staticAllowedThreadIds = input.allowedThreadIds;
     const resolveAllowedProjectIds: Effect.Effect<
       ReadonlySet<string> | undefined,
       ShellAccessRefreshError<RefreshError>
@@ -1163,6 +1167,15 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
           (error) => new ShellAccessRefreshError(error),
         )
       : Effect.succeed(staticAllowedProjectIds);
+    const resolveAllowedThreadIds: Effect.Effect<
+      ReadonlySet<string> | undefined,
+      ShellAccessRefreshError<RefreshError>
+    > = input.refreshAllowedThreadIds !== undefined
+      ? Effect.mapError(
+          input.refreshAllowedThreadIds,
+          (error) => new ShellAccessRefreshError(error),
+        )
+      : Effect.succeed(staticAllowedThreadIds);
     let subagentThreadIds = new Set<string>();
     const knownThreadProjects = new Map<string, string>();
     const accessibleThreadIds = new Set<string>();
@@ -1221,6 +1234,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     );
     const loadSnapshot = Effect.fn("ws.orchestrationV2.loadShellSnapshot")(function* () {
       const allowedProjectIds = yield* resolveAllowedProjectIds;
+      const allowedThreadIds = yield* resolveAllowedThreadIds;
       const allowedList =
         allowedProjectIds === undefined
           ? undefined
@@ -1246,18 +1260,25 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         },
         allowedProjectIds,
       });
+      const narrowedSnapshot = filterShellSnapshot(
+        forSubscriber.snapshot,
+        allowedProjectIds,
+        allowedThreadIds,
+      );
       subagentThreadIds = forSubscriber.subagentThreadIds;
       for (const threadId of forSubscriber.accessibleThreadIds) {
-        accessibleThreadIds.add(threadId);
+        if (allowedThreadIds === undefined || allowedThreadIds.has(threadId)) {
+          accessibleThreadIds.add(threadId);
+        }
       }
-      for (const thread of forSubscriber.snapshot.threads) {
+      for (const thread of narrowedSnapshot.threads) {
         knownThreadProjects.set(thread.id, thread.projectId);
         accessibleThreadIds.add(thread.id);
       }
-      const enriched = yield* enrichProjectShells(forSubscriber.snapshot.projects);
+      const enriched = yield* enrichProjectShells(narrowedSnapshot.projects);
       return {
         snapshot: {
-          ...forSubscriber.snapshot,
+          ...narrowedSnapshot,
           projects: enriched.projects,
         } as OrchestrationV2ShellSnapshot,
         resolvedRepositoryIdentityRoots: enriched.resolvedRepositoryIdentityRoots,
@@ -1300,6 +1321,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       events: ReadonlyArray<ShellApplicationEvent>,
     ) {
       const allowedProjectIds = yield* resolveAllowedProjectIds;
+      const allowedThreadIds = yield* resolveAllowedThreadIds;
       const coalesced = coalesceShellApplicationEvents(events);
       const threadIds = coalesced.flatMap((stored) =>
         "aggregateKind" in stored ? [] : [stored.event.threadId],
@@ -1327,6 +1349,10 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
               return yield* projectItem(stored, allowedProjectIds);
             }
             const threadId = stored.event.threadId;
+            if (allowedThreadIds !== undefined && !allowedThreadIds.has(threadId)) {
+              accessibleThreadIds.delete(threadId);
+              return null;
+            }
             const shell =
               batchedShells === null
                 ? yield* threadManagement.getThreadShell(threadId)
@@ -1575,11 +1601,12 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
 
     const baseStream: Stream.Stream<OrchestrationV2ShellStreamItem, unknown> = stream;
     const filteredStream: Stream.Stream<OrchestrationV2ShellStreamItem, unknown> =
-      input.refreshAllowedProjectIds !== undefined
+      input.refreshAllowedProjectIds !== undefined || input.refreshAllowedThreadIds !== undefined
         ? baseStream.pipe(
             Stream.mapEffect((item) =>
               Effect.gen(function* () {
                 const currentAllowed = yield* resolveAllowedProjectIds;
+                const currentAllowedThreads = yield* resolveAllowedThreadIds;
                 if (item.kind === "thread.removed" && currentAllowed !== undefined) {
                   const knownProjectId = knownThreadProjects.get(item.threadId);
                   if (knownProjectId !== undefined && !currentAllowed.has(knownProjectId)) {
@@ -1587,12 +1614,22 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
                     return null;
                   }
                 }
-                return filterShellStreamItem(item, currentAllowed, accessibleThreadIds);
+                return filterShellStreamItem(
+                  item,
+                  currentAllowed,
+                  accessibleThreadIds,
+                  currentAllowedThreads,
+                );
               }),
             ),
             Stream.flatMap((item) => Stream.fromIterable(item === null ? [] : [item])),
           )
-        : filterShellStream(baseStream, staticAllowedProjectIds, accessibleThreadIds);
+        : filterShellStream(
+            baseStream,
+            staticAllowedProjectIds,
+            accessibleThreadIds,
+            staticAllowedThreadIds,
+          );
 
     return filteredStream.pipe(
       dedupeShellEnrichment,
@@ -2932,17 +2969,46 @@ export const layerWsRpc = (
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeShell]: (input) =>
           Stream.unwrap(
-            subscribeOrchestrationV2Shell({
-              ...input,
-              ...(accessGate !== undefined
-                ? {
-                    refreshAllowedProjectIds: accessGate
-                      .refreshForStream()
-                      .pipe(Effect.map(ProjectAccess.accessibleProjectIdsForActor)),
-                  }
-                : staticAllowedProjectIds === undefined
-                  ? {}
-                  : { allowedProjectIds: staticAllowedProjectIds }),
+            Effect.gen(function* () {
+              const resolverOption = yield* Effect.serviceOption(ResourceResolver.ResourceResolver);
+              const resolveExternalThreadsForActor = (
+                actor: ProjectAccess.AccessActor | undefined,
+              ): Effect.Effect<ReadonlySet<string> | undefined> => {
+                if (
+                  actor === undefined ||
+                  actor.isOwner ||
+                  actor.principalKind !== "external" ||
+                  actor.principalId === undefined ||
+                  Option.isNone(resolverOption)
+                ) {
+                  return Effect.undefined;
+                }
+                return resolverOption.value.resolveExternalPrincipalThreadIds(actor.principalId);
+              };
+              const staticAllowedThreadIds =
+                accessGate === undefined
+                  ? yield* resolveExternalThreadsForActor(currentActor)
+                  : undefined;
+              return yield* subscribeOrchestrationV2Shell({
+                ...input,
+                ...(accessGate !== undefined
+                  ? {
+                      refreshAllowedProjectIds: accessGate
+                        .refreshForStream()
+                        .pipe(Effect.map(ProjectAccess.accessibleProjectIdsForActor)),
+                      refreshAllowedThreadIds: accessGate
+                        .refreshForStream()
+                        .pipe(Effect.flatMap(resolveExternalThreadsForActor)),
+                    }
+                  : {
+                      ...(staticAllowedProjectIds === undefined
+                        ? {}
+                        : { allowedProjectIds: staticAllowedProjectIds }),
+                      ...(staticAllowedThreadIds === undefined
+                        ? {}
+                        : { allowedThreadIds: staticAllowedThreadIds }),
+                    }),
+              });
             }),
           ),
         [ORCHESTRATION_V2_WS_METHODS.subscribeThread]: (input) =>

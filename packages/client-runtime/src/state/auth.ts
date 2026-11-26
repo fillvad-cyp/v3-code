@@ -3,6 +3,8 @@ import {
   type ApiTokenId,
   AuthAccessReadScope,
   AuthAccessWriteScope,
+  AuthOrchestrationOperateScope,
+  AuthOrchestrationReadScope,
   AuthProvidersManageScope,
   type AuthAccessSnapshot,
   type AuthApproveConnectDeviceInput,
@@ -13,6 +15,15 @@ import {
   type AuthCreatePairingCredentialInput,
   type AuthRevokeClientSessionInput,
   type AuthRevokePairingLinkInput,
+  type CrmClientCreateInput,
+  type CrmClientId,
+  type CrmClientUpdateInput,
+  type CrmContactCreateInput,
+  type CrmContactId,
+  type CrmContactUpdateInput,
+  type CrmNoteCreateInput,
+  type CrmNoteId,
+  type CrmNoteUpdateInput,
   type EnvironmentId,
   type InvitationCreateInput,
   type ListAuditEventsInput,
@@ -22,6 +33,7 @@ import {
   type PrincipalId,
   type ProjectId,
   type RecoveryIssueInput,
+  type ThreadId,
   sessionGrantsScope,
   WS_METHODS,
 } from "@t3tools/contracts";
@@ -168,6 +180,16 @@ export function createAuthEnvironmentAtoms<R, E>(
     runtime,
     [AuthProvidersManageScope],
     "environment-data:server:auth-providers-manage-permission",
+  );
+  const orchestrationReadPermissionAtom = createAuthScopePermissionAtom(
+    runtime,
+    [AuthOrchestrationReadScope],
+    "environment-data:server:auth-orchestration-read-permission",
+  );
+  const orchestrationOperatePermissionAtom = createAuthScopePermissionAtom(
+    runtime,
+    [AuthOrchestrationOperateScope],
+    "environment-data:server:auth-orchestration-operate-permission",
   );
 
   return {
@@ -515,6 +537,381 @@ export function createAuthEnvironmentAtoms<R, E>(
           }),
       }),
       { permissionAtom: providersManagePermissionAtom },
+    ),
+    listCrmClients: Object.assign(
+      createEnvironmentQueryAtomFamily(runtime, {
+        label: "environment-data:server:crm-list-clients",
+        staleTimeMs: 10_000,
+        execute: (input: { readonly projectId: ProjectId }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "GET",
+            url: (urls) => urls.listClients({ params: { id: input.projectId } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.listClients({ headers, params: { id: input.projectId } }),
+          }),
+      }),
+      { permissionAtom: orchestrationReadPermissionAtom },
+    ),
+    getCrmClient: Object.assign(
+      createEnvironmentQueryAtomFamily(runtime, {
+        label: "environment-data:server:crm-get-client",
+        staleTimeMs: 5_000,
+        execute: (input: { readonly projectId: ProjectId; readonly clientId: CrmClientId }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "GET",
+            url: (urls) =>
+              urls.getClient({ params: { id: input.projectId, clientId: input.clientId } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.getClient({
+                headers,
+                params: { id: input.projectId, clientId: input.clientId },
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationReadPermissionAtom },
+    ),
+    createCrmClient: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:crm-create-client",
+        execute: (input: { readonly projectId: ProjectId; readonly data: CrmClientCreateInput }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "POST",
+            url: (urls) => urls.createClient({ params: { id: input.projectId } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.createClient({
+                headers,
+                params: { id: input.projectId },
+                payload: input.data,
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationOperatePermissionAtom },
+    ),
+    updateCrmClient: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:crm-update-client",
+        execute: (input: {
+          readonly projectId: ProjectId;
+          readonly clientId: CrmClientId;
+          readonly data: CrmClientUpdateInput;
+        }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "PATCH",
+            url: (urls) =>
+              urls.updateClient({ params: { id: input.projectId, clientId: input.clientId } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.updateClient({
+                headers,
+                params: { id: input.projectId, clientId: input.clientId },
+                payload: input.data,
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationOperatePermissionAtom },
+    ),
+    deleteCrmClient: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:crm-delete-client",
+        execute: (input: {
+          readonly projectId: ProjectId;
+          readonly clientId: CrmClientId;
+          readonly purge?: boolean;
+        }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "DELETE",
+            url: (urls) =>
+              urls.deleteClient({
+                params: { id: input.projectId, clientId: input.clientId },
+                query: input.purge ? { purge: "true" } : {},
+              }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.deleteClient({
+                headers,
+                params: { id: input.projectId, clientId: input.clientId },
+                query: input.purge ? { purge: "true" } : {},
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationOperatePermissionAtom },
+    ),
+    createCrmContact: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:crm-create-contact",
+        execute: (input: {
+          readonly projectId: ProjectId;
+          readonly clientId: CrmClientId;
+          readonly data: CrmContactCreateInput;
+        }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "POST",
+            url: (urls) =>
+              urls.createContact({ params: { id: input.projectId, clientId: input.clientId } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.createContact({
+                headers,
+                params: { id: input.projectId, clientId: input.clientId },
+                payload: input.data,
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationOperatePermissionAtom },
+    ),
+    updateCrmContact: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:crm-update-contact",
+        execute: (input: {
+          readonly projectId: ProjectId;
+          readonly clientId: CrmClientId;
+          readonly contactId: CrmContactId;
+          readonly data: CrmContactUpdateInput;
+        }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "PATCH",
+            url: (urls) =>
+              urls.updateContact({
+                params: {
+                  id: input.projectId,
+                  clientId: input.clientId,
+                  contactId: input.contactId,
+                },
+              }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.updateContact({
+                headers,
+                params: {
+                  id: input.projectId,
+                  clientId: input.clientId,
+                  contactId: input.contactId,
+                },
+                payload: input.data,
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationOperatePermissionAtom },
+    ),
+    deleteCrmContact: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:crm-delete-contact",
+        execute: (input: {
+          readonly projectId: ProjectId;
+          readonly clientId: CrmClientId;
+          readonly contactId: CrmContactId;
+        }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "DELETE",
+            url: (urls) =>
+              urls.deleteContact({
+                params: {
+                  id: input.projectId,
+                  clientId: input.clientId,
+                  contactId: input.contactId,
+                },
+              }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.deleteContact({
+                headers,
+                params: {
+                  id: input.projectId,
+                  clientId: input.clientId,
+                  contactId: input.contactId,
+                },
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationOperatePermissionAtom },
+    ),
+    createCrmNote: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:crm-create-note",
+        execute: (input: {
+          readonly projectId: ProjectId;
+          readonly clientId: CrmClientId;
+          readonly data: CrmNoteCreateInput;
+        }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "POST",
+            url: (urls) =>
+              urls.createNote({ params: { id: input.projectId, clientId: input.clientId } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.createNote({
+                headers,
+                params: { id: input.projectId, clientId: input.clientId },
+                payload: input.data,
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationOperatePermissionAtom },
+    ),
+    updateCrmNote: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:crm-update-note",
+        execute: (input: {
+          readonly projectId: ProjectId;
+          readonly clientId: CrmClientId;
+          readonly noteId: CrmNoteId;
+          readonly data: CrmNoteUpdateInput;
+        }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "PATCH",
+            url: (urls) =>
+              urls.updateNote({
+                params: { id: input.projectId, clientId: input.clientId, noteId: input.noteId },
+              }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.updateNote({
+                headers,
+                params: { id: input.projectId, clientId: input.clientId, noteId: input.noteId },
+                payload: input.data,
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationOperatePermissionAtom },
+    ),
+    deleteCrmNote: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:crm-delete-note",
+        execute: (input: {
+          readonly projectId: ProjectId;
+          readonly clientId: CrmClientId;
+          readonly noteId: CrmNoteId;
+        }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "DELETE",
+            url: (urls) =>
+              urls.deleteNote({
+                params: { id: input.projectId, clientId: input.clientId, noteId: input.noteId },
+              }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.deleteNote({
+                headers,
+                params: { id: input.projectId, clientId: input.clientId, noteId: input.noteId },
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationOperatePermissionAtom },
+    ),
+    linkCrmClientThread: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:crm-link-thread",
+        execute: (input: {
+          readonly projectId: ProjectId;
+          readonly clientId: CrmClientId;
+          readonly threadId: ThreadId;
+        }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "POST",
+            url: (urls) =>
+              urls.linkClientThread({
+                params: { id: input.projectId, clientId: input.clientId },
+              }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.linkClientThread({
+                headers,
+                params: { id: input.projectId, clientId: input.clientId },
+                payload: { threadId: input.threadId },
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationOperatePermissionAtom },
+    ),
+    unlinkCrmClientThread: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:crm-unlink-thread",
+        execute: (input: {
+          readonly projectId: ProjectId;
+          readonly clientId: CrmClientId;
+          readonly threadId: ThreadId;
+        }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "DELETE",
+            url: (urls) =>
+              urls.unlinkClientThread({
+                params: {
+                  id: input.projectId,
+                  clientId: input.clientId,
+                  threadId: input.threadId,
+                },
+              }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.unlinkClientThread({
+                headers,
+                params: {
+                  id: input.projectId,
+                  clientId: input.clientId,
+                  threadId: input.threadId,
+                },
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationOperatePermissionAtom },
+    ),
+    inviteCrmClient: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:crm-invite-client",
+        execute: (input: { readonly projectId: ProjectId; readonly clientId: CrmClientId }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "POST",
+            url: (urls) =>
+              urls.inviteClient({ params: { id: input.projectId, clientId: input.clientId } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.inviteClient({
+                headers,
+                params: { id: input.projectId, clientId: input.clientId },
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationOperatePermissionAtom },
+    ),
+    exportCrm: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:crm-export",
+        execute: (input: { readonly projectId: ProjectId; readonly clientId?: CrmClientId }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "crm",
+            method: "GET",
+            url: (urls) =>
+              urls.exportCrm({
+                params: { id: input.projectId },
+                query: input.clientId === undefined ? {} : { clientId: input.clientId },
+              }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.exportCrm({
+                headers,
+                params: { id: input.projectId },
+                query: input.clientId === undefined ? {} : { clientId: input.clientId },
+              }),
+          }),
+      }),
+      { permissionAtom: orchestrationReadPermissionAtom },
     ),
     accessChanges: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:auth-access-changes",

@@ -92,6 +92,8 @@ const roleCapabilities: Record<ProjectRole, ReadonlyArray<ProjectCapability>> = 
     "project:members",
     "project:secrets",
     "project:webhooks",
+    "project:crm.write",
+    "project:crm.invite_client",
     "project:create",
   ],
   owner: [
@@ -107,6 +109,8 @@ const roleCapabilities: Record<ProjectRole, ReadonlyArray<ProjectCapability>> = 
     "project:members",
     "project:secrets",
     "project:webhooks",
+    "project:crm.write",
+    "project:crm.invite_client",
     "project:create",
     "project:delete",
   ],

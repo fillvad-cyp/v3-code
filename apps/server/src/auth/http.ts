@@ -6,6 +6,7 @@ import {
   AuthAccessWriteScope,
   AuthAdministrativeClientScopes,
   AuthEnvironmentScope,
+  AuthOrchestrationOperateScope,
   AuthStandardClientScopes,
   AuthGrantScope,
   type AuthInvitationSessionResult,
@@ -839,7 +840,11 @@ export const layer = HttpApiBuilder.group(
         Effect.fn("environment.auth.createInvitation")(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
-            const session = yield* requireEnvironmentScope(AuthAccessWriteScope);
+            const isClientInvite =
+              args.payload.kind === "client" || args.payload.kind === "external";
+            const session = yield* requireEnvironmentScope(
+              isClientInvite ? AuthOrchestrationOperateScope : AuthAccessWriteScope,
+            );
             const request = yield* HttpServerRequest.HttpServerRequest;
             const clientMetadata = deriveAuthClientMetadata({ request });
             const actor = yield* resolveSessionActor(session);
@@ -849,6 +854,9 @@ export const layer = HttpApiBuilder.group(
               ...(args.payload.kind === undefined ? {} : { kind: args.payload.kind }),
               role: args.payload.role,
               projectId: args.payload.projectId,
+              ...(args.payload.crmClientId === undefined
+                ? {}
+                : { crmClientId: args.payload.crmClientId }),
               createdBy,
               actor,
               audit: {

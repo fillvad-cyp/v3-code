@@ -6,6 +6,7 @@ export * from "./background.ts";
 export * from "./acpRegistry.ts";
 export * from "./auth.ts";
 export * from "./membership.ts";
+export * from "./crm.ts";
 export * from "./audit.ts";
 export * from "./roleScopes.ts";
 export * from "./environment.ts";

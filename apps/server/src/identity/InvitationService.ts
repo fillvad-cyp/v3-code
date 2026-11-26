@@ -2,7 +2,9 @@ import {
   AuthAdministrativeClientScopes,
   AuthEnvironmentScope,
   AuthSessionId,
+  type CrmClientId,
   InvitationId,
+  type InvitationKind,
   PrincipalId,
   type Invitation,
   type Principal,
@@ -162,9 +164,10 @@ export interface InvitationAuditContext {
 }
 
 export interface IssueInvitationInput {
-  readonly kind?: "staff";
+  readonly kind?: InvitationKind | "external";
   readonly role: ProjectRole;
   readonly projectId: ProjectId | null;
+  readonly crmClientId?: CrmClientId | null;
   readonly ceiling?: ReadonlyArray<AuthEnvironmentScope>;
   readonly createdBy: PrincipalId;
   /** Resolved session actor when called from HTTP, preserving any session binding limits. */
@@ -315,8 +318,16 @@ const make = Effect.gen(function* () {
       return yield* new InvitationForbiddenError({ reason: "owner_role_not_invitable" });
     }
 
+    const kind: InvitationKind =
+      input.kind === "client" || input.kind === "external" ? "client" : "staff";
+    const effectiveRole: ProjectRole = kind === "client" ? "viewer" : input.role;
+    if (kind === "client" && input.projectId === null) {
+      return yield* new InvitationForbiddenError({ reason: "environment_invite_requires_owner" });
+    }
+
     const actor = yield* resolveActor(input.createdBy, input.actor, "issue");
-    const requestedCeiling = input.ceiling ?? ceilingScopes("staff");
+    const requestedCeiling =
+      input.ceiling ?? (kind === "client" ? ceilingScopes("client") : ceilingScopes("staff"));
     let effectiveCeiling: ReadonlyArray<AuthEnvironmentScope> = requestedCeiling;
 
     if (!actor.isOwner) {
@@ -324,28 +335,29 @@ const make = Effect.gen(function* () {
         return yield* new InvitationForbiddenError({ reason: "environment_invite_requires_owner" });
       }
       const actorRole = actorRoleOnProject(actor, input.projectId);
+      const requiredCap = kind === "client" ? "project:crm.invite_client" : "project:members";
       if (
         actorRole === undefined ||
-        !projectAccess.can(actor, input.projectId, "project:members") ||
-        !roleHasCapability(actorRole, "project:members")
+        !projectAccess.can(actor, input.projectId, requiredCap) ||
+        !roleHasCapability(actorRole, requiredCap)
       ) {
         return yield* new InvitationForbiddenError({ reason: "not_authorized" });
       }
-      if (!roleAtLeast(actorRole, input.role)) {
+      if (!roleAtLeast(actorRole, effectiveRole)) {
         return yield* new InvitationForbiddenError({ reason: "role_exceeds_issuer" });
       }
       const issuerCeiling = actor.ceiling ?? projectAccess.effectiveScopes(actor);
-      if (!roleFitsCeiling(issuerCeiling, input.role)) {
+      if (!roleFitsCeiling(issuerCeiling, effectiveRole)) {
         return yield* new InvitationForbiddenError({ reason: "ceiling_exceeds_issuer" });
       }
       if (
         input.actor !== undefined &&
-        !scopesFitCeiling(projectAccess.effectiveScopes(actor), roleScopes(input.role))
+        !scopesFitCeiling(projectAccess.effectiveScopes(actor), roleScopes(effectiveRole))
       ) {
         return yield* new InvitationForbiddenError({ reason: "ceiling_exceeds_issuer" });
       }
       effectiveCeiling = intersectScopes(requestedCeiling, issuerCeiling);
-      if (!roleFitsCeiling(effectiveCeiling, input.role)) {
+      if (!roleFitsCeiling(effectiveCeiling, effectiveRole)) {
         return yield* new InvitationForbiddenError({ reason: "ceiling_exceeds_issuer" });
       }
     }
@@ -373,7 +385,7 @@ const make = Effect.gen(function* () {
     const expiresAt = DateTime.formatIso(
       DateTime.addDuration(now, input.ttl ?? DEFAULT_INVITATION_TTL),
     );
-    const kind = input.kind ?? "staff";
+    const crmClientId = kind === "client" ? (input.crmClientId ?? null) : null;
 
     yield* invitations
       .create({
@@ -381,8 +393,9 @@ const make = Effect.gen(function* () {
         tokenHash,
         email: null,
         kind,
-        role: input.role,
+        role: effectiveRole,
         projectId: input.projectId,
+        crmClientId,
         ceiling: [...effectiveCeiling],
         createdBy: input.createdBy,
         createdAt,
@@ -404,8 +417,9 @@ const make = Effect.gen(function* () {
         outcome: "allow",
         metadata: {
           kind,
-          role: input.role,
+          role: effectiveRole,
           projectId: input.projectId,
+          ...(crmClientId === null ? {} : { crmClientId }),
         },
       })
       .pipe(Effect.mapError((cause) => new InvitationInternalError({ operation: "issue", cause })));
@@ -414,9 +428,10 @@ const make = Effect.gen(function* () {
       id,
       email: null,
       kind,
-      role: input.role,
+      role: effectiveRole,
       projectId: input.projectId,
       principalId: null,
+      crmClientId,
       ceiling: [...effectiveCeiling],
       createdBy: input.createdBy,
       createdAt,
@@ -713,6 +728,21 @@ const make = Effect.gen(function* () {
                   (cause) => new InvitationInternalError({ operation: "consume", cause }),
                 ),
               );
+            const crmClientId = invitation.crmClientId ?? null;
+            if (invitation.kind === "client" && crmClientId !== null) {
+              const nowMs = DateTime.toEpochMillis(now);
+              yield* sql`
+                UPDATE crm_clients
+                SET principal_id = ${principalId}, updated_at = ${nowMs}
+                WHERE id = ${crmClientId}
+                  AND project_id = ${invitation.projectId}
+                  AND redacted_at IS NULL
+              `.pipe(
+                Effect.mapError(
+                  (cause) => new InvitationInternalError({ operation: "consume", cause }),
+                ),
+              );
+            }
           }
 
           const principalMemberships = yield* memberships

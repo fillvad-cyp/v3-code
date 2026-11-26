@@ -106,6 +106,7 @@ describe("applyServerConfigProjection settingsUpdated", () => {
     expect(enabledEnv.capabilities.members).toBe(true);
     expect(enabledEnv.capabilities.audit).toBe(true);
     expect(enabledEnv.capabilities.projectSecrets).toBe(true);
+    expect(enabledEnv.capabilities.crm).toBe(true);
 
     const disabled = applyServerConfigProjection(enabled, {
       version: 1,
@@ -117,6 +118,7 @@ describe("applyServerConfigProjection settingsUpdated", () => {
     expect(disabledEnv.capabilities.members).toBeUndefined();
     expect(disabledEnv.capabilities.audit).toBeUndefined();
     expect(disabledEnv.capabilities.projectSecrets).toBeUndefined();
+    expect(disabledEnv.capabilities.crm).toBeUndefined();
   });
 });
 

@@ -176,6 +176,7 @@ export function applyServerConfigProjection(
           members: _prevMembers,
           audit: _prevAudit,
           projectSecrets: _prevProjectSecrets,
+          crm: _prevCrm,
           ...capRest
         } = prevCapabilities;
         return {
@@ -187,7 +188,9 @@ export function applyServerConfigProjection(
               ...(settings.multiUser ? { authMode: "multi-user" as const } : {}),
               capabilities: {
                 ...capRest,
-                ...(settings.multiUser ? { members: true, audit: true, projectSecrets: true } : {}),
+                ...(settings.multiUser
+                  ? { members: true, audit: true, projectSecrets: true, crm: true }
+                  : {}),
               },
             },
           },

@@ -25,8 +25,8 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as AuditEvents from "../persistence/AuditEvents.ts";
 import * as ProjectSecretRepo from "../persistence/ProjectSecrets.ts";
 
-const PROJECT_SECRETS_KEY_NAME = "project-secrets-key";
-const AES_KEY_BYTES = 32;
+export const PROJECT_SECRETS_KEY_NAME = "project-secrets-key";
+export const AES_KEY_BYTES = 32;
 const AES_IV_BYTES = 12;
 const AES_AUTH_TAG_BYTES = 16;
 const CIPHERTEXT_VERSION = 1;
@@ -127,7 +127,7 @@ function buildAad(projectId: ProjectId, name: string): Buffer {
   return Buffer.from(`${projectId}\u0000${name}`, "utf8");
 }
 
-function encryptSecretValue(
+export function encryptProjectAesValue(
   key: Uint8Array,
   projectId: ProjectId,
   name: string,
@@ -143,7 +143,7 @@ function encryptSecretValue(
   );
 }
 
-function decryptSecretValue(
+export function decryptProjectAesValue(
   key: Uint8Array,
   projectId: ProjectId,
   name: string,
@@ -356,7 +356,7 @@ const make = Effect.gen(function* () {
     yield* assertActiveProject(projectId);
     const key = yield* loadKey();
     const fingerprint = TrimmedNonEmptyString.make(fingerprintSecretValue(value));
-    const ciphertext = encryptSecretValue(key, projectId, name, value);
+    const ciphertext = encryptProjectAesValue(key, projectId, name, value);
     const updatedAt = DateTime.formatIso(yield* DateTime.now);
 
     yield* repo
@@ -459,7 +459,7 @@ const make = Effect.gen(function* () {
         return yield* new ProjectSecretNotFoundError({ resource: "secret", projectId });
       }
       const key = yield* loadKey();
-      const plaintext = yield* decryptSecretValue(
+      const plaintext = yield* decryptProjectAesValue(
         key,
         projectId,
         name,

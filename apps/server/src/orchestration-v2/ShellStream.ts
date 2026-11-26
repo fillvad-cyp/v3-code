@@ -943,12 +943,22 @@ export function shouldPublishShellApplicationEventForProjects(
 export function filterShellSnapshot(
   snapshot: OrchestrationV2ShellSnapshot,
   allowedProjectIds: ReadonlySet<string> | undefined,
+  allowedThreadIds?: ReadonlySet<string> | undefined,
 ): OrchestrationV2ShellSnapshot {
-  if (allowedProjectIds === undefined) return snapshot;
-  const projects = snapshot.projects.filter((project) => allowedProjectIds.has(project.id));
-  const threads = snapshot.threads.filter((thread) => allowedProjectIds.has(thread.projectId));
-  const archivedThreads = snapshot.archivedThreads.filter((thread) =>
-    allowedProjectIds.has(thread.projectId),
+  if (allowedProjectIds === undefined && allowedThreadIds === undefined) return snapshot;
+  const projects =
+    allowedProjectIds === undefined
+      ? snapshot.projects
+      : snapshot.projects.filter((project) => allowedProjectIds.has(project.id));
+  const threads = snapshot.threads.filter(
+    (thread) =>
+      (allowedProjectIds === undefined || allowedProjectIds.has(thread.projectId)) &&
+      (allowedThreadIds === undefined || allowedThreadIds.has(thread.id)),
+  );
+  const archivedThreads = snapshot.archivedThreads.filter(
+    (thread) =>
+      (allowedProjectIds === undefined || allowedProjectIds.has(thread.projectId)) &&
+      (allowedThreadIds === undefined || allowedThreadIds.has(thread.id)),
   );
   if (snapshot.olderSettled === undefined) {
     return { ...snapshot, projects, threads, archivedThreads };
@@ -960,9 +970,14 @@ export function filterShellSnapshot(
     archivedThreads,
     olderSettled: {
       ...snapshot.olderSettled,
-      counts: snapshot.olderSettled.counts.filter((entry) =>
-        allowedProjectIds.has(entry.projectId),
-      ),
+      counts:
+        allowedThreadIds !== undefined
+          ? []
+          : allowedProjectIds === undefined
+            ? snapshot.olderSettled.counts
+            : snapshot.olderSettled.counts.filter((entry) =>
+                allowedProjectIds.has(entry.projectId),
+              ),
     },
   };
 }
@@ -971,14 +986,15 @@ export function filterShellStreamItem(
   item: OrchestrationV2ShellStreamItem,
   allowedProjectIds: ReadonlySet<string> | undefined,
   accessibleThreadIds?: ReadonlySet<string>,
+  allowedThreadIds?: ReadonlySet<string> | undefined,
 ): OrchestrationV2ShellStreamItem | null {
-  if (allowedProjectIds === undefined) return item;
+  if (allowedProjectIds === undefined && allowedThreadIds === undefined) return item;
   switch (item.kind) {
     case "synchronized":
     case "snapshot-required":
       return item;
     case "snapshot": {
-      const snapshot = filterShellSnapshot(item.snapshot, allowedProjectIds);
+      const snapshot = filterShellSnapshot(item.snapshot, allowedProjectIds, allowedThreadIds);
       if (item.resolvedRepositoryIdentityRoots === undefined) {
         return { ...item, snapshot };
       }
@@ -996,12 +1012,20 @@ export function filterShellStreamItem(
       return { ...item, snapshot, resolvedRepositoryIdentityRoots };
     }
     case "project.updated":
-      return allowedProjectIds.has(item.project.id) ? item : null;
+      return allowedProjectIds === undefined || allowedProjectIds.has(item.project.id)
+        ? item
+        : null;
     case "project.removed":
-      return allowedProjectIds.has(item.projectId) ? item : null;
+      return allowedProjectIds === undefined || allowedProjectIds.has(item.projectId) ? item : null;
     case "thread.updated":
-      return allowedProjectIds.has(item.thread.projectId) ? item : null;
+      return (allowedProjectIds === undefined || allowedProjectIds.has(item.thread.projectId)) &&
+        (allowedThreadIds === undefined || allowedThreadIds.has(item.thread.id))
+        ? item
+        : null;
     case "thread.removed":
+      if (allowedThreadIds !== undefined && !allowedThreadIds.has(item.threadId)) {
+        return accessibleThreadIds?.has(item.threadId) === true ? item : null;
+      }
       return accessibleThreadIds?.has(item.threadId) === true ? item : null;
     default: {
       const _exhaustive: never = item;
@@ -1014,11 +1038,17 @@ export function filterShellStream<E, R>(
   stream: Stream.Stream<OrchestrationV2ShellStreamItem, E, R>,
   allowedProjectIds: ReadonlySet<string> | undefined,
   accessibleThreadIds?: ReadonlySet<string>,
+  allowedThreadIds?: ReadonlySet<string> | undefined,
 ): Stream.Stream<OrchestrationV2ShellStreamItem, E, R> {
-  if (allowedProjectIds === undefined) return stream;
+  if (allowedProjectIds === undefined && allowedThreadIds === undefined) return stream;
   return stream.pipe(
     Stream.flatMap((item) => {
-      const filtered = filterShellStreamItem(item, allowedProjectIds, accessibleThreadIds);
+      const filtered = filterShellStreamItem(
+        item,
+        allowedProjectIds,
+        accessibleThreadIds,
+        allowedThreadIds,
+      );
       return Stream.fromIterable(filtered === null ? [] : [filtered]);
     }),
   );

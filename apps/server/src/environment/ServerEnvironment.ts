@@ -329,7 +329,7 @@ export const make = Effect.gen(function* () {
       capabilities: {
         ...descriptor.capabilities,
         agentActivityPublishing: false,
-        ...(multiUser ? { members: true, audit: true, projectSecrets: true } : {}),
+        ...(multiUser ? { members: true, audit: true, projectSecrets: true, crm: true } : {}),
       },
     })),
   });

@@ -393,6 +393,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
           expect(disabled.capabilities.members).toBeUndefined();
           expect(disabled.capabilities.audit).toBeUndefined();
           expect(disabled.capabilities.projectSecrets).toBeUndefined();
+          expect(disabled.capabilities.crm).toBeUndefined();
 
           yield* settings.updateSettings({ multiUser: true });
           const enabled = yield* serverEnvironment.getDescriptor;
@@ -400,6 +401,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
           expect(enabled.capabilities.members).toBe(true);
           expect(enabled.capabilities.audit).toBe(true);
           expect(enabled.capabilities.projectSecrets).toBe(true);
+          expect(enabled.capabilities.crm).toBe(true);
 
           yield* settings.updateSettings({ multiUser: false });
           const disabledAgain = yield* serverEnvironment.getDescriptor;
@@ -407,6 +409,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
           expect(disabledAgain.capabilities.members).toBeUndefined();
           expect(disabledAgain.capabilities.audit).toBeUndefined();
           expect(disabledAgain.capabilities.projectSecrets).toBeUndefined();
+          expect(disabledAgain.capabilities.crm).toBeUndefined();
         }).pipe(Effect.provide(layerTest));
       }),
   );

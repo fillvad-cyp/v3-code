@@ -65,17 +65,30 @@ const memberWithRoles: ReadonlyArray<MemberWithMemberships> = [
   },
 ];
 
+const AUTH_DESCRIPTOR = {
+  policy: "remote-reachable" as const,
+  bootstrapMethods: [] as const,
+  sessionMethods: [] as const,
+  sessionCookieName: "t3_session",
+  sessionTtlSeconds: 60,
+};
+
 describe("ProjectSecretsSettings.logic", () => {
   it("checks the projectSecrets capability flag", () => {
     expect(supportsProjectSecretsCapability(undefined)).toBe(false);
-    expect(supportsProjectSecretsCapability({})).toBe(false);
-    expect(supportsProjectSecretsCapability({ projectSecrets: false })).toBe(false);
-    expect(supportsProjectSecretsCapability({ projectSecrets: true })).toBe(true);
+    expect(supportsProjectSecretsCapability({ repositoryIdentity: true })).toBe(false);
+    expect(
+      supportsProjectSecretsCapability({ repositoryIdentity: true, projectSecrets: false }),
+    ).toBe(false);
+    expect(
+      supportsProjectSecretsCapability({ repositoryIdentity: true, projectSecrets: true }),
+    ).toBe(true);
   });
 
   it("derives management permissions for owner, project admin, developer, and project-bound sessions", () => {
     const ownerSession: AuthSessionState = {
       authenticated: true,
+      auth: AUTH_DESCRIPTOR,
       scopes: [AuthProvidersManageScope, AuthEnvironmentMaintainScope, AuthAccessWriteScope],
       principal: {
         id: OWNER_ID,
@@ -101,6 +114,7 @@ describe("ProjectSecretsSettings.logic", () => {
 
     const memberSession: AuthSessionState = {
       authenticated: true,
+      auth: AUTH_DESCRIPTOR,
       scopes: [AuthProvidersManageScope],
       principal: memberWithRoles[0]!.principal,
       binding: { _tag: "principal" },
@@ -137,6 +151,7 @@ describe("ProjectSecretsSettings.logic", () => {
     // Project-bound session follows bound project role.
     const boundSession: AuthSessionState = {
       authenticated: true,
+      auth: AUTH_DESCRIPTOR,
       scopes: [AuthProvidersManageScope],
       principal: memberWithRoles[0]!.principal,
       binding: { _tag: "projects", projects: [{ projectId: PROJECT_B, role: "admin" }] },
