@@ -56,6 +56,7 @@ import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as KeyValueStore from "effect/persistence/KeyValueStore";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as PubSub from "effect/PubSub";
 import * as RpcTest from "effect/rpc/RpcTest";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -129,6 +130,8 @@ import * as AgentSessionScanner from "../project/AgentSessionScanner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import * as ProjectEnrichment from "../project/ProjectEnrichmentService.ts";
+import * as ProjectQuotaService from "../project/ProjectQuotaService.ts";
+import * as PrincipalLimitsService from "../identity/PrincipalLimitsService.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
@@ -939,6 +942,11 @@ describe("Multi-user cross-project narrowing", () => {
             }),
           ),
           Layer.provide(
+            Layer.mock(ProjectQuotaService.ProjectQuotaService)({
+              getWarningsForProjects: () => Effect.succeed(new Map()),
+            }),
+          ),
+          Layer.provide(
             ServerEnvironment.layerIdentity.pipe(
               Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-orch-http-" })),
               Layer.provide(NodeServices.layer),
@@ -1262,6 +1270,14 @@ describe("Multi-user cross-project narrowing", () => {
           Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({}),
           Layer.mock(RepositoryIdentityResolver.RepositoryIdentityResolver)({}),
           Layer.mock(ProjectEnrichment.ProjectEnrichmentService)({}),
+          Layer.mock(PrincipalLimitsService.PrincipalLimitsService)({
+            resolveForPrincipal: () => Effect.succeed(null),
+          }),
+          Layer.mock(ProjectQuotaService.ProjectQuotaService)({
+            getWarningsForProjects: () => Effect.succeed(new Map()),
+            assertCanCreateWorktree: () => Effect.void,
+            subscribeChanges: PubSub.unbounded<ProjectId>().pipe(Effect.flatMap(PubSub.subscribe)),
+          }),
           Layer.mock(AgentSessionScanner.AgentSessionScanner)({}),
           Layer.mock(AgentSessionImporter.AgentSessionImporter)({}),
           Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({}),

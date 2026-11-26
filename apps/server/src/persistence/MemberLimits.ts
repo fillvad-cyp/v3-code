@@ -17,6 +17,7 @@ const LimitsRow = Schema.Struct({
   principalId: PrincipalId,
   maxSessions: Schema.NullOr(Schema.Number),
   maxTerminals: Schema.NullOr(Schema.Number),
+  maxPreviewTabs: Schema.NullOr(Schema.Number),
   invitesPerHour: Schema.NullOr(Schema.Number),
   maxApiTokens: Schema.NullOr(Schema.Number),
 });
@@ -25,6 +26,7 @@ export const SetMemberLimitsInput = Schema.Struct({
   principalId: PrincipalId,
   maxSessions: Schema.NullOr(Schema.Number),
   maxTerminals: Schema.NullOr(Schema.Number),
+  maxPreviewTabs: Schema.optional(Schema.NullOr(Schema.Number)),
   invitesPerHour: Schema.NullOr(Schema.Number),
   maxApiTokens: Schema.NullOr(Schema.Number),
 });
@@ -57,8 +59,8 @@ const make = Effect.gen(function* () {
 
   const selectRow = sql`
     SELECT principal_id AS "principalId", max_sessions AS "maxSessions",
-      max_terminals AS "maxTerminals", invites_per_hour AS "invitesPerHour",
-      max_api_tokens AS "maxApiTokens"
+      max_terminals AS "maxTerminals", max_preview_tabs AS "maxPreviewTabs",
+      invites_per_hour AS "invitesPerHour", max_api_tokens AS "maxApiTokens"
     FROM member_limits
   `;
 
@@ -78,13 +80,15 @@ const make = Effect.gen(function* () {
     Request: SetMemberLimitsInput,
     execute: (input) =>
       sql`
-        INSERT INTO member_limits (principal_id, max_sessions, max_terminals, invites_per_hour,
-          max_api_tokens)
+        INSERT INTO member_limits (principal_id, max_sessions, max_terminals, max_preview_tabs,
+          invites_per_hour, max_api_tokens)
         VALUES (${input.principalId}, ${input.maxSessions}, ${input.maxTerminals},
-          ${input.invitesPerHour}, ${input.maxApiTokens})
+          ${input.maxPreviewTabs ?? null}, ${input.invitesPerHour}, ${input.maxApiTokens})
         ON CONFLICT (principal_id)
         DO UPDATE SET max_sessions = excluded.max_sessions,
-          max_terminals = excluded.max_terminals, invites_per_hour = excluded.invites_per_hour,
+          max_terminals = excluded.max_terminals,
+          max_preview_tabs = excluded.max_preview_tabs,
+          invites_per_hour = excluded.invites_per_hour,
           max_api_tokens = excluded.max_api_tokens
       `,
   });

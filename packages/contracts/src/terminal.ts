@@ -1,5 +1,5 @@
 import * as Schema from "effect/Schema";
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ProviderInstanceId } from "./providerInstance.ts";
 
 export const DEFAULT_TERMINAL_ID = "term-1";
@@ -520,6 +520,25 @@ export class TerminalResizeError extends Schema.TaggedError<TerminalResizeError>
   }
 }
 
+export class TerminalLimitExceededError extends Schema.TaggedError<TerminalLimitExceededError>()(
+  "TerminalLimitExceededError",
+  {
+    status: Schema.Literal(409),
+    limit: NonNegativeInt,
+    openTerminalIds: Schema.Array(Schema.String),
+    openTerminals: Schema.Array(
+      Schema.Struct({
+        threadId: Schema.String,
+        terminalId: Schema.String,
+      }),
+    ),
+  },
+) {
+  override get message() {
+    return `Concurrent terminal limit (${this.limit}) reached. Open terminals: ${this.openTerminalIds.join(", ")}`;
+  }
+}
+
 export const TerminalError = Schema.Union([
   TerminalCwdError,
   TerminalHistoryError,
@@ -529,5 +548,6 @@ export const TerminalError = Schema.Union([
   TerminalNotRunningError,
   TerminalWriteError,
   TerminalResizeError,
+  TerminalLimitExceededError,
 ]);
 export type TerminalError = typeof TerminalError.Type;

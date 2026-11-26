@@ -26,6 +26,7 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
+import * as ProjectQuotaService from "../project/ProjectQuotaService.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -69,22 +70,34 @@ export const layer = HttpApiBuilder.group(
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+    const projectQuotas = yield* ProjectQuotaService.ProjectQuotaService;
     const projectAccess = yield* ProjectAccess.ProjectAccess;
 
     const enrichProjectShells = Effect.fn("http.orchestration.enrichProjectShells")(
       (projects: ReadonlyArray<OrchestrationProjectShell>) =>
-        Effect.forEach(
-          projects,
-          (project) =>
-            // Use available enrichment only; git probes can take a minute and exceed shell-snapshot budgets.
-            projectEnrichment.getAvailable(project.workspaceRoot).pipe(
-              Effect.map((enrichment) => ({
-                ...project,
-                repositoryIdentity: enrichment.repositoryIdentity,
-              })),
-            ),
-          { concurrency: 16 },
-        ),
+        Effect.gen(function* () {
+          const warningsByProject = yield* projectQuotas
+            .getWarningsForProjects(projects.map((project) => project.id))
+            .pipe(Effect.orElseSucceed(() => new Map()));
+          return yield* Effect.forEach(
+            projects,
+            (project) =>
+              // Use available enrichment only; git probes can take a minute and exceed shell-snapshot budgets.
+              projectEnrichment.getAvailable(project.workspaceRoot).pipe(
+                Effect.map((enrichment) => {
+                  const quotaWarnings = warningsByProject.get(project.id);
+                  return {
+                    ...project,
+                    repositoryIdentity: enrichment.repositoryIdentity,
+                    ...(quotaWarnings !== undefined && quotaWarnings.length > 0
+                      ? { quotaWarnings }
+                      : {}),
+                  };
+                }),
+              ),
+            { concurrency: 16 },
+          );
+        }),
     );
 
     const loadShellSnapshot = Effect.fn("http.orchestration.loadShellSnapshot")(

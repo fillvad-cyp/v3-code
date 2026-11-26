@@ -40,6 +40,7 @@ import * as Memberships from "../persistence/Memberships.ts";
 import * as Principals from "../persistence/Principals.ts";
 import * as ProjectAccess from "../access/ProjectAccess.ts";
 import { ProjectEnrichmentService } from "../project/ProjectEnrichmentService.ts";
+import * as ProjectQuotaService from "../project/ProjectQuotaService.ts";
 import * as OrchestrationHttp from "./http.ts";
 import { OrchestratorProjectionError } from "./Orchestrator.ts";
 import { EventSinkV2 } from "./EventSink.ts";
@@ -192,6 +193,11 @@ const serveOrchestrationHttp = (
         ),
       ),
       Layer.provide(Layer.mock(ProjectEnrichmentService)({})),
+      Layer.provide(
+        Layer.mock(ProjectQuotaService.ProjectQuotaService)({
+          getWarningsForProjects: () => Effect.succeed(new Map()),
+        }),
+      ),
       Layer.provide(HttpPlatform.layer),
       Layer.provide(Etag.layerWeak),
       Layer.provide(NodeServices.layer),

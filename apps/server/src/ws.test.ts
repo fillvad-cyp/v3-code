@@ -98,6 +98,8 @@ import * as DirectEndpoints from "./environment/DirectEndpoints.ts";
 import * as EnvironmentAuth from "./auth/EnvironmentAuth.ts";
 import * as ProjectAccess from "./access/ProjectAccess.ts";
 import * as ProjectPaths from "./access/ProjectPaths.ts";
+import * as PrincipalLimitsService from "./identity/PrincipalLimitsService.ts";
+import * as ProjectQuotaService from "./project/ProjectQuotaService.ts";
 import * as ResourceResolver from "./access/ResourceResolver.ts";
 import * as Principals from "./persistence/Principals.ts";
 import * as Memberships from "./persistence/Memberships.ts";
@@ -312,9 +314,13 @@ it.effect("runs editor, remote open target and direct endpoint discovery side by
   }),
 );
 
-const ReplayTestLayer = OrchestrationEventStore.layer.pipe(
-  Layer.provideMerge(SqlitePersistence.layerMemory),
-);
+const ReplayTestLayer = Layer.mergeAll(
+  OrchestrationEventStore.layer,
+  Layer.mock(ProjectQuotaService.ProjectQuotaService)({
+    getWarningsForProjects: () => Effect.succeed(new Map()),
+    subscribeChanges: PubSub.unbounded<ProjectId>().pipe(Effect.flatMap(PubSub.subscribe)),
+  }),
+).pipe(Layer.provideMerge(SqlitePersistence.layerMemory));
 
 const resumeSkipsUnknownTypes = (scope: "thread" | "shell") =>
   Effect.gen(function* () {
@@ -929,6 +935,14 @@ const layerUnusedConfigRpcServices = Layer.mergeAll(
     assertPath: (_actor, targetPath) =>
       Effect.succeed({ realPath: targetPath, projectId: undefined }),
     assertCwd: (_actor, cwd) => Effect.succeed({ realPath: cwd, projectId: undefined }),
+  }),
+  Layer.mock(PrincipalLimitsService.PrincipalLimitsService)({
+    resolveForPrincipal: () => Effect.succeed(null),
+  }),
+  Layer.mock(ProjectQuotaService.ProjectQuotaService)({
+    getWarningsForProjects: () => Effect.succeed(new Map()),
+    assertCanCreateWorktree: () => Effect.void,
+    subscribeChanges: PubSub.unbounded<ProjectId>().pipe(Effect.flatMap(PubSub.subscribe)),
   }),
   FeatureFlags.layerTest(),
 );

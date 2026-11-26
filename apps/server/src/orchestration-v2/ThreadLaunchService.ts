@@ -14,9 +14,11 @@ import {
   type OrchestrationV2LinkOrigin,
   type OrchestrationV2ProviderThreadNativeMetadata,
   type OrchestrationV2ThreadProjection,
+  type PrincipalId,
   type ProviderDriverKind,
   type ProviderInteractionMode,
   ProjectId,
+  ProjectQuotaExceededError,
   type RunId,
   type RuntimeMode,
   type ScheduledTaskId,
@@ -53,6 +55,7 @@ import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import type * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { parseGitCloneProgressLine } from "../project/gitCloneProgress.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as ProjectQuotaService from "../project/ProjectQuotaService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
@@ -121,6 +124,8 @@ export interface ThreadLaunchInput {
   };
   readonly createdBy: OrchestrationV2Actor;
   readonly creationSource: OrchestrationV2CreationSource;
+  /** Non-owner principal for project quota enforcement; omitted for owner and internal launches. */
+  readonly actorPrincipalId?: PrincipalId;
   /** The linked environment this launch is for, if one asked for it. */
   readonly linkOrigin?: OrchestrationV2LinkOrigin;
   /** The parent there, when that environment's agent delegated this as a task. */
@@ -238,7 +243,9 @@ export class ThreadLaunchService extends Context.Service<
       input: ThreadLaunchInput,
     ) => Effect.Effect<
       ThreadLaunchResult,
-      ThreadLaunchError | ThreadManagement.ThreadManagementProviderInstanceDisabledError
+      | ThreadLaunchError
+      | ThreadManagement.ThreadManagementProviderInstanceDisabledError
+      | ProjectQuotaExceededError
     >;
     /** Check a new worktree's base ref and branch name before creation for early errors; launch otherwise accepts and reports these failures inside the thread. */
     readonly checkWorktreeBase: (
@@ -280,6 +287,7 @@ function failureDetail(error: unknown): string {
 
 const make = Effect.gen(function* () {
   const projects = yield* ProjectService.ProjectService;
+  const projectQuotas = yield* ProjectQuotaService.ProjectQuotaService;
   const setupTracker = yield* WorktreeSetupTracker.WorktreeSetupTracker;
   const cloneTracker = yield* ProjectCloneTracker.ProjectCloneTracker;
   const terminals = yield* TerminalManager.TerminalManager;
@@ -1389,6 +1397,21 @@ const make = Effect.gen(function* () {
       }
 
       const launchReceipt = yield* readReceipt(input, input.commandId);
+      if (Option.isNone(launchReceipt) && input.actorPrincipalId !== undefined) {
+        yield* projectQuotas
+          .assertCanLaunchThread({
+            projectId: input.projectId,
+            principalId: input.actorPrincipalId,
+            createsWorktree: input.workspaceStrategy.type === "worktree",
+            reuseExistingThread: input.reuseExistingThread === true,
+          })
+          .pipe(
+            Effect.catchTags({
+              ProjectQuotaInternalError: (cause) =>
+                Effect.fail(mapError(input, "create-thread")(cause)),
+            }),
+          );
+      }
       yield* threads.assertProviderInstanceEnabled({
         projectId: input.projectId,
         commandId: input.commandId,

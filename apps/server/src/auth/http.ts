@@ -86,6 +86,21 @@ const appendDpopChallengeHeader = HttpEffect.appendPreResponseHandler((_request,
   Effect.succeed(HttpServerResponse.setHeader(response, "www-authenticate", "DPoP")),
 );
 
+const failTooManyRequests =
+  /* Request instrumentation already owns the span; keep this helper in that context. */
+  Effect.fnUntraced(function* (message: string, retryAfterSeconds: number) {
+    const normalizedRetryAfter = Math.max(1, Math.ceil(retryAfterSeconds));
+    yield* HttpEffect.appendPreResponseHandler((_request, response) =>
+      Effect.succeed(
+        HttpServerResponse.setHeader(response, "retry-after", String(normalizedRetryAfter)),
+      ),
+    );
+    return yield* new EnvironmentHttpTooManyRequestsError({
+      message,
+      retryAfterSeconds: normalizedRetryAfter,
+    });
+  });
+
 const appendDpopChallengeOnUnauthorized =
   /* Request instrumentation already owns the span; keep this helper in that context. */
   Effect.fnUntraced(function* (error: EnvironmentAuthInvalidError) {
@@ -392,12 +407,7 @@ export const layer = HttpApiBuilder.group(
           ),
           Effect.catchTags({
             SessionLimitExceededError: (error) =>
-              Effect.fail(
-                new EnvironmentHttpTooManyRequestsError({
-                  message: error.message,
-                  retryAfterSeconds: error.retryAfterSeconds,
-                }),
-              ),
+              failTooManyRequests(error.message, error.retryAfterSeconds),
           }),
         );
       yield* appendSessionCookie(request, sessions.cookieName, issued.token, issued.expiresAt);
@@ -1179,12 +1189,7 @@ export const layer = HttpApiBuilder.group(
                 ),
                 Effect.catchTags({
                   SessionLimitExceededError: (error) =>
-                    Effect.fail(
-                      new EnvironmentHttpTooManyRequestsError({
-                        message: error.message,
-                        retryAfterSeconds: error.retryAfterSeconds,
-                      }),
-                    ),
+                    failTooManyRequests(error.message, error.retryAfterSeconds),
                 }),
               );
             yield* appendSessionCookie(
@@ -1362,13 +1367,7 @@ export const layer = HttpApiBuilder.group(
             ApiTokenForbiddenError: (error) =>
               Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
             ApiTokenNotFoundError: () => failEnvironmentNotFound("principal_not_found"),
-            ApiTokenLimitExceededError: (error) =>
-              Effect.fail(
-                new EnvironmentHttpTooManyRequestsError({
-                  message: error.message,
-                  retryAfterSeconds: 60,
-                }),
-              ),
+            ApiTokenLimitExceededError: (error) => failTooManyRequests(error.message, 60),
             ApiTokenInternalError: (error) => failEnvironmentInternal("internal_error", error),
           }),
         ),

@@ -6,7 +6,7 @@ import {
   OrchestrationV2SearchThreadsResult,
 } from "./orchestrationV2.ts";
 import { OrchestrationDispatchCommandError } from "./orchestrationDispatch.ts";
-import { ProjectForbiddenError } from "./membership.ts";
+import { ProjectForbiddenError, ProjectQuotaExceededError } from "./membership.ts";
 import {
   McpAppCallToolInput,
   McpAppCallToolResult,
@@ -1957,7 +1957,12 @@ const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
   // Worktrees use the managed folder; required null path preserves compatibility with older servers.
   payload: Schema.Struct({ ...VcsCreateWorktreeInput.fields, path: Schema.Null }),
   success: VcsCreateWorktreeResult,
-  error: Schema.Union([GitCommandError, EnvironmentAuthorizationError, ProjectForbiddenError]),
+  error: Schema.Union([
+    GitCommandError,
+    EnvironmentAuthorizationError,
+    ProjectForbiddenError,
+    ProjectQuotaExceededError,
+  ]),
 });
 
 const WsVcsRemoveWorktreeRpc = Rpc.make(WS_METHODS.vcsRemoveWorktree, {
@@ -2321,7 +2326,11 @@ const WsOrchestrationV2GetTurnItemRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.get
 const WsOrchestrationV2LaunchThreadRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.launchThread, {
   payload: OrchestrationV2RpcSchemas.launchThread.input,
   success: OrchestrationV2RpcSchemas.launchThread.output,
-  error: Schema.Union([OrchestrationV2ThreadLaunchError, EnvironmentAuthorizationError]),
+  error: Schema.Union([
+    OrchestrationV2ThreadLaunchError,
+    EnvironmentAuthorizationError,
+    ProjectQuotaExceededError,
+  ]),
 });
 
 const WsOrchestrationV2SubscribeShellRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.subscribeShell, {

@@ -7,7 +7,9 @@ import {
   type AuthClientSession,
   type AuthEnvironmentScope,
   AuthWebSocketTicketUse,
-  type PrincipalId,
+  NonNegativeInt,
+  PositiveInt,
+  PrincipalId,
   RuntimeMode,
   type ServerAuthSessionMethod,
   type SessionBinding,
@@ -28,6 +30,7 @@ import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as AuthSessions from "../persistence/AuthSessions.ts";
 import * as SessionPrincipals from "../persistence/SessionPrincipals.ts";
+import * as PrincipalLimitsService from "../identity/PrincipalLimitsService.ts";
 import type {
   ServerAuthInternalError,
   ServerAuthInvalidCredentialError,
@@ -384,6 +387,22 @@ export class ProofKeySessionsError extends Schema.TaggedError<ProofKeySessionsEr
   }
 }
 
+export class SessionLimitExceededError extends Schema.TaggedError<SessionLimitExceededError>()(
+  "SessionLimitExceededError",
+  {
+    status: Schema.Literal(429),
+    principalId: PrincipalId,
+    limit: NonNegativeInt,
+    activeCount: NonNegativeInt,
+    retryAfterSeconds: PositiveInt,
+  },
+) {
+  override get message(): string {
+    return `Active session limit (${this.limit}) reached for principal ${this.principalId}. Revoke an existing session and retry after ${this.retryAfterSeconds}s.`;
+  }
+}
+export const isSessionLimitExceededError = Schema.is(SessionLimitExceededError);
+
 export const SessionCredentialInternalError = Schema.Union([
   SessionClaimsEncodingError,
   SessionCredentialIssueError,
@@ -423,7 +442,7 @@ export class SessionStore extends Context.Service<
       readonly renewalWindow?: Duration.Duration;
       readonly principalId?: PrincipalId;
       readonly binding?: SessionBinding;
-    }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
+    }) => Effect.Effect<IssuedSession, SessionCredentialInternalError | SessionLimitExceededError>;
     /** Trades a renewable token, even an expired one, for a fresh token on the same session. */
     readonly renew: (
       token: string,
@@ -582,6 +601,7 @@ const make = Effect.gen(function* () {
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const authSessions = yield* AuthSessions.AuthSessionRepository;
   const sessionPrincipals = yield* SessionPrincipals.SessionPrincipalRepository;
+  const principalLimits = yield* PrincipalLimitsService.PrincipalLimitsService;
   const signer = yield* PayloadSigner.fromSecret(
     yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32),
   );
@@ -753,6 +773,51 @@ const make = Effect.gen(function* () {
           .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ cause }))),
       );
       const issuedAt = yield* DateTime.now;
+      const subject = input?.subject ?? "browser";
+      const method = input?.method ?? "browser-session-cookie";
+      if (input?.principalId !== undefined) {
+        const limits = yield* principalLimits
+          .resolveForPrincipal(input.principalId)
+          .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })));
+        if (limits !== null) {
+          const active = yield* sessionPrincipals
+            .countActiveForPrincipal({
+              principalId: input.principalId,
+              now: issuedAt,
+              ...(input.replaceSessionId !== undefined
+                ? { excludeSessionId: input.replaceSessionId, excludeMethod: method }
+                : input.replaceActiveForSubjectAndMethod
+                  ? { excludeSubject: subject, excludeMethod: method }
+                  : {}),
+            })
+            .pipe(
+              Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })),
+            );
+          if (active.activeCount >= limits.maxSessions) {
+            const untilExpirySeconds =
+              active.earliestExpiresAt === null
+                ? PrincipalLimitsService.DEFAULT_LIMIT_RETRY_AFTER_SECONDS
+                : Math.ceil(
+                    (active.earliestExpiresAt.epochMilliseconds - issuedAt.epochMilliseconds) /
+                      1_000,
+                  );
+            const retryAfterSeconds = Math.max(
+              1,
+              Math.min(
+                PrincipalLimitsService.DEFAULT_LIMIT_RETRY_AFTER_SECONDS,
+                untilExpirySeconds,
+              ),
+            );
+            return yield* new SessionLimitExceededError({
+              status: 429,
+              principalId: input.principalId,
+              limit: limits.maxSessions,
+              activeCount: active.activeCount,
+              retryAfterSeconds,
+            });
+          }
+        }
+      }
       const expiresAt = DateTime.add(issuedAt, {
         milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
       });
@@ -763,9 +828,9 @@ const make = Effect.gen(function* () {
         v: 1,
         kind: "session",
         sid: sessionId,
-        sub: input?.subject ?? "browser",
+        sub: subject,
         scopes: input?.scopes ?? AuthStandardClientScopes,
-        method: input?.method ?? "browser-session-cookie",
+        method,
         ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
         ...(input?.runtimeModeCeiling ? { rtc: input.runtimeModeCeiling } : {}),
         ...(input?.peerLink === true ? { plk: 1 as const } : {}),
@@ -1443,4 +1508,5 @@ const make = Effect.gen(function* () {
 export const layer = Layer.effect(SessionStore, make).pipe(
   Layer.provideMerge(AuthSessions.layer),
   Layer.provideMerge(SessionPrincipals.layer),
+  Layer.provideMerge(PrincipalLimitsService.layer),
 );

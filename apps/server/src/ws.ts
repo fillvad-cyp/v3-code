@@ -224,6 +224,8 @@ import * as ServerBrowser from "./preview/ServerBrowser.ts";
 import * as DeviceService from "./device/DeviceService.ts";
 import { remoteSshDeviceHosts } from "./device/localSshDeviceHost.ts";
 import * as PreviewManager from "./preview/Manager.ts";
+import * as PrincipalLimitsService from "./identity/PrincipalLimitsService.ts";
+import * as ProjectQuotaService from "./project/ProjectQuotaService.ts";
 import { issueAssetUrl } from "./assets/AssetAccess.ts";
 import {
   attachmentRelativePath,
@@ -849,29 +851,39 @@ function readClientOwners(
 
 const enrichProjectShells = Effect.fn("ws.orchestrationV2.enrichProjectShells")(
   (projects: ReadonlyArray<OrchestrationProjectShell>) =>
-    Effect.flatMap(ProjectEnrichmentService.ProjectEnrichmentService, (projectEnrichment) =>
-      Effect.forEach(
+    Effect.gen(function* () {
+      const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+      const projectQuotas = yield* ProjectQuotaService.ProjectQuotaService;
+      const warningsByProject = yield* projectQuotas
+        .getWarningsForProjects(projects.map((project) => project.id))
+        .pipe(Effect.orElseSucceed(() => new Map()));
+      const enriched = yield* Effect.forEach(
         projects,
         (project) =>
           projectEnrichment.getAvailable(project.workspaceRoot).pipe(
-            Effect.map((enrichment) => ({
-              project: {
-                ...project,
-                repositoryIdentity: enrichment.repositoryIdentity,
-              },
-              repositoryIdentityResolved: enrichment.repositoryIdentityResolved,
-            })),
+            Effect.map((enrichment) => {
+              const quotaWarnings = warningsByProject.get(project.id);
+              return {
+                project: {
+                  ...project,
+                  repositoryIdentity: enrichment.repositoryIdentity,
+                  ...(quotaWarnings !== undefined && quotaWarnings.length > 0
+                    ? { quotaWarnings }
+                    : {}),
+                },
+                repositoryIdentityResolved: enrichment.repositoryIdentityResolved,
+              };
+            }),
           ),
         { concurrency: 16 },
-      ).pipe(
-        Effect.map((enriched) => ({
-          projects: enriched.map((entry) => entry.project),
-          resolvedRepositoryIdentityRoots: enriched
-            .filter((entry) => entry.repositoryIdentityResolved)
-            .map((entry) => entry.project.workspaceRoot),
-        })),
-      ),
-    ),
+      );
+      return {
+        projects: enriched.map((entry) => entry.project),
+        resolvedRepositoryIdentityRoots: enriched
+          .filter((entry) => entry.repositoryIdentityResolved)
+          .map((entry) => entry.project.workspaceRoot),
+      };
+    }),
 );
 
 export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subscribeThread")(
@@ -1139,6 +1151,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     const projects = yield* ProjectStore.ProjectStoreV2;
     const projectService = yield* ProjectService.ProjectService;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+    const projectQuotas = yield* ProjectQuotaService.ProjectQuotaService;
     const staticAllowedProjectIds = input.allowedProjectIds;
     const resolveAllowedProjectIds: Effect.Effect<
       ReadonlySet<string> | undefined,
@@ -1181,6 +1194,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
     };
 
     const enrichmentChanges = yield* projectEnrichment.subscribeChanges;
+    const quotaChanges = yield* projectQuotas.subscribeChanges;
     const loadProjectMetadataSnapshot = Effect.fn("ws.orchestrationV2.loadProjectMetadataSnapshot")(
       function* (snapshotSequence: number) {
         const allowedProjectIds = yield* resolveAllowedProjectIds;
@@ -1263,18 +1277,22 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         };
       }
       const project = yield* projectService.getShell(stored.aggregateId);
-      return Option.match(project, {
-        onNone: () => ({
+      if (Option.isNone(project)) {
+        return {
           kind: "project.removed" as const,
           sequence: stored.sequence,
           projectId: stored.aggregateId,
-        }),
-        onSome: (value) => ({
-          kind: "project.updated" as const,
-          sequence: stored.sequence,
-          project: value,
-        }),
-      });
+        };
+      }
+      const enriched = yield* enrichProjectShells([project.value]).pipe(
+        Effect.provideService(ProjectEnrichmentService.ProjectEnrichmentService, projectEnrichment),
+        Effect.provideService(ProjectQuotaService.ProjectQuotaService, projectQuotas),
+      );
+      return {
+        kind: "project.updated" as const,
+        sequence: stored.sequence,
+        project: enriched.projects[0] ?? project.value,
+      };
     });
 
     const projectShellItems = Effect.fn("ws.orchestrationV2.projectShellItems")(function* (
@@ -1411,6 +1429,46 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
       Stream.flatMap(Stream.fromIterable),
     );
 
+    const quotaRefreshes = Stream.fromSubscription(quotaChanges).pipe(
+      Stream.groupedWithin(64, Duration.millis(25)),
+      Stream.mapEffect((projectIds) =>
+        Effect.gen(function* () {
+          const allowedProjectIds = yield* resolveAllowedProjectIds;
+          const uniqueProjectIds = [...new Set(projectIds)].filter(
+            (projectId) => allowedProjectIds === undefined || allowedProjectIds.has(projectId),
+          );
+          if (uniqueProjectIds.length === 0) {
+            return [] as ReadonlyArray<
+              Extract<OrchestrationV2ShellStreamItem, { readonly kind: "project.updated" }>
+            >;
+          }
+          const snapshotSequence = yield* applicationEvents.latestApplicationSequence;
+          const visibleProjects = yield* projects.listShells({ projectIds: uniqueProjectIds });
+          if (visibleProjects.length === 0) {
+            return [] as ReadonlyArray<
+              Extract<OrchestrationV2ShellStreamItem, { readonly kind: "project.updated" }>
+            >;
+          }
+          const enriched = yield* enrichProjectShells(visibleProjects).pipe(
+            Effect.provideService(
+              ProjectEnrichmentService.ProjectEnrichmentService,
+              projectEnrichment,
+            ),
+            Effect.provideService(ProjectQuotaService.ProjectQuotaService, projectQuotas),
+          );
+          return enriched.projects.map((project) => ({
+            kind: "project.updated" as const,
+            sequence: snapshotSequence,
+            project,
+          })) as ReadonlyArray<
+            Extract<OrchestrationV2ShellStreamItem, { readonly kind: "project.updated" }>
+          >;
+        }),
+      ),
+      Stream.flatMap(Stream.fromIterable),
+    );
+    const allEnrichmentRefreshes = Stream.merge(enrichmentRefreshes, quotaRefreshes);
+
     // Subscribe before loading for racing enrichments; initial refresh covers pre-subscription completions and cold HTTP snapshots.
     const completionMarker =
       input.requestCompletionMarker === true
@@ -1446,7 +1504,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
         return composeShellStreamWithEnrichment({
           initial: initialSnapshotItems(loaded),
           tail: completionThenLive(loaded.snapshot.snapshotSequence),
-          enrichment: enrichmentRefreshes,
+          enrichment: allEnrichmentRefreshes,
         });
       }
 
@@ -1461,7 +1519,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
               return composeShellStreamWithEnrichment({
                 initial: initialSnapshotItems(loaded),
                 tail: completionThenLive(loaded.snapshot.snapshotSequence),
-                enrichment: enrichmentRefreshes,
+                enrichment: allEnrichmentRefreshes,
               });
             });
       const highWater = yield* applicationEvents.latestApplicationSequence;
@@ -1501,7 +1559,7 @@ export const subscribeOrchestrationV2Shell = Effect.fn("ws.orchestrationV2.subsc
           }),
         }),
         tail: Stream.concat(Stream.concat(replay, completionMarker), liveFrom(highWater)),
-        enrichment: enrichmentRefreshes,
+        enrichment: allEnrichmentRefreshes,
       });
     }).pipe(
       Effect.mapError((cause): OrchestrationV2GetShellSnapshotError | RefreshError =>
@@ -1710,6 +1768,20 @@ export const layerWsRpc = (
       const repositoryIdentityResolver =
         yield* RepositoryIdentityResolver.RepositoryIdentityResolver;
       const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+      const projectQuotas = yield* ProjectQuotaService.ProjectQuotaService;
+      const principalLimits = yield* PrincipalLimitsService.PrincipalLimitsService;
+      const resolveNonOwnerPrincipalId = Effect.map(resolveCurrentActor, (actor) =>
+        !actor.isOwner && !passesProjectChecks(actor.binding) ? actor.principalId : undefined,
+      );
+      const resolvePrincipalLimitsForActor = Effect.gen(function* () {
+        const principalId = yield* resolveNonOwnerPrincipalId;
+        if (principalId === undefined) return undefined;
+        const limits = yield* principalLimits
+          .resolveForPrincipal(principalId)
+          .pipe(Effect.orElseSucceed(() => null));
+        if (limits === null) return undefined;
+        return { principalId, limits } as const;
+      });
       const agentSessionScanner = yield* AgentSessionScanner.AgentSessionScanner;
       const agentSessionImporter = yield* AgentSessionImporter.AgentSessionImporter;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
@@ -2717,7 +2789,8 @@ export const layerWsRpc = (
             "orchestration_v2.command_id": input.commandId,
             "orchestration_v2.project_id": input.projectId,
           }).pipe(
-            Effect.andThen(
+            Effect.andThen(resolveNonOwnerPrincipalId),
+            Effect.flatMap((actorPrincipalId) =>
               startup
                 .enqueueCommand(
                   threadLaunch
@@ -2759,6 +2832,7 @@ export const layerWsRpc = (
                               }),
                           createdBy: "user",
                           creationSource: input.creationSource ?? "web",
+                          ...(actorPrincipalId === undefined ? {} : { actorPrincipalId }),
                         }),
                       ),
                       Effect.provide(intakeContext),
@@ -4176,6 +4250,29 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.vcsCreateWorktree]: (input) =>
           assertCwdAccess(input.cwd, "project:source.write").pipe(
+            Effect.flatMap((matched) =>
+              resolveNonOwnerPrincipalId.pipe(
+                Effect.flatMap((principalId) =>
+                  principalId === undefined || matched.projectId === undefined
+                    ? Effect.void
+                    : projectQuotas
+                        .assertCanCreateWorktree({ projectId: matched.projectId, principalId })
+                        .pipe(
+                          Effect.catchTags({
+                            ProjectQuotaInternalError: (cause) =>
+                              Effect.fail(
+                                new GitCommandError({
+                                  operation: "ProjectQuotaService.assertCanCreateWorktree",
+                                  command: "git worktree add",
+                                  cwd: input.cwd,
+                                  detail: cause.message,
+                                }),
+                              ),
+                          }),
+                        ),
+                ),
+              ),
+            ),
             Effect.andThen(
               // A project that tracks repositories gets a task folder, as its new worktree threads do.
               taskFolders.createForProjectFolder(input, { projectCommands }).pipe(
@@ -4268,25 +4365,38 @@ export const layerWsRpc = (
           assertCwdAccess(input.cwd, "project:read").pipe(
             Effect.andThen(review.getDiffFileContents(input)),
           ),
-        [WS_METHODS.terminalOpen]: (input) =>
-          guardTerminalLaunch(input).pipe(
-            Effect.flatMap((guardedInput) => prepareTerminalLaunch(guardedInput)),
-            Effect.flatMap((launch) =>
-              terminalManager
-                .open(launch.input)
-                .pipe(Effect.provideService(TerminalManager.TerminalCwdRecovery, launch.recover)),
-            ),
-          ),
+        [WS_METHODS.terminalOpen]: Effect.fn("ws.terminal.open")(function* (input) {
+          const guardedInput = yield* guardTerminalLaunch(input);
+          const launch = yield* prepareTerminalLaunch(guardedInput);
+          const resolvedLimits = yield* resolvePrincipalLimitsForActor;
+          const limitOptions =
+            resolvedLimits === undefined
+              ? undefined
+              : {
+                  principalId: resolvedLimits.principalId,
+                  maxTerminals: resolvedLimits.limits.maxTerminals,
+                };
+          return yield* terminalManager
+            .open(launch.input, limitOptions)
+            .pipe(Effect.provideService(TerminalManager.TerminalCwdRecovery, launch.recover));
+        }),
         [WS_METHODS.terminalAttach]: (input, metadata) =>
           Stream.unwrap(
-            guardTerminalLaunch(input).pipe(
-              Effect.flatMap((guardedInput) => prepareTerminalLaunch(guardedInput)),
-              Effect.map((launch) =>
-                terminalManager
-                  .attachOutputStream(launch.input, terminalViewerId(metadata))
-                  .pipe(Stream.provideService(TerminalManager.TerminalCwdRecovery, launch.recover)),
-              ),
-            ),
+            Effect.gen(function* () {
+              const guardedInput = yield* guardTerminalLaunch(input);
+              const launch = yield* prepareTerminalLaunch(guardedInput);
+              const resolvedLimits = yield* resolvePrincipalLimitsForActor;
+              const limitOptions =
+                resolvedLimits === undefined
+                  ? undefined
+                  : {
+                      principalId: resolvedLimits.principalId,
+                      maxTerminals: resolvedLimits.limits.maxTerminals,
+                    };
+              return terminalManager
+                .attachOutputStream(launch.input, terminalViewerId(metadata), limitOptions)
+                .pipe(Stream.provideService(TerminalManager.TerminalCwdRecovery, launch.recover));
+            }),
           ),
         [WS_METHODS.terminalWrite]: (input, metadata) =>
           terminalManager.write(input, terminalViewerId(metadata)),
@@ -4308,7 +4418,20 @@ export const layerWsRpc = (
               (unsubscribe) => Effect.sync(unsubscribe),
             ),
           ),
-        [WS_METHODS.previewOpen]: (input) => previewManager.open(input),
+        [WS_METHODS.previewOpen]: (input) =>
+          resolvePrincipalLimitsForActor.pipe(
+            Effect.flatMap((resolvedLimits) =>
+              previewManager.open(
+                resolvedLimits === undefined
+                  ? input
+                  : {
+                      ...input,
+                      principalId: resolvedLimits.principalId,
+                      maxPreviewTabs: resolvedLimits.limits.maxPreviewTabs,
+                    },
+              ),
+            ),
+          ),
         [WS_METHODS.previewResize]: (input) => previewManager.resize(input),
         [WS_METHODS.previewAdjust]: (input) => previewManager.adjust(input),
         [WS_METHODS.previewClose]: (input) => previewManager.close(input),

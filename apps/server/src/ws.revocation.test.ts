@@ -55,6 +55,8 @@ import * as Stream from "effect/Stream";
 
 import * as ProjectAccess from "./access/ProjectAccess.ts";
 import * as ProjectPaths from "./access/ProjectPaths.ts";
+import * as PrincipalLimitsService from "./identity/PrincipalLimitsService.ts";
+import * as ProjectQuotaService from "./project/ProjectQuotaService.ts";
 import * as ResourceResolver from "./access/ResourceResolver.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
 import * as AssetSigner from "./assets/AssetSigner.ts";
@@ -428,6 +430,14 @@ const layerUnusedWsServices = Layer.mergeAll(
   Layer.mock(DatabaseStorage.DatabaseStorage)({}),
   Layer.mock(TerminalManager.TerminalManager)({}),
   Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+  Layer.mock(PrincipalLimitsService.PrincipalLimitsService)({
+    resolveForPrincipal: () => Effect.succeed(null),
+  }),
+  Layer.mock(ProjectQuotaService.ProjectQuotaService)({
+    getWarningsForProjects: () => Effect.succeed(new Map()),
+    assertCanCreateWorktree: () => Effect.void,
+    subscribeChanges: PubSub.unbounded<ProjectId>().pipe(Effect.flatMap(PubSub.subscribe)),
+  }),
   Layer.mock(ThreadManagement.ThreadManagementService)({}),
   Layer.mock(ThreadSearch.ThreadSearch)({}),
   Layer.mock(UsageService.UsageService)({}),
@@ -1092,6 +1102,10 @@ describe("Live access revocation", () => {
                 repositoryIdentityResolved: false,
               }),
           } as unknown as ProjectEnrichment.ProjectEnrichmentService["Service"]),
+          Effect.provideService(ProjectQuotaService.ProjectQuotaService, {
+            getWarningsForProjects: () => Effect.succeed(new Map()),
+            subscribeChanges: PubSub.unbounded<ProjectId>().pipe(Effect.flatMap(PubSub.subscribe)),
+          } as unknown as ProjectQuotaService.ProjectQuotaService["Service"]),
         );
 
         const received = yield* Queue.unbounded<OrchestrationV2ShellStreamItem>();

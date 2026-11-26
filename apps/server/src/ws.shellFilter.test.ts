@@ -66,6 +66,8 @@ import * as SqlitePersistence from "./persistence/Sqlite.ts";
 import * as ProjectHttp from "./project/http.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as ProjectEnrichment from "./project/ProjectEnrichmentService.ts";
+import * as ProjectQuotaService from "./project/ProjectQuotaService.ts";
+import * as PrincipalLimitsService from "./identity/PrincipalLimitsService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
@@ -608,6 +610,10 @@ describe("Shell stream project isolation", () => {
                 repositoryIdentityResolved: false,
               }),
           } as unknown as ProjectEnrichment.ProjectEnrichmentService["Service"]),
+          Effect.provideService(ProjectQuotaService.ProjectQuotaService, {
+            getWarningsForProjects: () => Effect.succeed(new Map()),
+            subscribeChanges: PubSub.unbounded<ProjectId>().pipe(Effect.flatMap(PubSub.subscribe)),
+          } as unknown as ProjectQuotaService.ProjectQuotaService["Service"]),
         );
 
         const items = yield* stream.pipe(
@@ -736,6 +742,11 @@ describe("Projects list and search filtering", () => {
               ),
               Layer.provide(Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({})),
               Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
+              Layer.provide(
+                Layer.mock(ProjectQuotaService.ProjectQuotaService)({
+                  getWarningsForProjects: () => Effect.succeed(new Map()),
+                }),
+              ),
               Layer.provide(HttpPlatform.layer),
               Layer.provide(Etag.layerWeak),
               Layer.provide(NodeServices.layer),
@@ -937,6 +948,14 @@ describe("Projects list and search filtering", () => {
               ),
           }),
           Layer.mock(ThreadLaunchService.ThreadLaunchService)({}),
+          Layer.mock(PrincipalLimitsService.PrincipalLimitsService)({
+            resolveForPrincipal: () => Effect.succeed(null),
+          }),
+          Layer.mock(ProjectQuotaService.ProjectQuotaService)({
+            getWarningsForProjects: () => Effect.succeed(new Map()),
+            assertCanCreateWorktree: () => Effect.void,
+            subscribeChanges: PubSub.unbounded<ProjectId>().pipe(Effect.flatMap(PubSub.subscribe)),
+          }),
           Layer.mock(OrchestrationEventStore.OrchestrationEventStore)({
             latestApplicationSequence: Effect.succeed(10),
           }),

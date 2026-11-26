@@ -5,6 +5,7 @@ import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import {
   DEFAULT_TERMINAL_ID,
   DEFAULT_MAX_TERMINAL_BUFFER_BYTES,
+  DEFAULT_MEMBER_MAX_TERMINALS,
   retainedTerminalHistory,
   TERMINAL_SEQUENCE_GROUND,
   terminalSequenceEnd,
@@ -15,12 +16,14 @@ import {
   TerminalCwdStatError,
   TerminalError,
   TerminalHistoryError,
+  TerminalLimitExceededError,
   TerminalNotRunningError,
   TerminalProviderInstanceNotFoundError,
   TerminalProviderEnvironmentError,
   TerminalResizeError,
   TerminalSessionLookupError,
   TerminalWriteError,
+  type PrincipalId,
   type TerminalAttachInput,
   type TerminalAttachStreamEvent,
   type TerminalClearInput,
@@ -175,11 +178,17 @@ export class TerminalCwdRecovery extends Context.Reference<
   (error: TerminalCwdNotFoundError) => Effect.Effect<void, TerminalCwdNotFoundError>
 >("t3/terminal/TerminalCwdRecovery", { defaultValue: () => (error) => Effect.fail(error) }) {}
 
+export interface TerminalLaunchLimitOptions {
+  readonly principalId?: PrincipalId;
+  readonly maxTerminals?: number;
+}
+
 export class TerminalManager extends Context.Service<
   TerminalManager,
   {
     readonly open: (
       input: TerminalOpenInput,
+      limitOptions?: TerminalLaunchLimitOptions,
     ) => Effect.Effect<TerminalSessionSnapshot, TerminalError>;
 
     readonly getShell: (input: TerminalObserveInput) => Effect.Effect<string, TerminalError>;
@@ -194,6 +203,7 @@ export class TerminalManager extends Context.Service<
       listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>,
       registerCleanup?: (stop: () => void) => void,
       viewerId?: string,
+      limitOptions?: TerminalLaunchLimitOptions,
     ) => Effect.Effect<() => void, TerminalError>;
 
     /**
@@ -203,6 +213,7 @@ export class TerminalManager extends Context.Service<
     readonly attachOutputStream: (
       input: TerminalAttachInput,
       viewerId: string,
+      limitOptions?: TerminalLaunchLimitOptions,
     ) => Stream.Stream<TerminalAttachStreamEvent, TerminalError>;
 
     readonly observeStream: (
@@ -303,6 +314,7 @@ interface TerminalStartInput {
 interface TerminalSessionState {
   threadId: string;
   terminalId: string;
+  ownerPrincipalId: PrincipalId | null;
   cwd: string;
   worktreePath: string | null;
   status: TerminalSessionStatus;
@@ -3302,8 +3314,45 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     }).pipe(Effect.ignoreCause({ log: true })),
   );
 
+  const checkPrincipalTerminalLimitInState = (
+    sessions: ReadonlyMap<string, TerminalSessionState>,
+    sessionKey: string,
+    limitOptions: TerminalLaunchLimitOptions | undefined,
+  ): TerminalLimitExceededError | null => {
+    const principalId = limitOptions?.principalId;
+    if (principalId === undefined) {
+      return null;
+    }
+    const limit = limitOptions?.maxTerminals ?? DEFAULT_MEMBER_MAX_TERMINALS;
+    const openTerminals: Array<{ readonly threadId: string; readonly terminalId: string }> = [];
+    for (const [key, candidate] of sessions) {
+      if (key === sessionKey) continue;
+      if (
+        candidate.ownerPrincipalId === principalId &&
+        (candidate.status === "starting" || candidate.status === "running")
+      ) {
+        openTerminals.push({ threadId: candidate.threadId, terminalId: candidate.terminalId });
+      }
+    }
+    if (openTerminals.length < limit) {
+      return null;
+    }
+    openTerminals.sort(
+      (left, right) =>
+        left.threadId.localeCompare(right.threadId) ||
+        left.terminalId.localeCompare(right.terminalId),
+    );
+    return new TerminalLimitExceededError({
+      status: 409,
+      limit,
+      openTerminalIds: openTerminals.map((entry) => `${entry.threadId}:${entry.terminalId}`),
+      openTerminals,
+    });
+  };
+
   const openWithWorkspaceLease = Effect.fn("terminal.openLocked")(function* (
     requestedInput: TerminalOpenInput,
+    limitOptions?: TerminalLaunchLimitOptions,
   ) {
     const terminalId = requestedInput.terminalId;
     yield* assertValidCwd(requestedInput.cwd);
@@ -3328,6 +3377,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       const session: TerminalSessionState = {
         threadId: input.threadId,
         terminalId,
+        ownerPrincipalId: limitOptions?.principalId ?? null,
         cwd: input.cwd,
         worktreePath: input.worktreePath ?? null,
         status: "starting",
@@ -3356,12 +3406,19 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       };
 
       const createdSession = session;
-      yield* modifyManagerState((state) => {
+      const limitError = yield* modifyManagerState((state) => {
+        const error = checkPrincipalTerminalLimitInState(state.sessions, sessionKey, limitOptions);
+        if (error !== null) {
+          return [error, state] as const;
+        }
         const sessions = new Map(state.sessions);
         sessions.set(sessionKey, createdSession);
         closedSessionKeys.delete(sessionKey);
-        return [undefined, { ...state, sessions }] as const;
+        return [null, { ...state, sessions }] as const;
       });
+      if (limitError !== null) {
+        return yield* limitError;
+      }
 
       yield* evictInactiveSessionsIfNeeded();
       yield* startSession(
@@ -3390,6 +3447,20 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
       liveSession.cwd !== input.cwd ||
       runtimeEnvChanged ||
       liveSession.worktreePath !== nextWorktreePath;
+
+    if (!liveSession.process && limitOptions?.principalId !== undefined) {
+      const limitError = yield* modifyManagerState((state) => {
+        const error = checkPrincipalTerminalLimitInState(state.sessions, sessionKey, limitOptions);
+        if (error !== null) {
+          return [error, state] as const;
+        }
+        liveSession.ownerPrincipalId = limitOptions.principalId ?? liveSession.ownerPrincipalId;
+        return [null, state] as const;
+      });
+      if (limitError !== null) {
+        return yield* limitError;
+      }
+    }
 
     if (launchContextChanged) {
       yield* stopProcess(liveSession);
@@ -3434,16 +3505,18 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     return snapshot(liveSession);
   });
 
-  const openLocked = (input: TerminalOpenInput) =>
+  const openLocked = (input: TerminalOpenInput, limitOptions?: TerminalLaunchLimitOptions) =>
     withWorkspaceLease(
       path.resolve(input.worktreePath ?? input.cwd),
-      openWithWorkspaceLease(input),
+      openWithWorkspaceLease(input, limitOptions),
     );
 
-  const open: TerminalManager["Service"]["open"] = (input) =>
+  const open: TerminalManager["Service"]["open"] = (input, limitOptions) =>
     withThreadLock(
       input.threadId,
-      resolveLaunchInputEnvironment(input).pipe(Effect.flatMap(openLocked)),
+      resolveLaunchInputEnvironment(input).pipe(
+        Effect.flatMap((resolved) => openLocked(resolved, limitOptions)),
+      ),
     );
 
   const getShell = Effect.fn("terminal.getShell")(function* (input: TerminalObserveInput) {
@@ -3454,7 +3527,10 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     return session.shell;
   });
 
-  const openOrAttachForStream = Effect.fnUntraced(function* (requestedInput: TerminalAttachInput) {
+  const openOrAttachForStream = Effect.fnUntraced(function* (
+    requestedInput: TerminalAttachInput,
+    limitOptions?: TerminalLaunchLimitOptions,
+  ) {
     const terminalId = requestedInput.terminalId;
     const input = withSharedGrid(toSessionKey(requestedInput.threadId, terminalId), requestedInput);
     const existing = yield* getSession(input.threadId, terminalId);
@@ -3475,7 +3551,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         terminalId,
         cwd: input.cwd,
       });
-      return yield* Effect.uninterruptible(openLocked(resolvedInput));
+      return yield* Effect.uninterruptible(openLocked(resolvedInput, limitOptions));
     }
 
     const session = existing.value;
@@ -3488,7 +3564,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         terminalId,
         cwd: input.cwd,
       });
-      return yield* Effect.uninterruptible(openLocked(resolvedInput));
+      return yield* Effect.uninterruptible(openLocked(resolvedInput, limitOptions));
     }
 
     if (
@@ -3640,6 +3716,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
     listener,
     registerCleanup,
     viewerId,
+    limitOptions,
   ) => {
     const viewer = viewerId ?? `stream:${++anonymousViewerCount}`;
     let detach = () => {};
@@ -3651,7 +3728,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
           ? { cols: input.cols, rows: input.rows }
           : null,
       );
-      return openOrAttachForStream(input);
+      return openOrAttachForStream(input, limitOptions);
     });
     return streamSession(
       input,
@@ -3701,6 +3778,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
   const attachOutputStream: TerminalManager["Service"]["attachOutputStream"] = (
     input,
     viewerId,
+    limitOptions,
   ) => {
     const { maxHistoryBytes } = input;
     const retained = (listener: (event: TerminalAttachStreamEvent) => Effect.Effect<void>) =>
@@ -3726,7 +3804,7 @@ export const makeWithOptions = Effect.fn("TerminalManager.makeWithOptions")(func
         Effect.as(
           terminalOutputStream(
             (listener, registerCleanup) =>
-              attachStream(input, retained(listener), registerCleanup, viewerId),
+              attachStream(input, retained(listener), registerCleanup, viewerId, limitOptions),
             (listener, registerCleanup) => resyncStream(input, retained(listener), registerCleanup),
           ),
         ),

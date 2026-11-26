@@ -6,7 +6,14 @@ import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
-import { AuthSessionId, PrincipalId, SessionBinding, SessionBindingKind } from "@t3tools/contracts";
+import {
+  AuthSessionId,
+  PrincipalId,
+  ServerAuthSessionMethod,
+  SessionBinding,
+  SessionBindingKind,
+} from "@t3tools/contracts";
+import type * as DateTime from "effect/DateTime";
 
 import {
   PersistenceDecodeError,
@@ -47,6 +54,24 @@ const SessionIdRow = Schema.Struct({
   sessionId: AuthSessionId,
 });
 
+export interface ActivePrincipalSessionsCount {
+  readonly activeCount: number;
+  readonly earliestExpiresAt: DateTime.Utc | null;
+}
+
+const CountActiveForPrincipalInput = Schema.Struct({
+  principalId: PrincipalId,
+  now: Schema.DateTimeUtcFromString,
+  excludeSessionId: Schema.optionalKey(AuthSessionId),
+  excludeSubject: Schema.optionalKey(Schema.String),
+  excludeMethod: Schema.optionalKey(ServerAuthSessionMethod),
+});
+
+const CountActiveForPrincipalRow = Schema.Struct({
+  activeCount: Schema.Number,
+  earliestExpiresAt: Schema.NullOr(Schema.DateTimeUtcFromString),
+});
+
 export class SessionPrincipalRepository extends Context.Service<
   SessionPrincipalRepository,
   {
@@ -65,6 +90,13 @@ export class SessionPrincipalRepository extends Context.Service<
     readonly listForPrincipal: (
       principalId: PrincipalId,
     ) => Effect.Effect<ReadonlyArray<AuthSessionId>, SessionPrincipalRepositoryError>;
+    readonly countActiveForPrincipal: (input: {
+      readonly principalId: PrincipalId;
+      readonly now: DateTime.Utc;
+      readonly excludeSessionId?: AuthSessionId;
+      readonly excludeSubject?: string;
+      readonly excludeMethod?: ServerAuthSessionMethod;
+    }) => Effect.Effect<ActivePrincipalSessionsCount, SessionPrincipalRepositoryError>;
     readonly downgradeEnvironmentBindingsForPrincipal: (
       principalId: PrincipalId,
     ) => Effect.Effect<number, SessionPrincipalRepositoryError>;
@@ -140,6 +172,30 @@ const make = Effect.gen(function* () {
       `,
   });
 
+  const countActiveRowsForPrincipal = SqlSchema.findOne({
+    Request: CountActiveForPrincipalInput,
+    Result: CountActiveForPrincipalRow,
+    execute: (input) => sql`
+      SELECT
+        COUNT(*) AS "activeCount",
+        MIN(s.expires_at) AS "earliestExpiresAt"
+      FROM session_principals sp
+      JOIN auth_sessions s ON s.session_id = sp.session_id
+      WHERE ${sql.and([
+        sql`sp.principal_id = ${input.principalId}`,
+        sql`s.revoked_at IS NULL`,
+        sql`s.expires_at > ${input.now}`,
+        ...(input.excludeSessionId !== undefined && input.excludeMethod !== undefined
+          ? [
+              sql`NOT (s.session_id = ${input.excludeSessionId} AND s.method = ${input.excludeMethod})`,
+            ]
+          : input.excludeSubject !== undefined && input.excludeMethod !== undefined
+            ? [sql`NOT (s.subject = ${input.excludeSubject} AND s.method = ${input.excludeMethod})`]
+            : []),
+      ])}
+    `,
+  });
+
   const downgradeEnvironmentRowsForPrincipal = SqlSchema.findAll({
     Request: PrincipalId,
     Result: SessionIdRow,
@@ -196,6 +252,15 @@ const make = Effect.gen(function* () {
         Effect.mapError(toSqlOrDecodeError("listPrincipalSessions", "AuthSessionId")),
         Effect.map((rows) => rows.map((row) => row.sessionId)),
       ),
+    ),
+    countActiveForPrincipal: Effect.fn("SessionPrincipalRepository.countActiveForPrincipal")(
+      (input) =>
+        countActiveRowsForPrincipal(input).pipe(
+          NodeSqliteClient.readOnly,
+          Effect.mapError(
+            toSqlOrDecodeError("countActivePrincipalSessions", "ActivePrincipalSessionsCount"),
+          ),
+        ),
     ),
     downgradeEnvironmentBindingsForPrincipal: Effect.fn(
       "SessionPrincipalRepository.downgradeEnvironmentBindingsForPrincipal",

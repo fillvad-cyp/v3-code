@@ -1,10 +1,12 @@
 import {
+  AuthAccessReadScope,
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
   EnvironmentHttpForbiddenError,
   requiredScopesForProjectMutation,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as Option from "effect/Option";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import {
@@ -12,12 +14,14 @@ import {
   failEnvironmentAuthInvalid,
   failEnvironmentInternal,
   failEnvironmentInvalidRequest,
+  failEnvironmentNotFound,
   requireEnvironmentScope,
 } from "../auth/http.ts";
 import * as ProjectAccess from "../access/ProjectAccess.ts";
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
+import * as ProjectQuotaService from "./ProjectQuotaService.ts";
 import * as ProjectService from "./ProjectService.ts";
 import { mutateProjectWithClone } from "./ProjectMutation.ts";
 
@@ -44,6 +48,7 @@ export const layer = HttpApiBuilder.group(
   Effect.fnUntraced(function* (handlers) {
     const projects = yield* ProjectService.ProjectService;
     const projectAccess = yield* ProjectAccess.ProjectAccess;
+    const projectQuotas = yield* ProjectQuotaService.ProjectQuotaService;
     const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
     const projectClones = yield* ProjectCloneTracker.ProjectCloneTracker;
 
@@ -136,6 +141,44 @@ export const layer = HttpApiBuilder.group(
           return yield* startup
             .enqueueCommand(operation)
             .pipe(traceLocalHandlerWork, Effect.catch(failProjectMutation));
+        }),
+      )
+      .handle(
+        "usage",
+        Effect.fn("environment.projects.usage")(function* (args) {
+          yield* annotateEnvironmentRequest(args.endpoint.name);
+          const session = yield* requireEnvironmentScope(AuthAccessReadScope);
+          const actor = yield* projectAccess
+            .resolve({
+              sessionId: session.sessionId,
+              subject: session.subject,
+              scopes: Array.from(session.scopes),
+              principalId: session.principalId,
+              binding: session.binding,
+            })
+            .pipe(
+              Effect.catchTags({
+                AccessResolveError: (error) =>
+                  error.reason === "repository_error"
+                    ? failEnvironmentInternal("internal_error", error)
+                    : failEnvironmentAuthInvalid("invalid_credential"),
+              }),
+            );
+          if (!projectAccess.can(actor, args.params.id, "project:read")) {
+            return yield* new EnvironmentHttpForbiddenError({
+              message: `Missing required capability project:read on project ${args.params.id}.`,
+            });
+          }
+          const project = yield* projects
+            .getById(args.params.id)
+            .pipe(Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)));
+          if (Option.isNone(project)) {
+            return yield* failEnvironmentNotFound("resource_not_found");
+          }
+          return yield* projectQuotas.getUsage(args.params.id).pipe(
+            traceLocalHandlerWork,
+            Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)),
+          );
         }),
       );
   }),
