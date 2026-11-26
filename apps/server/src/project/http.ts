@@ -1,12 +1,15 @@
 import {
   AuthAccessReadScope,
   AuthOrchestrationReadScope,
+  AuthProvidersManageScope,
   EnvironmentHttpApi,
+  EnvironmentHttpBadRequestError,
   EnvironmentHttpForbiddenError,
   requiredScopesForProjectMutation,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import { HttpServerRequest } from "effect/http";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 
 import {
@@ -17,11 +20,13 @@ import {
   failEnvironmentNotFound,
   requireEnvironmentScope,
 } from "../auth/http.ts";
+import { deriveAuthClientMetadata } from "../auth/utils.ts";
 import * as ProjectAccess from "../access/ProjectAccess.ts";
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ProjectCloneTracker from "./ProjectCloneTracker.ts";
 import * as ProjectQuotaService from "./ProjectQuotaService.ts";
+import * as ProjectSecrets from "./ProjectSecrets.ts";
 import * as ProjectService from "./ProjectService.ts";
 import { mutateProjectWithClone } from "./ProjectMutation.ts";
 
@@ -49,6 +54,7 @@ export const layer = HttpApiBuilder.group(
     const projects = yield* ProjectService.ProjectService;
     const projectAccess = yield* ProjectAccess.ProjectAccess;
     const projectQuotas = yield* ProjectQuotaService.ProjectQuotaService;
+    const projectSecrets = yield* ProjectSecrets.ProjectSecrets;
     const startup = yield* ServerRuntimeStartup.ServerRuntimeStartup;
     const projectClones = yield* ProjectCloneTracker.ProjectCloneTracker;
 
@@ -180,6 +186,136 @@ export const layer = HttpApiBuilder.group(
             Effect.catch((cause) => failEnvironmentInternal("internal_error", cause)),
           );
         }),
+      )
+      .handle(
+        "listSecrets",
+        Effect.fn("environment.projects.listSecrets")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* requireEnvironmentScope(AuthProvidersManageScope);
+            const actor = yield* projectAccess
+              .resolve({
+                sessionId: session.sessionId,
+                subject: session.subject,
+                scopes: Array.from(session.scopes),
+                principalId: session.principalId,
+                binding: session.binding,
+              })
+              .pipe(
+                Effect.catchTags({
+                  AccessResolveError: (error) =>
+                    error.reason === "repository_error"
+                      ? failEnvironmentInternal("internal_error", error)
+                      : failEnvironmentAuthInvalid("invalid_credential"),
+                }),
+              );
+            return yield* projectSecrets
+              .list({ projectId: args.params.id, actor })
+              .pipe(traceLocalHandlerWork);
+          },
+          Effect.catchTags({
+            project_forbidden: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+            ProjectSecretNotFoundError: () => failEnvironmentNotFound("resource_not_found"),
+            ProjectSecretInternalError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
+      )
+      .handle(
+        "setSecret",
+        Effect.fn("environment.projects.setSecret")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* requireEnvironmentScope(AuthProvidersManageScope);
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const clientMetadata = deriveAuthClientMetadata({ request });
+            const actor = yield* projectAccess
+              .resolve({
+                sessionId: session.sessionId,
+                subject: session.subject,
+                scopes: Array.from(session.scopes),
+                principalId: session.principalId,
+                binding: session.binding,
+              })
+              .pipe(
+                Effect.catchTags({
+                  AccessResolveError: (error) =>
+                    error.reason === "repository_error"
+                      ? failEnvironmentInternal("internal_error", error)
+                      : failEnvironmentAuthInvalid("invalid_credential"),
+                }),
+              );
+            return yield* projectSecrets
+              .set({
+                projectId: args.params.id,
+                name: args.params.name,
+                value: args.payload.value,
+                actor,
+                audit: {
+                  sessionId: session.sessionId,
+                  ip: clientMetadata.ipAddress ?? null,
+                  userAgent: clientMetadata.userAgent ?? null,
+                },
+              })
+              .pipe(traceLocalHandlerWork);
+          },
+          Effect.catchTags({
+            project_forbidden: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+            ProjectSecretInvalidInputError: (error) =>
+              Effect.fail(new EnvironmentHttpBadRequestError({ message: error.message })),
+            ProjectSecretNotFoundError: () => failEnvironmentNotFound("resource_not_found"),
+            ProjectSecretInternalError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
+      )
+      .handle(
+        "deleteSecret",
+        Effect.fn("environment.projects.deleteSecret")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const session = yield* requireEnvironmentScope(AuthProvidersManageScope);
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const clientMetadata = deriveAuthClientMetadata({ request });
+            const actor = yield* projectAccess
+              .resolve({
+                sessionId: session.sessionId,
+                subject: session.subject,
+                scopes: Array.from(session.scopes),
+                principalId: session.principalId,
+                binding: session.binding,
+              })
+              .pipe(
+                Effect.catchTags({
+                  AccessResolveError: (error) =>
+                    error.reason === "repository_error"
+                      ? failEnvironmentInternal("internal_error", error)
+                      : failEnvironmentAuthInvalid("invalid_credential"),
+                }),
+              );
+            const deleted = yield* projectSecrets
+              .remove({
+                projectId: args.params.id,
+                name: args.params.name,
+                actor,
+                audit: {
+                  sessionId: session.sessionId,
+                  ip: clientMetadata.ipAddress ?? null,
+                  userAgent: clientMetadata.userAgent ?? null,
+                },
+              })
+              .pipe(traceLocalHandlerWork);
+            return { deleted };
+          },
+          Effect.catchTags({
+            project_forbidden: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
+            ProjectSecretInvalidInputError: (error) =>
+              Effect.fail(new EnvironmentHttpBadRequestError({ message: error.message })),
+            ProjectSecretNotFoundError: () => failEnvironmentNotFound("resource_not_found"),
+            ProjectSecretInternalError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
       );
   }),
 );

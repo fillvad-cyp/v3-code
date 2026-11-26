@@ -176,6 +176,7 @@ export const layer = HttpApiBuilder.group(
             clientName: resolved.client.name,
             redirectHost: new URL(resolved.redirectUri).host,
             environmentHost: new URL(urls.issuer).host,
+            ...(resolved.client.peerLink ? { isPeerLink: true } : {}),
             ...(oauth.runtimeModeCeiling === undefined
               ? {}
               : { runtimeModeCeiling: oauth.runtimeModeCeiling }),
@@ -183,8 +184,13 @@ export const layer = HttpApiBuilder.group(
               ? {}
               : {
                   csrfToken: session.csrfToken,
+                  approverIsOwner: session.isOwner,
+                  availableProjects: session.availableProjects,
+                  availableCeilings: session.availableCeilings,
                   oneClickAccess: AuthMcpClientAccess.literals.filter((access) =>
-                    mcpClientScopes(access).every((scope) => session.scopes.includes(scope)),
+                    mcpClientScopes(access, session.ceiling).every((scope) =>
+                      session.scopes.includes(scope),
+                    ),
                   ),
                 }),
           };

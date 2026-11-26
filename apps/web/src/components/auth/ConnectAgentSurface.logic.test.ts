@@ -1,5 +1,5 @@
 import { expect, it } from "vite-plus/test";
-import { AuthMcpClientAccess, RuntimeMode } from "@t3tools/contracts";
+import { AuthMcpClientAccess, ProjectId, RuntimeMode } from "@t3tools/contracts";
 
 import {
   agentRedirectUrl,
@@ -61,4 +61,72 @@ it("follows only https or loopback http redirects to an agent", () => {
   ]) {
     expect(agentRedirectUrl(url), url).toBeNull();
   }
+});
+
+it("carries project scoping and ceiling for MCP clients, requires projects for members, and strips them for peer links", () => {
+  const projectA = ProjectId.make("project:a");
+  const baseDetails = {
+    clientName: "Claude Code",
+    redirectHost: "localhost",
+    environmentHost: "hub.example.test",
+    csrfToken: "csrf",
+    oneClickAccess: AuthMcpClientAccess.literals,
+  };
+
+  expect(
+    resolveApprovalDecision({
+      code: "",
+      access: "auto",
+      details: { ...baseDetails, approverIsOwner: true },
+      projectIds: [projectA],
+      ceiling: "restricted",
+    }),
+  ).toEqual({
+    _tag: "browser-session",
+    access: "auto",
+    csrfToken: "csrf",
+    projectIds: [projectA],
+    ceiling: "restricted",
+  });
+
+  // Members must select at least one project.
+  expect(
+    resolveApprovalDecision({
+      code: "",
+      access: "approval-required",
+      details: { ...baseDetails, approverIsOwner: false },
+      projectIds: [],
+      ceiling: "restricted",
+    }),
+  ).toBeNull();
+  expect(
+    resolveApprovalDecision({
+      code: "",
+      access: "approval-required",
+      details: { ...baseDetails, approverIsOwner: false },
+      projectIds: [projectA],
+      ceiling: "restricted",
+    }),
+  ).toEqual({
+    _tag: "browser-session",
+    access: "approval-required",
+    csrfToken: "csrf",
+    projectIds: [projectA],
+    ceiling: "restricted",
+  });
+
+  // Peer links remain environment-bound.
+  expect(
+    resolveApprovalDecision({
+      code: "",
+      access: "auto",
+      details: { ...baseDetails, approverIsOwner: true, isPeerLink: true },
+      projectIds: [projectA],
+      ceiling: "restricted",
+    }),
+  ).toEqual({
+    _tag: "browser-session",
+    access: "auto",
+    csrfToken: "csrf",
+  });
 });

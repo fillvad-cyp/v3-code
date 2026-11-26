@@ -4,6 +4,8 @@ import {
   AuthMcpApprovalError,
   AuthMcpClientAccess,
   AuthMcpAuthorizationRequest,
+  type PrincipalCeilingTemplate,
+  type ProjectId,
   isRuntimeModeAbove,
   parseMcpApprovalCode,
 } from "@t3tools/contracts";
@@ -30,10 +32,29 @@ import {
 import { runtimeModeConfig } from "../chat/runtimeModeConfig";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
+import { CheckboxMark } from "../ui/checkbox";
 import { Input } from "../ui/input";
 import { RadioGroup } from "../ui/radio-group";
 import { Spinner } from "../ui/spinner";
 import { StandalonePage, StandalonePageHeader } from "../ui/standalone-page";
+
+const ceilingConfig: Record<
+  PrincipalCeilingTemplate,
+  { readonly label: string; readonly description: string }
+> = {
+  staff: {
+    label: msg("Staff"),
+    description: msg("Full project access up to admin capabilities."),
+  },
+  restricted: {
+    label: msg("Restricted"),
+    description: msg("Operate threads, terminals, and previews; no file or source writes."),
+  },
+  client: {
+    label: msg("Client (read-only)"),
+    description: msg("Read threads, files, and project members only."),
+  },
+};
 
 export const accessConfig: Record<
   AuthMcpClientAccess,
@@ -152,6 +173,12 @@ export function McpConsent({
   const messages = useMessages();
   const [loaded, setLoaded] = useState<Loaded>({ status: "loading" });
   const [requestedAccess, setAccess] = useState<AuthMcpClientAccess | null>(null);
+  const [selectedProjectIds, setSelectedProjectIds] = useState<ReadonlyArray<ProjectId> | null>(
+    null,
+  );
+  const [selectedCeiling, setSelectedCeiling] = useState<PrincipalCeilingTemplate | "none" | null>(
+    null,
+  );
   const [pairingCode, setPairingCode] = useState("");
   const [armed, setArmed] = useState(false);
   const access =
@@ -162,6 +189,22 @@ export function McpConsent({
           loaded.status === "ready" ? loaded.details.runtimeModeCeiling : undefined,
           pairingCode.trim().length > 0,
         );
+  const effectiveProjectIds =
+    loaded.status !== "ready" || loaded.details.isPeerLink === true
+      ? []
+      : (selectedProjectIds ??
+        (loaded.details.approverIsOwner === false
+          ? (loaded.details.availableProjects ?? []).map((project) => project.id)
+          : []));
+  const effectiveCeiling: PrincipalCeilingTemplate | null =
+    loaded.status !== "ready" || loaded.details.isPeerLink === true
+      ? null
+      : selectedCeiling === "none"
+        ? null
+        : (selectedCeiling ??
+          (loaded.details.approverIsOwner === false
+            ? (loaded.details.availableCeilings?.[0] ?? null)
+            : null));
   const [errorMessage, setErrorMessage] = useState("");
   const [pending, setPending] = useState<"approve" | "deny" | null>(null);
 
@@ -211,7 +254,13 @@ export function McpConsent({
         ? { _tag: "deny" }
         : access === null
           ? null
-          : resolveApprovalDecision({ code: pairingCode, access, details });
+          : resolveApprovalDecision({
+              code: pairingCode,
+              access,
+              details,
+              projectIds: effectiveProjectIds,
+              ceiling: effectiveCeiling,
+            });
     if (decision === null) return;
     setPending(choice);
     setErrorMessage("");
@@ -255,11 +304,31 @@ export function McpConsent({
   }
 
   const { details } = loaded;
+  const showProjectScope =
+    details.isPeerLink !== true &&
+    details.availableProjects !== undefined &&
+    details.availableProjects.length > 0;
+  const showCeilingScope =
+    details.isPeerLink !== true &&
+    details.availableCeilings !== undefined &&
+    details.availableCeilings.length > 0;
+  const toggleProject = (projectId: ProjectId) => {
+    const next = effectiveProjectIds.includes(projectId)
+      ? effectiveProjectIds.filter((id) => id !== projectId)
+      : [...effectiveProjectIds, projectId];
+    setSelectedProjectIds(next);
+  };
   const canApprove =
     armed &&
     pending === null &&
     access !== null &&
-    resolveApprovalDecision({ code: pairingCode, access, details }) !== null;
+    resolveApprovalDecision({
+      code: pairingCode,
+      access,
+      details,
+      projectIds: effectiveProjectIds,
+      ceiling: effectiveCeiling,
+    }) !== null;
   // A code from "Use T3 Code in another app" names its level, so the page does not ask again.
   const codeAccess = parseMcpApprovalCode(pairingCode)?.access;
   const approveLevel = codeAccess ?? access;
@@ -393,6 +462,85 @@ export function McpConsent({
           </div>
         )}
 
+        {showProjectScope ? (
+          <div className="space-y-2">
+            <span id="connect-agent-projects-label" className="text-sm font-medium">
+              <T>Projects</T>
+            </span>
+            <div
+              aria-labelledby="connect-agent-projects-label"
+              className="space-y-1.5"
+              role="group"
+            >
+              {(details.availableProjects ?? []).map((project) => {
+                const checked = effectiveProjectIds.includes(project.id);
+                return (
+                  <button
+                    key={project.id}
+                    type="button"
+                    aria-pressed={checked}
+                    disabled={pending !== null}
+                    onClick={() => toggleProject(project.id)}
+                    className={cn(
+                      "flex w-full cursor-pointer items-center gap-3 rounded-lg border px-3 py-2 text-left text-sm transition-[background-color,border-color]",
+                      checked
+                        ? "border-primary bg-background dark:border-transparent dark:bg-primary/10 dark:ring-1 dark:ring-primary/30"
+                        : "border-border bg-background hover:bg-muted/50 dark:border-transparent dark:bg-white/[0.035] dark:hover:bg-accent",
+                    )}
+                  >
+                    <CheckboxMark checked={checked} />
+                    <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+                      {project.title}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+            <p className="text-xs text-muted-foreground">
+              {details.approverIsOwner === false ? (
+                <T>Restricted to projects you administer. Select at least one project.</T>
+              ) : (
+                <T>
+                  Leave unchecked for all projects, or select specific projects to limit access.
+                </T>
+              )}
+            </p>
+          </div>
+        ) : null}
+
+        {showCeilingScope ? (
+          <div className="space-y-2">
+            <span id="connect-agent-ceiling-label" className="text-sm font-medium">
+              <T>Scope ceiling</T>
+            </span>
+            <RadioGroup
+              aria-labelledby="connect-agent-ceiling-label"
+              value={effectiveCeiling ?? "none"}
+              onValueChange={(value) =>
+                setSelectedCeiling(value as PrincipalCeilingTemplate | "none")
+              }
+            >
+              {details.approverIsOwner !== false ? (
+                <CeilingOption
+                  value="none"
+                  label={gt("No ceiling")}
+                  description={gt("Grant all scopes matching the chosen access level.")}
+                  selected={effectiveCeiling === null}
+                />
+              ) : null}
+              {(details.availableCeilings ?? []).map((template) => (
+                <CeilingOption
+                  key={template}
+                  value={template}
+                  label={messages(ceilingConfig[template].label)}
+                  description={messages(ceilingConfig[template].description)}
+                  selected={effectiveCeiling === template}
+                />
+              ))}
+            </RadioGroup>
+          </div>
+        ) : null}
+
         {errorMessage ? (
           <Alert variant="error">
             <AlertDescription>{errorMessage}</AlertDescription>
@@ -490,6 +638,36 @@ export function AccessOption({
         {detail === null ? null : (
           <span className="block text-xs text-muted-foreground">{detail}</span>
         )}
+      </span>
+    </RadioPrimitive.Root>
+  );
+}
+
+function CeilingOption({
+  value,
+  label,
+  description,
+  selected,
+}: {
+  readonly value: PrincipalCeilingTemplate | "none";
+  readonly label: string;
+  readonly description: string;
+  readonly selected: boolean;
+}) {
+  return (
+    <RadioPrimitive.Root
+      value={value}
+      className={cn(
+        "flex cursor-pointer items-start gap-3 rounded-lg border px-3 py-2 text-left outline-none transition-[background-color,border-color,box-shadow]",
+        "focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring focus-visible:ring-offset-1 focus-visible:ring-offset-background",
+        selected
+          ? "border-primary bg-background ring-2 ring-inset ring-primary/25 dark:border-transparent dark:bg-primary/10 dark:ring-1 dark:ring-primary/30"
+          : "border-border bg-background hover:bg-muted/50 dark:border-transparent dark:bg-white/[0.035] dark:hover:bg-accent",
+      )}
+    >
+      <span className="min-w-0">
+        <span className="block text-sm font-medium text-foreground">{label}</span>
+        <span className="block text-xs text-muted-foreground">{description}</span>
       </span>
     </RadioPrimitive.Root>
   );

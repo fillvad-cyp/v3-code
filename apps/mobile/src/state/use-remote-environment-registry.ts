@@ -23,7 +23,10 @@ import { environmentCatalog } from "../connection/catalog";
 import { createRemoteEnvironmentProjectionAtoms } from "./remote-environment-projections";
 import { serverEnvironment } from "./server";
 import { relayEnvironmentDiscovery } from "./relay";
-import { connectPairingUrl as connectPairingUrlCommand } from "../connection/onboarding";
+import {
+  connectLoginCode as connectLoginCodeCommand,
+  connectPairingUrl as connectPairingUrlCommand,
+} from "../connection/onboarding";
 
 const RELAY_REMOVAL_ACCOUNT_NOTE: Record<Discovery.RelayEnvironmentRegistration, string> = {
   registered: msg(
@@ -74,6 +77,32 @@ export async function pairEnvironment(
   }
   const error = Cause.squash(result.cause);
   const message = errorDisplayMessage(error, m) ?? m(msg("Failed to pair with the environment."));
+  if (
+    error !== null &&
+    typeof error === "object" &&
+    "reason" in error &&
+    error.reason === "unsupported"
+  ) {
+    Dialog.alert(m(msg("Client not supported")), message);
+    return { ok: false, error: null };
+  }
+  return { ok: false, error: message };
+}
+
+/** Signs in to a multi-user environment with a one-time login code and persists the session. */
+export async function loginEnvironmentWithCode(input: {
+  readonly host: string;
+  readonly code: string;
+  readonly expectedEnvironmentId?: EnvironmentId;
+}): Promise<PairingOutcome> {
+  const result = await runAtomCommand(appAtomRegistry, connectLoginCodeCommand, input, {
+    reportFailure: false,
+  });
+  if (AsyncResult.isSuccess(result)) {
+    return { ok: true, error: null };
+  }
+  const error = Cause.squash(result.cause);
+  const message = errorDisplayMessage(error, m) ?? m(msg("Sign-in failed."));
   if (
     error !== null &&
     typeof error === "object" &&

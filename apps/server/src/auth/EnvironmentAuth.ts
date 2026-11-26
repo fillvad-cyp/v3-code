@@ -2,6 +2,7 @@ import {
   AuthAccessTokenType,
   AuthAccessWriteScope,
   AuthEnvironmentScope,
+  type AuthGrantScope,
   AuthMcpClientAccess,
   AuthOrchestrationOperateScope,
   AuthAdministrativeClientScopes,
@@ -17,7 +18,7 @@ import {
   AuthSessionId,
   type AuthSessionState,
   type BoundProject,
-  type PrincipalId,
+  PrincipalId,
   type SessionBinding,
   authScopeResponse,
   type ServerAuthDescriptor,
@@ -116,10 +117,15 @@ export interface McpClientSession {
   readonly sessionId: AuthSessionId;
   readonly label: string;
   readonly access: AuthMcpClientAccess;
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   /** Another T3 Code environment's link, whose work here stays within it. */
   readonly peerLink: boolean;
   /** When a peer link's session ends unless it is used again; the linking side keeps this. */
   readonly linkExpiresAt?: DateTime.Utc;
+  /** Principal that owns or approved this MCP client session, when bound. */
+  readonly principalId?: PrincipalId;
+  /** Project or environment binding stored in `session_principals`. */
+  readonly binding?: SessionBinding;
 }
 
 export interface AuthenticatedSession {
@@ -684,6 +690,10 @@ export class EnvironmentAuth extends Context.Service<
       readonly access: AuthMcpClientAccess;
       readonly peerLink: boolean;
       readonly client: AuthClientMetadata;
+      /** Narrowed scopes when a ceiling was applied; defaults to `mcpClientScopes(access)`. */
+      readonly scopes?: ReadonlyArray<AuthGrantScope>;
+      readonly principalId?: PrincipalId;
+      readonly binding?: SessionBinding;
       /**
        * `otherSessionRevocationCount` read before the sign-in was approved. The session is
        * refused when "revoke all others" has run since.
@@ -705,6 +715,7 @@ export class EnvironmentAuth extends Context.Service<
       code: string,
       access: AuthMcpClientAccess,
       peerLink?: boolean,
+      requiredScopes?: ReadonlyArray<AuthGrantScope>,
     ) => Effect.Effect<
       AuthMcpClientAccess,
       ServerAuthMcpApprovalCodeError | ServerAuthInternalError
@@ -1964,7 +1975,10 @@ export const make = Effect.gen(function* () {
             access: session.scopes.includes(AuthOrchestrationOperateScope)
               ? (session.runtimeModeCeiling ?? "approval-required")
               : "read-only",
+            scopes: session.scopes,
             peerLink: session.peerLink === true,
+            ...(session.principalId !== undefined ? { principalId: session.principalId } : {}),
+            ...(session.binding !== undefined ? { binding: session.binding } : {}),
           } satisfies McpClientSession;
           if (session.peerLink !== true || session.expiresAt === undefined) return client;
           return {
@@ -1996,15 +2010,20 @@ export const make = Effect.gen(function* () {
   });
 
   const issueMcpClientSession: EnvironmentAuth["Service"]["issueMcpClientSession"] = (input) => {
+    const scopes = input.scopes ?? mcpClientScopes(input.access);
+    const principalId =
+      input.principalId ?? (input.binding !== undefined ? PrincipalId.make("owner") : undefined);
     const issue = sessions
       .issue({
         subject: MCP_CLIENT_SUBJECT,
         method: "bearer-access-token",
-        scopes: mcpClientScopes(input.access),
+        scopes,
         ttl: MCP_CLIENT_SESSION_TTL,
         ...(input.access === "read-only" ? {} : { runtimeModeCeiling: input.access }),
         peerLink: input.peerLink,
         client: { ...input.client, label: input.label, deviceType: "bot" },
+        ...(principalId !== undefined ? { principalId } : {}),
+        ...(input.binding !== undefined ? { binding: input.binding } : {}),
       })
       .pipe(
         Effect.map((issued) => ({
@@ -2025,9 +2044,10 @@ export const make = Effect.gen(function* () {
     code,
     access,
     peerLink = false,
+    requiredScopes,
   ) =>
     resolveBootstrapGrant(code.trim(), {
-      requiredScopes: mcpClientScopes(access),
+      requiredScopes: requiredScopes ?? mcpClientScopes(access),
       allowedSubject: `${peerLink ? PEER_LINK_PAIRING_SUBJECT_PREFIX : MCP_APPROVAL_SUBJECT_PREFIX}${access}`,
     }).pipe(
       Effect.catchTags({

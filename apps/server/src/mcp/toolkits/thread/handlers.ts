@@ -14,6 +14,7 @@ import { topOfPinnedRunOrderKey } from "@t3tools/shared/pinOrderKey";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import {
+  assertClientProjectAccess,
   dispatchFailure,
   newCommandId,
   readCaller,
@@ -108,53 +109,64 @@ const writesThread = <P extends { readonly threadId?: ThreadId | undefined }, A,
 ) => McpToolAccess.writesThreads((params: P) => [params.threadId], handle);
 
 export const layer = McpToolAccess.toLayer(ThreadToolkit, {
-  run_scheduled_task_now: McpToolAccess.writesEnvironment((input) =>
-    Effect.gen(function* () {
-      const scheduler = yield* ScheduledTasks.ScheduledTaskService;
-      const { tasks } = yield* scheduler.list().pipe(Effect.mapError(unavailable));
-      if (!tasks.some((task) => task.id === input.taskId))
-        return yield* new OrchestratorMcpFailure({
-          code: "invalid_request",
-          message: "The scheduled task was not found.",
-        });
-      const { task, threadId } = yield* scheduler
-        .runNow({ id: input.taskId })
-        .pipe(
-          Effect.mapError(
-            (error) =>
-              new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
-          ),
-        );
-      const scope = yield* McpInvocationContext.McpInvocationContext;
-      return {
-        taskId: task.id,
-        threadId,
-        ...(threadId === null
-          ? {}
-          : {
-              link: McpInvocationContext.threadLinkFor(scope, threadId),
-            }),
-        lastRunStatus: task.lastRunStatus,
-        lastRunError: task.lastRunError,
-        runCount: task.runCount,
-        nextRunAt: task.nextRunAt,
-      };
-    }),
+  run_scheduled_task_now: McpToolAccess.writesEnvironment(
+    (input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const scheduler = yield* ScheduledTasks.ScheduledTaskService;
+        const { tasks } = yield* scheduler.list().pipe(Effect.mapError(unavailable));
+        const existing = tasks.find((task) => task.id === input.taskId);
+        if (existing === undefined)
+          return yield* new OrchestratorMcpFailure({
+            code: "invalid_request",
+            message: "The scheduled task was not found.",
+          });
+        yield* assertClientProjectAccess(scope, existing.projectId, "project:thread.operate");
+        const { task, threadId } = yield* scheduler
+          .runNow({ id: input.taskId })
+          .pipe(
+            Effect.mapError(
+              (error) =>
+                new OrchestratorMcpFailure({ code: "orchestration_error", message: error.message }),
+            ),
+          );
+        return {
+          taskId: task.id,
+          threadId,
+          ...(threadId === null
+            ? {}
+            : {
+                link: McpInvocationContext.threadLinkFor(scope, threadId),
+              }),
+          lastRunStatus: task.lastRunStatus,
+          lastRunError: task.lastRunError,
+          runCount: task.runCount,
+          nextRunAt: task.nextRunAt,
+        };
+      }),
+    { projectScoped: "allowed" },
   ),
   t3_thread_search: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
       const { caller } = yield* readCaller();
       const scope = yield* McpInvocationContext.McpInvocationContext;
+      const targetProjectId = input.projectId ?? caller?.projectId;
+      if (targetProjectId !== undefined) {
+        yield* assertClientProjectAccess(scope, targetProjectId, "project:read");
+      }
+      const allowedProjects = McpInvocationContext.clientAllowedProjectIds(scope);
       const threadSearch = yield* ThreadSearch.ThreadSearch;
       const { matches } = yield* threadSearch
-        .searchThreads({ ...input, projectId: input.projectId ?? caller?.projectId })
+        .searchThreads({ ...input, projectId: targetProjectId })
         .pipe(Effect.mapError(unavailable));
       return {
         currentThreadId: scope.thread?.threadId ?? null,
-        matches: matches.map((match) => ({
-          ...match,
-          link: McpInvocationContext.threadLinkFor(scope, match.threadId, match.title),
-        })),
+        matches: matches
+          .filter((match) => allowedProjects === undefined || allowedProjects.has(match.projectId))
+          .map((match) => ({
+            ...match,
+            link: McpInvocationContext.threadLinkFor(scope, match.threadId, match.title),
+          })),
       };
     }),
   ),

@@ -16,7 +16,7 @@ import * as Layer from "effect/Layer";
 
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
-import { threadNotFound } from "./threadAccess.ts";
+import { assertClientProjectAccess, threadNotFound } from "./threadAccess.ts";
 
 export class ThreadMetadataMcpService extends Context.Service<
   ThreadMetadataMcpService,
@@ -149,6 +149,7 @@ const make = Effect.gen(function* () {
         `Thread ${threadId} was not found.`,
       );
     }
+    yield* assertClientProjectAccess(scope, shell.projectId, "project:thread.operate");
     const requestKey =
       input.clientRequestId === undefined ? yield* random.uuidV4() : input.clientRequestId;
     const updateCommandId = commandId({

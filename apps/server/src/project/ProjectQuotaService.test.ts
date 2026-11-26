@@ -43,6 +43,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
 import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ProjectSecrets from "./ProjectSecrets.ts";
 import { toSafeThreadAttachmentSegment } from "../attachmentStore.ts";
 import * as CheckpointStore from "../checkpointing/CheckpointStore.ts";
 import * as ServerConfig from "../config.ts";
@@ -719,6 +720,7 @@ it.effect(
             ),
             Layer.provide(Layer.mock(ServerRuntimeStartup.ServerRuntimeStartup)({})),
             Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
+            Layer.provide(Layer.mock(ProjectSecrets.ProjectSecrets)({})),
             Layer.provideMerge(
               HttpPlatform.layer.pipe(
                 Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),

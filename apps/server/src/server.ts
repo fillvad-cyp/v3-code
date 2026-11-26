@@ -191,6 +191,7 @@ import * as ApiTokenService from "./identity/ApiTokenService.ts";
 import * as AuditService from "./identity/AuditService.ts";
 import * as PrincipalLimitsService from "./identity/PrincipalLimitsService.ts";
 import * as ProjectQuotaService from "./project/ProjectQuotaService.ts";
+import * as ProjectSecrets from "./project/ProjectSecrets.ts";
 import * as InvitationService from "./identity/InvitationService.ts";
 import * as MembershipService from "./identity/MembershipService.ts";
 import * as Passwords from "./identity/Passwords.ts";
@@ -199,6 +200,7 @@ import * as AuditEvents from "./persistence/AuditEvents.ts";
 import * as Invitations from "./persistence/Invitations.ts";
 import * as MemberLimits from "./persistence/MemberLimits.ts";
 import * as Principals from "./persistence/Principals.ts";
+import * as ProjectSecretRepo from "./persistence/ProjectSecrets.ts";
 import * as Memberships from "./persistence/Memberships.ts";
 import * as RecoveryCodes from "./persistence/RecoveryCodes.ts";
 import * as SessionPrincipals from "./persistence/SessionPrincipals.ts";
@@ -644,6 +646,14 @@ const layerAuditService = AuditService.layer.pipe(
   Layer.provide(layerServerSettings),
 );
 
+const layerProjectSecrets = ProjectSecrets.layer.pipe(
+  Layer.provide(ProjectSecretRepo.layer),
+  Layer.provide(layerIdentityRepositories),
+  Layer.provide(layerAccess),
+  Layer.provide(layerPersistence),
+  Layer.provide(ServerSecretStore.layer),
+);
+
 const layerIdentity = Layer.mergeAll(
   layerMembership,
   layerAuditService,
@@ -927,6 +937,7 @@ const layerRuntimeCoreDependencies = layerRuntimeCoreDependenciesBase.pipe(
   Layer.provideMerge(layerServerEnvironment),
   Layer.provideMerge(layerAuth),
   Layer.provideMerge(layerAccess),
+  Layer.provideMerge(layerProjectSecrets),
   Layer.provideMerge(layerIdentity),
   Layer.provideMerge(AuditService.layerRetention.pipe(Layer.provide(layerAuditService))),
   Layer.provideMerge(

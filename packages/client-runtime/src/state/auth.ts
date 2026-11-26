@@ -3,6 +3,7 @@ import {
   type ApiTokenId,
   AuthAccessReadScope,
   AuthAccessWriteScope,
+  AuthProvidersManageScope,
   type AuthAccessSnapshot,
   type AuthApproveConnectDeviceInput,
   type AuthEnvironmentScope,
@@ -162,6 +163,11 @@ export function createAuthEnvironmentAtoms<R, E>(
     runtime,
     [],
     "environment-data:server:auth-authenticated-permission",
+  );
+  const providersManagePermissionAtom = createAuthScopePermissionAtom(
+    runtime,
+    [AuthProvidersManageScope],
+    "environment-data:server:auth-providers-manage-permission",
   );
 
   return {
@@ -452,6 +458,63 @@ export function createAuthEnvironmentAtoms<R, E>(
           }),
       }),
       { permissionAtom: authenticatedPermissionAtom },
+    ),
+    listProjectSecrets: Object.assign(
+      createEnvironmentQueryAtomFamily(runtime, {
+        label: "environment-data:server:projects-list-secrets",
+        staleTimeMs: 10_000,
+        execute: (input: { readonly projectId: ProjectId }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "projects",
+            method: "GET",
+            url: (urls) => urls.listSecrets({ params: { id: input.projectId } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.listSecrets({ headers, params: { id: input.projectId } }),
+          }),
+      }),
+      { permissionAtom: providersManagePermissionAtom },
+    ),
+    setProjectSecret: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:projects-set-secret",
+        execute: (input: {
+          readonly projectId: ProjectId;
+          readonly name: string;
+          readonly value: string;
+        }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "projects",
+            method: "PUT",
+            url: (urls) => urls.setSecret({ params: { id: input.projectId, name: input.name } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.setSecret({
+                headers,
+                params: { id: input.projectId, name: input.name },
+                payload: { value: input.value },
+              }),
+          }),
+      }),
+      { permissionAtom: providersManagePermissionAtom },
+    ),
+    deleteProjectSecret: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:projects-delete-secret",
+        execute: (input: { readonly projectId: ProjectId; readonly name: string }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "projects",
+            method: "DELETE",
+            url: (urls) => urls.deleteSecret({ params: { id: input.projectId, name: input.name } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.deleteSecret({
+                headers,
+                params: { id: input.projectId, name: input.name },
+              }),
+          }),
+      }),
+      { permissionAtom: providersManagePermissionAtom },
     ),
     accessChanges: createEnvironmentSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:auth-access-changes",

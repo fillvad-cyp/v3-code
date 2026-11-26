@@ -67,6 +67,7 @@ import * as ProjectHttp from "./project/http.ts";
 import * as ProjectCloneTracker from "./project/ProjectCloneTracker.ts";
 import * as ProjectEnrichment from "./project/ProjectEnrichmentService.ts";
 import * as ProjectQuotaService from "./project/ProjectQuotaService.ts";
+import * as ProjectSecrets from "./project/ProjectSecrets.ts";
 import * as PrincipalLimitsService from "./identity/PrincipalLimitsService.ts";
 import * as ProjectService from "./project/ProjectService.ts";
 import * as ServerRuntimeStartup from "./serverRuntimeStartup.ts";
@@ -747,6 +748,7 @@ describe("Projects list and search filtering", () => {
                   getWarningsForProjects: () => Effect.succeed(new Map()),
                 }),
               ),
+              Layer.provide(Layer.mock(ProjectSecrets.ProjectSecrets)({})),
               Layer.provide(HttpPlatform.layer),
               Layer.provide(Etag.layerWeak),
               Layer.provide(NodeServices.layer),

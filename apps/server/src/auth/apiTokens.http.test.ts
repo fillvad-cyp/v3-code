@@ -64,6 +64,7 @@ import * as ProjectCloneTracker from "../project/ProjectCloneTracker.ts";
 import { ProjectEnrichmentService } from "../project/ProjectEnrichmentService.ts";
 import * as ProjectHttp from "../project/http.ts";
 import * as ProjectQuotaService from "../project/ProjectQuotaService.ts";
+import * as ProjectSecrets from "../project/ProjectSecrets.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import * as ServerSettings from "../serverSettings.ts";
@@ -239,6 +240,7 @@ it.live(
       const layerProjectQuota = Layer.mock(ProjectQuotaService.ProjectQuotaService)({
         getWarningsForProjects: () => Effect.succeed(new Map()),
       });
+      const layerProjectSecrets = Layer.mock(ProjectSecrets.ProjectSecrets)({});
 
       const baseAppLayer = Layer.mergeAll(
         layerIdentity,
@@ -248,6 +250,7 @@ it.live(
         layerStartup,
         layerCloneTracker,
         layerProjectQuota,
+        layerProjectSecrets,
         OrchestrationEventStore.layer,
         ProjectStore.layer,
       ).pipe(

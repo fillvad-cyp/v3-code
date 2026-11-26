@@ -295,7 +295,15 @@ const make = Effect.gen(function* () {
       Effect.map(Option.fromNullishOr),
       Effect.mapError((cause) => new Failure({ cause })),
     );
-    if (Option.isNone(thread) || thread.value.deletedAt !== null) {
+    if (
+      Option.isNone(thread) ||
+      thread.value.deletedAt !== null ||
+      !McpInvocationContext.clientHasProjectCapability(
+        scope,
+        thread.value.projectId,
+        "project:read",
+      )
+    ) {
       return yield* threadNotFound(engine, scope, threadId, `Thread ${threadId} was not found.`);
     }
     return thread.value;
@@ -357,9 +365,12 @@ const make = Effect.gen(function* () {
             Effect.orElseSucceed(() => null),
             Effect.map((shell) => shell ?? undefined),
           );
-    const known = yield* projects
+    const allowedProjects = McpInvocationContext.clientAllowedProjectIds(scope);
+    const known = (yield* projects
       .listShells()
-      .pipe(Effect.mapError((cause) => new PullRequestListFailedError({ cause })));
+      .pipe(Effect.mapError((cause) => new PullRequestListFailedError({ cause })))).filter(
+      (project) => allowedProjects === undefined || allowedProjects.has(project.id),
+    );
     const callerProject =
       callerThread === undefined
         ? undefined

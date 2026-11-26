@@ -35,6 +35,8 @@ export const AuditAction = Schema.Literals([
   "token.revoked",
   "terminal.opened",
   "secret.read",
+  "project.secret.set",
+  "project.secret.deleted",
   "asset.url.issued",
   "preview.tunnel.opened",
   "authorization.denied",

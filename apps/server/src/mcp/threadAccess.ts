@@ -7,6 +7,7 @@ import {
   type EnvironmentId,
   isRuntimeModeAbove,
   OrchestratorMcpFailure,
+  type ProjectCapability,
   type ProjectId,
   type ProviderInstanceId,
   type ProviderInteractionMode,
@@ -67,10 +68,15 @@ export const threadNotFound = Effect.fn("OrchestratorMcpService.threadNotFound")
   threadId: ThreadId,
   message: string,
 ) {
+  const allowedProjects = McpInvocationContext.clientAllowedProjectIds(scope);
   let suggested: ThreadId | null = null;
   for (const candidate of candidateThreadIds(threadId, scope.environmentId)) {
     const shell = yield* threads.getThreadShell(candidate).pipe(Effect.orElseSucceed(() => null));
-    if (shell !== null && shell.deletedAt === null) {
+    if (
+      shell !== null &&
+      shell.deletedAt === null &&
+      (allowedProjects === undefined || allowedProjects.has(shell.projectId))
+    ) {
       suggested = candidate;
       break;
     }
@@ -262,6 +268,20 @@ const resolveThreadId = (context: Caller, threadId: ThreadId | undefined) =>
           }),
         );
 
+export const assertClientProjectAccess = (
+  scope: Pick<McpInvocationContext.McpInvocationScope, "client">,
+  projectId: ProjectId | string,
+  capability: ProjectCapability,
+): Effect.Effect<void, OrchestratorMcpFailure> =>
+  McpInvocationContext.clientHasProjectCapability(scope, projectId, capability)
+    ? Effect.void
+    : Effect.fail(
+        new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message: `This MCP client does not have ${capability} access to project ${projectId}.`,
+        }),
+      );
+
 export const readThread = Effect.fn("mcp.readThread")(function* <
   K extends ProjectionRecordField = never,
 >(threadId?: ThreadId, fields: ReadonlyArray<K> = [], filter?: ProjectionRecordFilter) {
@@ -276,6 +296,7 @@ export const readThread = Effect.fn("mcp.readThread")(function* <
       "The thread was not found.",
     );
   }
+  yield* assertClientProjectAccess(context.scope, shell.projectId, "project:read");
   const projection = yield* context.threads
     .getProjectThreadRecords({ projectId: shell.projectId, threadId: targetId }, fields, {
       turnItemTypes: ["user_input_request"],

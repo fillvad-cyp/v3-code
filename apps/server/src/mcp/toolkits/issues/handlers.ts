@@ -81,7 +81,15 @@ const make = Effect.gen(function* () {
       Effect.map(Option.fromNullishOr),
       Effect.mapError((cause) => new IssueLinkFailedError({ cause })),
     );
-    if (Option.isNone(thread) || thread.value.deletedAt !== null) {
+    if (
+      Option.isNone(thread) ||
+      thread.value.deletedAt !== null ||
+      !McpInvocationContext.clientHasProjectCapability(
+        scope,
+        thread.value.projectId,
+        "project:read",
+      )
+    ) {
       return yield* new IssueThreadNotFoundError({ threadId });
     }
     return thread.value;
@@ -93,9 +101,12 @@ const make = Effect.gen(function* () {
     select?: { readonly key?: string | undefined; readonly scope?: string | undefined },
   ) {
     // A named project skips the caller's thread, so the capability is checked here too.
-    yield* McpInvocationContext.requireMcpCapability("issues");
+    const scope = yield* McpInvocationContext.requireMcpCapability("issues");
     const projectId = requested ?? (yield* callerThread())?.projectId;
     if (projectId === undefined) return yield* new IssueProjectRequiredError();
+    if (!McpInvocationContext.clientHasProjectCapability(scope, projectId, "project:read")) {
+      return yield* new IssueProjectNotFoundError({ projectId });
+    }
     return yield* issues.projectScope(projectId, select).pipe(
       Effect.catchTags({
         IssueUnavailableError: () => Effect.fail(new IssueProjectNotFoundError({ projectId })),

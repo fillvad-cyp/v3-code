@@ -7,9 +7,16 @@ import {
   ClientSurface,
   ClientWebDeployment,
   NonNegativeInt,
+  ProjectId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
-import { Principal, ProjectRole, SessionBinding, SessionBindingKind } from "./membership.ts";
+import {
+  Principal,
+  PrincipalCeilingTemplate,
+  ProjectRole,
+  SessionBinding,
+  SessionBindingKind,
+} from "./membership.ts";
 import { RuntimeMode } from "./providerPolicy.ts";
 
 export const ServerAuthPolicy = Schema.Literals([
@@ -296,19 +303,6 @@ export const AuthMcpClientAccess = Schema.Literals([
   "full-access",
 ]);
 export type AuthMcpClientAccess = typeof AuthMcpClientAccess.Type;
-
-/** The scopes an agent session gets for an access level, and a pairing code must carry. */
-export const mcpClientScopes = (access: AuthMcpClientAccess): ReadonlyArray<AuthGrantScope> =>
-  access === "read-only"
-    ? [AuthOrchestrationReadScope]
-    : access === "full-access"
-      ? [
-          AuthOrchestrationReadScope,
-          AuthOrchestrationOperateScope,
-          AuthSettingsWriteScope,
-          AuthSourceControlWriteScope,
-        ]
-      : [AuthOrchestrationReadScope, AuthOrchestrationOperateScope];
 
 /** The random part of a one-time pairing code: this many characters from this alphabet. */
 export const PAIRING_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
@@ -655,6 +649,12 @@ export const AuthMcpAuthorizationRequest = Schema.Struct({
 });
 export type AuthMcpAuthorizationRequest = typeof AuthMcpAuthorizationRequest.Type;
 
+export const AuthMcpApprovalProjectOption = Schema.Struct({
+  id: ProjectId,
+  title: Schema.String,
+});
+export type AuthMcpApprovalProjectOption = typeof AuthMcpApprovalProjectOption.Type;
+
 /** Server-validated request details, trusted by the client only for display. */
 export const AuthMcpApprovalDetails = Schema.Struct({
   /** Self-declared by the client, so shown as such. */
@@ -664,6 +664,14 @@ export const AuthMcpApprovalDetails = Schema.Struct({
   csrfToken: Schema.optionalKey(Schema.String),
   /** Only scopes held by this session qualify; others need a pairing code. Absent with `csrfToken`. */
   oneClickAccess: Schema.optionalKey(Schema.Array(AuthMcpClientAccess)),
+  /** True when the requesting client is another T3 Code environment's peer link (owner-only, environment-bound). */
+  isPeerLink: Schema.optionalKey(Schema.Boolean),
+  /** True when the approving session is the environment owner; false for project-admin members. */
+  approverIsOwner: Schema.optionalKey(Schema.Boolean),
+  /** Projects the approving session may bind this MCP client to. */
+  availableProjects: Schema.optionalKey(Schema.Array(AuthMcpApprovalProjectOption)),
+  /** Scope ceiling templates within the approving session's own ceiling. */
+  availableCeilings: Schema.optionalKey(Schema.Array(PrincipalCeilingTemplate)),
   /** A managed policy's runtime-mode ceiling; the page loads without the server's config. */
   runtimeModeCeiling: Schema.optionalKey(
     Schema.Struct({ organization: Schema.String, maxRuntimeMode: RuntimeMode }),
@@ -681,10 +689,14 @@ export const AuthMcpApprovalDecision = Schema.Union([
   Schema.TaggedStruct("pairing-code", {
     access: AuthMcpClientAccess,
     code: TrimmedNonEmptyString,
+    projectIds: Schema.optionalKey(Schema.Array(ProjectId)),
+    ceiling: Schema.optionalKey(PrincipalCeilingTemplate),
   }),
   Schema.TaggedStruct("browser-session", {
     access: AuthMcpClientAccess,
     csrfToken: Schema.String,
+    projectIds: Schema.optionalKey(Schema.Array(ProjectId)),
+    ceiling: Schema.optionalKey(PrincipalCeilingTemplate),
   }),
 ]);
 export type AuthMcpApprovalDecision = typeof AuthMcpApprovalDecision.Type;

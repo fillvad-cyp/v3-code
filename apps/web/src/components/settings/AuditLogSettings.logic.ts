@@ -53,6 +53,8 @@ export const AUDIT_ACTION_LABELS: Readonly<Record<AuditAction, string>> = {
   "token.revoked": msg("API token revoked"),
   "terminal.opened": msg("Terminal opened"),
   "secret.read": msg("Secret read"),
+  "project.secret.set": msg("Project secret updated"),
+  "project.secret.deleted": msg("Project secret deleted"),
   "asset.url.issued": msg("Asset URL issued"),
   "preview.tunnel.opened": msg("Preview tunnel opened"),
   "authorization.denied": msg("Authorization denied"),

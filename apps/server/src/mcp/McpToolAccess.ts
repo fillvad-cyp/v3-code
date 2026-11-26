@@ -1,4 +1,5 @@
 import {
+  AuthOrchestrationOperateScope,
   type EnvironmentId,
   type OrchestrationV2LinkOrigin,
   OrchestratorMcpEnvironmentTarget,
@@ -33,6 +34,7 @@ import * as McpInvocationContext from "./McpInvocationContext.ts";
 import { resolveInteractionMode, resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import {
   assertBroadestAccess,
+  assertClientProjectAccess,
   assertFullAccess,
   assertLiveCaller,
   assertTargetWithinLimits,
@@ -121,7 +123,9 @@ export class Declaration<out Handler> {
 
 const refuseReadOnlyClient = McpInvocationContext.McpInvocationContext.pipe(
   Effect.flatMap((scope) =>
-    scope.client?.access === "read-only"
+    scope.client?.access === "read-only" ||
+    (scope.client?.scopes !== undefined &&
+      !scope.client.scopes.includes(AuthOrchestrationOperateScope))
       ? Effect.fail(
           new OrchestratorMcpFailure({
             code: "capability_denied",
@@ -132,6 +136,16 @@ const refuseReadOnlyClient = McpInvocationContext.McpInvocationContext.pipe(
       : Effect.void,
   ),
 );
+
+const assertNotProjectScoped = (caller: Caller, what: string) =>
+  McpInvocationContext.isProjectScopedClient(caller.scope)
+    ? Effect.fail(
+        new OrchestratorMcpFailure({
+          code: "capability_denied",
+          message: `This MCP client is scoped to specific projects and cannot ${what}.`,
+        }),
+      )
+    : Effect.void;
 
 const writingCaller = refuseReadOnlyClient.pipe(
   Effect.andThen(loadCaller()),
@@ -201,6 +215,7 @@ export const writesOwnerWork = <P, A, E, R>(
 ) => {
   const check = orchestratingCaller.pipe(
     Effect.tap((caller) => assertNotLinked(caller, what)),
+    Effect.tap((caller) => assertNotProjectScoped(caller, what)),
     Effect.tap((caller) => assertBroadestAccess(caller, what)),
   );
   return declare(
@@ -234,6 +249,11 @@ export const writesThreads = <P, A, E, R>(
             .getThreadShell(threadId)
             .pipe(Effect.mapError(unavailable));
           if (target !== null && target.deletedAt === null) {
+            yield* assertClientProjectAccess(
+              caller.scope,
+              target.projectId,
+              "project:thread.operate",
+            );
             yield* assertTargetWithinLimits(caller.limits, target);
             yield* assertSameLink(caller, target);
           }
@@ -358,6 +378,11 @@ export const writesEnvironment = <P, A, E, R>(
      * everything already here as it was.
      */
     readonly linkedCallers?: "allowed";
+    /**
+     * Whether a project-scoped MCP client may reach the handler, which then checks
+     * `assertClientProjectAccess` for the specific target project.
+     */
+    readonly projectScoped?: "allowed";
   },
 ) => {
   const check = orchestratingCaller.pipe(
@@ -365,6 +390,11 @@ export const writesEnvironment = <P, A, E, R>(
       options?.linkedCallers === "allowed"
         ? Effect.void
         : assertNotLinked(caller, changesEnvironment),
+    ),
+    Effect.tap((caller) =>
+      options?.projectScoped === "allowed"
+        ? Effect.void
+        : assertNotProjectScoped(caller, changesEnvironment),
     ),
     Effect.tap((caller) =>
       assertFullAccessNamingLink(caller, fullAccessRequired, changesEnvironment),

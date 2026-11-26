@@ -18,6 +18,7 @@ import {
   AuthTerminalReadScope,
   type AuthEnvironmentScope,
   type AuthGrantScope,
+  type AuthMcpClientAccess,
 } from "./auth.ts";
 import type { PrincipalCeilingTemplate, ProjectCapability, ProjectRole } from "./membership.ts";
 
@@ -228,4 +229,33 @@ export function roleFitsCeiling(
   role: ProjectRole,
 ): boolean {
   return scopesFitCeiling(ceiling, ROLE_SCOPES[role]);
+}
+
+/** The project role an MCP client access level corresponds to. */
+export function mcpClientRole(access: AuthMcpClientAccess): ProjectRole {
+  switch (access) {
+    case "read-only":
+      return "viewer";
+    case "approval-required":
+      return "operator";
+    case "auto-accept-edits":
+    case "auto":
+      return "developer";
+    case "full-access":
+      return "admin";
+  }
+}
+
+/**
+ * The scopes an MCP client session gets for an access level, expanded to its role-equivalent
+ * scopes and optionally intersected with a ceiling template or explicit scope ceiling.
+ */
+export function mcpClientScopes(
+  access: AuthMcpClientAccess,
+  ceiling?: PrincipalCeilingTemplate | ReadonlyArray<AuthEnvironmentScope>,
+): ReadonlyArray<AuthGrantScope> {
+  const base = ROLE_SCOPES[mcpClientRole(access)];
+  if (ceiling === undefined) return base;
+  const allowed = new Set<string>(typeof ceiling === "string" ? CEILING_SCOPES[ceiling] : ceiling);
+  return base.filter((scope) => allowed.has(scope));
 }

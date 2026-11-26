@@ -199,6 +199,7 @@ import * as OrchestrationEventStore from "./persistence/OrchestrationEventStore.
 import { userFacingDispatchErrorMessage } from "./orchestration-v2/UserFacingErrors.ts";
 import * as ProviderRegistry from "./provider/ProviderRegistry.ts";
 import * as SecretCheck from "./secrets/SecretCheck.ts";
+import { SecretResolutionActor } from "./secrets/SecretResolver.ts";
 import * as AcpRegistrySessions from "./provider/AcpRegistrySessions.ts";
 import * as ProviderInstanceRegistry from "./provider/ProviderInstanceRegistry.ts";
 import * as AcpRegistrySupport from "@t3tools/provider-acp-registry/server/AcpRegistrySupport";
@@ -3095,7 +3096,12 @@ export const layerWsRpc = (
           ),
         [WS_METHODS.secretsAnswerRequest]: (input) =>
           Effect.annotateCurrentSpan({ "orchestration_v2.thread_id": input.threadId }).pipe(
-            Effect.andThen(secretRequests.answer(input)),
+            Effect.andThen(readCurrentActor),
+            Effect.flatMap((actor) =>
+              secretRequests
+                .answer(input)
+                .pipe(Effect.provideService(SecretResolutionActor, actor)),
+            ),
           ),
         [WS_METHODS.agentFeedbackAnswerRequest]: (input) => feedbackStore.answer(input),
         [WS_METHODS.scheduledTasksListWebhookDeliveries]: (input) =>
@@ -3503,7 +3509,14 @@ export const layerWsRpc = (
             return redactSettingsForActor(settings, actor);
           }),
         [WS_METHODS.serverDiscoverSourceControl]: (_input) => sourceControlDiscovery.discover,
-        [WS_METHODS.serverCheckSecretSource]: (input) => secretCheck.check(input.source),
+        [WS_METHODS.serverCheckSecretSource]: (input) =>
+          readCurrentActor.pipe(
+            Effect.flatMap((actor) =>
+              secretCheck
+                .check(input.source)
+                .pipe(Effect.provideService(SecretResolutionActor, actor)),
+            ),
+          ),
         [WS_METHODS.serverGetTraceDiagnostics]: (_input) =>
           TraceDiagnostics.readTraceDiagnostics({
             traceFilePath: config.serverTracePath,

@@ -188,6 +188,7 @@ export class ProjectService extends Context.Service<
     readonly listPage: (input: {
       readonly cursor: number;
       readonly limit: number;
+      readonly projectIds?: ReadonlySet<string> | undefined;
     }) => Effect.Effect<
       { readonly projects: ReadonlyArray<Project>; readonly nextCursor: number | null },
       ProjectOperationError
@@ -1029,8 +1030,12 @@ export const make = Effect.gen(function* () {
   });
 
   const listPage: ProjectService["Service"]["listPage"] = Effect.fn("ProjectService.listPage")(
-    function* ({ cursor, limit }) {
-      const rows = (yield* listRows).filter((project) => project.deletedAt === null);
+    function* ({ cursor, limit, projectIds }) {
+      const rows = (yield* listRows).filter(
+        (project) =>
+          project.deletedAt === null &&
+          (projectIds === undefined || projectIds.has(project.projectId)),
+      );
       const projects = yield* Effect.forEach(
         rows.slice(cursor, cursor + limit),
         (row) =>

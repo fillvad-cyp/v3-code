@@ -1,6 +1,8 @@
 import {
   AuthAccessWriteScope,
+  type AuthGrantScope,
   type AuthMcpApprovalDecision,
+  type AuthMcpApprovalProjectOption,
   type AuthMcpAuthorizationRequest,
   type AuthMcpAuthorizationServerMetadata,
   type AuthMcpClientRegistration,
@@ -14,8 +16,15 @@ import {
   AuthOrchestrationOperateScope,
   AuthOrchestrationReadScope,
   MCP_PEER_LINK_SOFTWARE_ID,
+  PrincipalCeilingTemplate,
+  PrincipalId,
+  type SessionBinding,
+  ceilingScopes,
+  intersectScopes,
+  mcpClientRole,
   mcpClientScopes,
   parseMcpApprovalCode,
+  scopesFitCeiling,
   type RuntimeMode,
 } from "@t3tools/contracts";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
@@ -31,7 +40,9 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import { HttpServerRequest } from "effect/http";
 
+import * as ProjectAccess from "../access/ProjectAccess.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpHttpServer from "../mcp/McpHttpServer.ts";
 import type * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
@@ -195,8 +206,21 @@ interface PendingCode {
   readonly codeChallenge: string;
   readonly resource: string;
   readonly access: AuthMcpClientAccess;
+  readonly scopes: ReadonlyArray<AuthGrantScope>;
+  readonly principalId?: PrincipalId;
+  readonly binding?: SessionBinding;
   readonly approvedAtRevocationCount: number;
   readonly expiresAtMs: number;
+}
+
+export interface ApprovingSession {
+  readonly csrfToken: string;
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+  readonly isOwner: boolean;
+  readonly principalId?: PrincipalId;
+  readonly ceiling?: ReadonlyArray<AuthEnvironmentScope>;
+  readonly availableProjects: ReadonlyArray<AuthMcpApprovalProjectOption>;
+  readonly availableCeilings: ReadonlyArray<PrincipalCeilingTemplate>;
 }
 
 export type ApprovalDecision = Exclude<AuthMcpApprovalDecision, { readonly _tag: "deny" }>;
@@ -216,10 +240,7 @@ export class McpOAuth extends Context.Service<
     readonly approvingSession: (
       request: HttpServerRequest.HttpServerRequest,
       authorization: AuthorizationRequest,
-    ) => Effect.Effect<
-      | { readonly csrfToken: string; readonly scopes: ReadonlyArray<AuthEnvironmentScope> }
-      | undefined
-    >;
+    ) => Effect.Effect<ApprovingSession | undefined>;
     readonly approve: (input: {
       readonly request: HttpServerRequest.HttpServerRequest;
       readonly authorization: AuthorizationRequest;
@@ -265,6 +286,8 @@ const make = Effect.gen(function* () {
   const random = yield* SecureRandom.SecureRandom;
   const digester = yield* Digest.Digest;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const projectAccessOpt = yield* Effect.serviceOption(ProjectAccess.ProjectAccess);
+  const projectStoreOpt = yield* Effect.serviceOption(ProjectStore.ProjectStoreV2);
   const linksEnabled = serverSettings.getSettings.pipe(
     Effect.map((settings) => settings.linkedEnvironmentsEnabled),
     Effect.orElseSucceed(() => false),
@@ -423,27 +446,90 @@ const make = Effect.gen(function* () {
     } satisfies AuthorizationRequest;
   });
 
+  const listProjectOptions = (): Effect.Effect<ReadonlyArray<AuthMcpApprovalProjectOption>> =>
+    Option.match(projectStoreOpt, {
+      onNone: () => Effect.succeed([]),
+      onSome: (store) =>
+        store.listShells().pipe(
+          Effect.map((shells) =>
+            shells.map((project) => ({ id: project.id, title: project.title })),
+          ),
+          Effect.orElseSucceed(() => [] as ReadonlyArray<AuthMcpApprovalProjectOption>),
+        ),
+    });
+
   const approvingSession: McpOAuth["Service"]["approvingSession"] = (request, authorization) =>
     environmentAuth.authenticateHttpRequest(request).pipe(
-      Effect.flatMap((session) =>
-        // Approving manages access, and a session may only hand out scopes it holds.
-        session.scopes.includes(AuthAccessWriteScope) &&
-        session.scopes.includes(AuthOrchestrationReadScope)
-          ? // The hosted app may get a fresh credential per call, all bound to one browser key.
-            csrfToken(
-              session.proofKeyThumbprint === undefined
-                ? session.sessionId
-                : `dpop:${session.proofKeyThumbprint}`,
-              authorization,
-            ).pipe(Effect.map((token) => ({ csrfToken: token, scopes: session.scopes })))
-          : Effect.undefined,
+      Effect.flatMap(
+        Effect.fnUntraced(function* (session) {
+          const allProjects = yield* listProjectOptions();
+          let effectiveScopes: ReadonlyArray<AuthEnvironmentScope> = session.scopes;
+          let isOwner = true;
+          let principalId = session.principalId;
+          let ceiling: ReadonlyArray<AuthEnvironmentScope> | undefined;
+          let availableProjects = allProjects;
+          let availableCeilings: ReadonlyArray<PrincipalCeilingTemplate> =
+            PrincipalCeilingTemplate.literals;
+
+          if (Option.isSome(projectAccessOpt)) {
+            const access = projectAccessOpt.value;
+            const actor = yield* access.resolve(session);
+            effectiveScopes = access.effectiveScopes(actor);
+            isOwner = actor.isOwner;
+            principalId = actor.principalId;
+            ceiling = actor.ceiling;
+            if (!isOwner) {
+              // Peer links are environment-bound and owner-only.
+              if (authorization.client.peerLink) return undefined;
+              availableProjects = allProjects.filter((project) =>
+                access.can(actor, project.id, "project:members"),
+              );
+              if (availableProjects.length === 0) return undefined;
+              availableCeilings = PrincipalCeilingTemplate.literals.filter(
+                (template) =>
+                  actor.ceiling === undefined ||
+                  scopesFitCeiling(actor.ceiling, ceilingScopes(template)),
+              );
+            }
+          }
+
+          // Approving manages access, and a session may only hand out scopes it holds.
+          if (
+            !effectiveScopes.includes(AuthAccessWriteScope) ||
+            !effectiveScopes.includes(AuthOrchestrationReadScope)
+          ) {
+            return undefined;
+          }
+
+          // The hosted app may get a fresh credential per call, all bound to one browser key.
+          const token = yield* csrfToken(
+            session.proofKeyThumbprint === undefined
+              ? session.sessionId
+              : `dpop:${session.proofKeyThumbprint}`,
+            authorization,
+          );
+          return {
+            csrfToken: token,
+            scopes: effectiveScopes,
+            isOwner,
+            ...(principalId !== undefined ? { principalId } : {}),
+            ...(ceiling !== undefined ? { ceiling } : {}),
+            availableProjects,
+            availableCeilings,
+          } satisfies ApprovingSession;
+        }),
       ),
       Effect.orElseSucceed(() => undefined),
     );
 
   const mintCode = Effect.fn("McpOAuth.mintCode")(function* (
     authorization: AuthorizationRequest,
-    access: AuthMcpClientAccess,
+    grant: {
+      readonly access: AuthMcpClientAccess;
+      readonly scopes: ReadonlyArray<AuthGrantScope>;
+      readonly principalId?: PrincipalId;
+      readonly binding?: SessionBinding;
+    },
     approvedAtRevocationCount: number,
   ) {
     const now = yield* Clock.currentTimeMillis;
@@ -457,7 +543,10 @@ const make = Effect.gen(function* () {
         redirectUri: authorization.redirectUri,
         codeChallenge: authorization.codeChallenge,
         resource: authorization.resource,
-        access,
+        access: grant.access,
+        scopes: grant.scopes,
+        ...(grant.principalId !== undefined ? { principalId: grant.principalId } : {}),
+        ...(grant.binding !== undefined ? { binding: grant.binding } : {}),
         approvedAtRevocationCount,
         expiresAtMs: now + AUTHORIZATION_CODE_TTL_MS,
       });
@@ -468,19 +557,38 @@ const make = Effect.gen(function* () {
 
   const approve: McpOAuth["Service"]["approve"] = Effect.fn("McpOAuth.approve")(function* (input) {
     const { decision } = input;
+    const peerLink = input.authorization.client.peerLink;
+    const requestedProjectIds =
+      decision.projectIds === undefined ? undefined : [...new Set(decision.projectIds)];
+    const requestedCeiling = decision.ceiling;
+    if (
+      peerLink &&
+      ((requestedProjectIds !== undefined && requestedProjectIds.length > 0) ||
+        requestedCeiling !== undefined)
+    ) {
+      return yield* new McpOAuthPageError({
+        description:
+          "Peer links are environment-bound and cannot be scoped to specific projects or ceilings.",
+      });
+    }
     // Read before the approver is checked: "revoke all others" then ends this sign-in whether
     // it lands before the check or after the code is handed out.
     const approvedAtRevocationCount = yield* environmentAuth.otherSessionRevocationCount;
     let access = decision.access;
+    let grantedScopes: ReadonlyArray<AuthGrantScope>;
+    let principalId: PrincipalId | undefined;
+    let binding: SessionBinding | undefined;
+
     if (decision._tag === "pairing-code") {
       // An approval code is for one app's sign-in, never for linking another environment.
-      if (input.authorization.client.peerLink && parseMcpApprovalCode(decision.code)) {
+      if (peerLink && parseMcpApprovalCode(decision.code)) {
         return yield* new McpOAuthPageError({
           description: "Linking needs a plain pairing code, not an app approval code.",
         });
       }
+      const requiredScopes = mcpClientScopes(decision.access, requestedCeiling);
       access = yield* environmentAuth
-        .consumeMcpApprovalCode(decision.code, decision.access, input.authorization.client.peerLink)
+        .consumeMcpApprovalCode(decision.code, decision.access, peerLink, requiredScopes)
         .pipe(
           Effect.catchIf(EnvironmentAuth.isServerAuthInternalError, (cause) =>
             Effect.logError("MCP approval code check failed.", { cause }).pipe(
@@ -494,23 +602,114 @@ const make = Effect.gen(function* () {
             ),
           ),
         );
+      grantedScopes = mcpClientScopes(access, requestedCeiling);
+      if (peerLink) {
+        binding = { _tag: "environment" };
+        principalId = PrincipalId.make("owner");
+      } else if (requestedProjectIds !== undefined && requestedProjectIds.length > 0) {
+        if (Option.isSome(projectStoreOpt)) {
+          const knownIds = new Set((yield* listProjectOptions()).map((project) => project.id));
+          if (!requestedProjectIds.every((id) => knownIds.has(id))) {
+            return yield* new McpOAuthPageError({
+              description: "One or more selected projects were not found.",
+            });
+          }
+        }
+        const role = mcpClientRole(access);
+        binding = {
+          _tag: "projects",
+          projects: requestedProjectIds.map((projectId) => ({ projectId, role })),
+        };
+        principalId = PrincipalId.make("owner");
+      }
     } else {
       const session = yield* approvingSession(input.request, input.authorization);
       if (
         session === undefined ||
-        !timingSafeEqualBase64Url(decision.csrfToken, session.csrfToken) ||
-        !mcpClientScopes(decision.access).every((scope) => session.scopes.includes(scope))
+        !timingSafeEqualBase64Url(decision.csrfToken, session.csrfToken)
       ) {
         return yield* new McpOAuthPageError({
           description: "Your session cannot approve this request. Enter a pairing code instead.",
         });
       }
+      if (peerLink && !session.isOwner) {
+        return yield* new McpOAuthPageError({
+          description: "Only the environment owner can approve a peer link.",
+        });
+      }
+      if (requestedCeiling !== undefined && !session.availableCeilings.includes(requestedCeiling)) {
+        return yield* new McpOAuthPageError({
+          description: "The selected scope ceiling exceeds your own access.",
+        });
+      }
+      const effectiveCeiling =
+        requestedCeiling !== undefined
+          ? session.ceiling === undefined
+            ? ceilingScopes(requestedCeiling)
+            : intersectScopes(session.ceiling, ceilingScopes(requestedCeiling))
+          : session.ceiling;
+      grantedScopes = mcpClientScopes(access, effectiveCeiling);
+      if (!grantedScopes.every((scope) => session.scopes.includes(scope))) {
+        return yield* new McpOAuthPageError({
+          description: "Your session cannot approve this request. Enter a pairing code instead.",
+        });
+      }
+      if (peerLink) {
+        binding = { _tag: "environment" };
+        principalId = session.principalId;
+      } else if (!session.isOwner) {
+        if (requestedProjectIds === undefined || requestedProjectIds.length === 0) {
+          return yield* new McpOAuthPageError({
+            description: "Select at least one project you administer.",
+          });
+        }
+        const allowedIds = new Set(session.availableProjects.map((project) => project.id));
+        if (!requestedProjectIds.every((id) => allowedIds.has(id))) {
+          return yield* new McpOAuthPageError({
+            description: "You can only approve MCP access for projects you administer.",
+          });
+        }
+        const role = mcpClientRole(access);
+        binding = {
+          _tag: "projects",
+          projects: requestedProjectIds.map((projectId) => ({ projectId, role })),
+        };
+        principalId = session.principalId;
+      } else if (requestedProjectIds !== undefined && requestedProjectIds.length > 0) {
+        if (Option.isSome(projectStoreOpt)) {
+          const knownIds = new Set(session.availableProjects.map((project) => project.id));
+          if (!requestedProjectIds.every((id) => knownIds.has(id))) {
+            return yield* new McpOAuthPageError({
+              description: "One or more selected projects were not found.",
+            });
+          }
+        }
+        const role = mcpClientRole(access);
+        binding = {
+          _tag: "projects",
+          projects: requestedProjectIds.map((projectId) => ({ projectId, role })),
+        };
+        principalId = session.principalId ?? PrincipalId.make("owner");
+      } else {
+        binding = { _tag: "environment" };
+        principalId = session.principalId;
+      }
     }
-    const code = yield* mintCode(input.authorization, access, approvedAtRevocationCount);
+    const code = yield* mintCode(
+      input.authorization,
+      {
+        access,
+        scopes: grantedScopes,
+        ...(principalId !== undefined ? { principalId } : {}),
+        ...(binding !== undefined ? { binding } : {}),
+      },
+      approvedAtRevocationCount,
+    );
     yield* Effect.logInfo("Approved an MCP client sign-in.", {
       client: input.authorization.client.name,
       access,
       method: decision._tag,
+      bindingKind: binding?._tag ?? "environment",
     });
     return redirectWith(input.authorization.redirectUri, {
       code,
@@ -569,6 +768,9 @@ const make = Effect.gen(function* () {
         .issueMcpClientSession({
           label: pending.clientName,
           access: pending.access,
+          scopes: pending.scopes,
+          ...(pending.principalId !== undefined ? { principalId: pending.principalId } : {}),
+          ...(pending.binding !== undefined ? { binding: pending.binding } : {}),
           peerLink: pending.peerLink,
           client: deriveAuthClientMetadata({ request }),
           approvedAtRevocationCount: pending.approvedAtRevocationCount,
@@ -588,7 +790,7 @@ const make = Effect.gen(function* () {
         access_token: issued.token,
         token_type: "Bearer",
         expires_in: Math.max(0, Math.floor((issued.expiresAt.epochMilliseconds - now) / 1000)),
-        scope: encodeOAuthScope(mcpClientScopes(pending.access)),
+        scope: encodeOAuthScope(pending.scopes),
       };
     },
   );
@@ -631,6 +833,11 @@ export const layerMcpClientAuthenticator = Layer.effect(
                     sessionId: client.sessionId,
                     label: client.label,
                     access: client.access,
+                    scopes: client.scopes,
+                    ...(client.principalId !== undefined
+                      ? { principalId: client.principalId }
+                      : {}),
+                    ...(client.binding !== undefined ? { binding: client.binding } : {}),
                     linked: client.peerLink,
                     linkExpiresAt: client.linkExpiresAt,
                   },
