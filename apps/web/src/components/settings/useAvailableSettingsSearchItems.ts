@@ -12,6 +12,7 @@ import { usePeerLinkHosts } from "~/state/peerLinks";
 import { useEnvironmentQuery } from "~/state/query";
 import { useEnvironmentScope } from "~/state/session";
 import { isWslSettingsRowVisible } from "./ConnectionsSettings.logic";
+import { supportsAuditCapability, supportsMembersCapability } from "./MembersSettings.logic";
 import { isProviderSettingsEnvironmentAvailable } from "./ProviderSettingsPanel.logic";
 import {
   filterAvailableSettingsSearchItems,
@@ -50,6 +51,18 @@ export function useAvailableSettingsSearchItems() {
       (environment) =>
         environment.connection.phase === "connected" &&
         environment.serverConfig?.environment.capabilities.agentFeedback === true,
+    ) === true;
+  const hasMembersEnvironment =
+    environments.some(
+      (environment) =>
+        environment.connection.phase === "connected" &&
+        supportsMembersCapability(environment.serverConfig?.environment.capabilities),
+    ) === true;
+  const hasAuditEnvironment =
+    environments.some(
+      (environment) =>
+        environment.connection.phase === "connected" &&
+        supportsAuditCapability(environment.serverConfig?.environment.capabilities),
     ) === true;
   const hasTextGeneratorsEnvironment =
     environments.some(
@@ -90,6 +103,8 @@ export function useAvailableSettingsSearchItems() {
     hasPeerLinkHost,
     hasFastWorktreeCheckoutEnvironment,
     hasAgentFeedbackEnvironment,
+    hasMembersEnvironment,
+    hasAuditEnvironment,
     hasTextGeneratorsEnvironment,
     hasPrimaryEnvironment: primaryEnvironmentId !== null,
     hasSecretProvidersEnvironment,

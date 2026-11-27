@@ -20,6 +20,7 @@ import {
   RELAY_URL_SECRET,
 } from "../cloud/config.ts";
 import * as ServerConfig from "../config.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ServerEnvironment from "./ServerEnvironment.ts";
 
 const layerServerEnvironment = (baseDir: string) =>
@@ -109,11 +110,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
           Effect.provideService(HostProcess.Environment, {}),
         );
         expect(descriptor.capabilities.serverInstallation).toEqual(
-          mode === "web" && platform !== "win32" ? { kind: "npm-global", prefix } : undefined,
+          platform !== "win32" ? { kind: "npm-global", prefix } : undefined,
         );
-        expect(descriptor.capabilities.serverSelfUpdate).toBe(
-          mode === "web" ? undefined : "desktop-managed",
-        );
+        expect(descriptor.capabilities.serverSelfUpdate).toBeUndefined();
         expect(descriptor.capabilities).toMatchObject({
           settledWorktreeCleanup: true,
           storageCleanupRun: true,
@@ -124,12 +123,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
       }
     }),
   );
-  it.effect.each([
-    { desktopAppUpdate: false, advertised: undefined },
-    { desktopAppUpdate: true, advertised: true },
-  ])(
-    "advertises desktop app updates only when the desktop can install them ($desktopAppUpdate)",
-    ({ desktopAppUpdate, advertised }) =>
+  it.effect.each([{ desktopAppUpdate: false }, { desktopAppUpdate: true }])(
+    "never advertises desktop app updates while self-updates are disabled ($desktopAppUpdate)",
+    ({ desktopAppUpdate }) =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const baseDir = yield* fs.makeTempDirectoryScoped();
@@ -161,10 +157,10 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
           desktopAppChannelSwitch: capabilities.desktopAppChannelSwitch,
           serverSelfUpdateProgress: capabilities.serverSelfUpdateProgress,
         }).toEqual({
-          serverSelfUpdate: "desktop-managed",
-          desktopAppUpdate: advertised,
-          desktopAppChannelSwitch: advertised,
-          serverSelfUpdateProgress: advertised,
+          serverSelfUpdate: undefined,
+          desktopAppUpdate: undefined,
+          desktopAppChannelSwitch: undefined,
+          serverSelfUpdateProgress: undefined,
         });
       }),
   );
@@ -184,8 +180,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
               ConfigProvider.layer(
                 ConfigProvider.fromEnv({
                   env: {
-                    T3CODE_ENVIRONMENT_LABEL: " MacBook ",
-                    T3CODE_ENVIRONMENT_MACHINE_KIND: "laptop",
+                    V3CODE_ENVIRONMENT_LABEL: " MacBook ",
+                    V3CODE_ENVIRONMENT_MACHINE_KIND: "laptop",
                   },
                 }),
               ),
@@ -327,7 +323,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
     }),
   );
 
-  it.effect("reports agent activity publishing from the current secret state", () =>
+  it.effect("keeps agent activity publishing disabled regardless of relay secret state", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const baseDir = yield* fileSystem.makeTempDirectoryScoped({
@@ -357,12 +353,59 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("ServerEnvironmen
 
         yield* secrets.set(RELAY_URL_SECRET, encode("https://relay.example"));
         const linked = yield* serverEnvironment.getDescriptor;
-        expect(linked.capabilities.agentActivityPublishing).toBe(true);
+        expect(linked.capabilities.agentActivityPublishing).toBe(false);
 
         yield* secrets.set(PUBLISH_AGENT_ACTIVITY_SECRET, encode("false"));
         const disabled = yield* serverEnvironment.getDescriptor;
         expect(disabled.capabilities.agentActivityPublishing).toBe(false);
       }).pipe(Effect.provide(layerTest));
     }),
+  );
+
+  it.effect(
+    "sets members, audit, and projectSecrets capabilities only when settings.multiUser is enabled",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "t3-server-environment-multiuser-test-",
+        });
+        const settingsLayer = ServerSettings.layerTest({ multiUser: false });
+        const layerTest = Layer.mergeAll(
+          ServerEnvironment.layer.pipe(
+            Layer.provide(layerEmptySecretStore),
+            Layer.provide(settingsLayer),
+          ),
+          settingsLayer,
+        ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), baseDir)));
+
+        yield* Effect.gen(function* () {
+          const settings = yield* ServerSettings.ServerSettingsService;
+          const serverEnvironment = yield* ServerEnvironment.ServerEnvironment;
+
+          const disabled = yield* serverEnvironment.getDescriptor;
+          expect(disabled.authMode).toBeUndefined();
+          expect(disabled.capabilities.members).toBeUndefined();
+          expect(disabled.capabilities.audit).toBeUndefined();
+          expect(disabled.capabilities.projectSecrets).toBeUndefined();
+          expect(disabled.capabilities.crm).toBeUndefined();
+
+          yield* settings.updateSettings({ multiUser: true });
+          const enabled = yield* serverEnvironment.getDescriptor;
+          expect(enabled.authMode).toBe("multi-user");
+          expect(enabled.capabilities.members).toBe(true);
+          expect(enabled.capabilities.audit).toBe(true);
+          expect(enabled.capabilities.projectSecrets).toBe(true);
+          expect(enabled.capabilities.crm).toBe(true);
+
+          yield* settings.updateSettings({ multiUser: false });
+          const disabledAgain = yield* serverEnvironment.getDescriptor;
+          expect(disabledAgain.authMode).toBeUndefined();
+          expect(disabledAgain.capabilities.members).toBeUndefined();
+          expect(disabledAgain.capabilities.audit).toBeUndefined();
+          expect(disabledAgain.capabilities.projectSecrets).toBeUndefined();
+          expect(disabledAgain.capabilities.crm).toBeUndefined();
+        }).pipe(Effect.provide(layerTest));
+      }),
   );
 });

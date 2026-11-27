@@ -1,13 +1,17 @@
 import {
+  isProjectSecretReference,
   isSecretReference,
   secretReferencesInSettings,
   SettingsSecretUnresolvedError,
+  type SecretReference,
   type SettingsSecretValue,
   withSettingsSecrets,
 } from "@t3tools/contracts";
 import type * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as Effect from "effect/Effect";
 import type * as Schema from "effect/Schema";
+
+import { PROJECT_SECRET_PROVIDER_ID } from "./SecretResolver.ts";
 
 /**
  * Replaces each reference in the slots `schema` declares as `SettingsSecretValue` with the secret
@@ -38,11 +42,18 @@ export const requireSettingsSecret = Effect.fn("SettingsSecrets.require")(functi
   resolver: SecretResolver.SecretResolver["Service"],
   value: SettingsSecretValue,
 ) {
-  if (!isSecretReference(value)) return value;
-  const [secret] = yield* resolver.read([value]);
+  let reference: SecretReference;
+  if (isSecretReference(value)) {
+    reference = value;
+  } else if (isProjectSecretReference(value)) {
+    reference = { provider: PROJECT_SECRET_PROVIDER_ID, reference: value };
+  } else {
+    return value;
+  }
+  const [secret] = yield* resolver.read([reference]);
   if (secret === undefined || secret.trim() === "") {
     return yield* new SettingsSecretUnresolvedError({
-      provider: yield* resolver.label(value.provider),
+      provider: yield* resolver.label(reference.provider),
     });
   }
   return secret;

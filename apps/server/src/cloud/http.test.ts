@@ -8,14 +8,9 @@ import {
   EnvironmentHttpApi,
   EnvironmentId,
 } from "@t3tools/contracts";
-import {
-  RelayEnvironmentLinkProofPayload,
-  type RelayLinkProofRequest,
-} from "@t3tools/contracts/relay";
+import type { RelayLinkProofRequest } from "@t3tools/contracts/relay";
 import * as Effect from "effect/Effect";
-import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
-import * as Schema from "effect/Schema";
 import { HttpClient, HttpServer } from "effect/http";
 import * as Etag from "effect/http/Etag";
 import * as HttpPlatform from "effect/http/HttpPlatform";
@@ -23,8 +18,9 @@ import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as NetAddress from "effect/net/NetAddress";
-import { decodeRelayJwt, RELAY_LINK_PROOF_TYP, verifyRelayJwt } from "@t3tools/shared/relayJwt";
 
+import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as EnvironmentKeys from "./environmentKeys.ts";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as AuthHttp from "../auth/http.ts";
@@ -32,6 +28,19 @@ import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerHttp from "../http.ts";
+import * as ApiTokenService from "../identity/ApiTokenService.ts";
+import * as AuditService from "../identity/AuditService.ts";
+import * as InvitationService from "../identity/InvitationService.ts";
+import * as MembershipService from "../identity/MembershipService.ts";
+import * as Passwords from "../identity/Passwords.ts";
+import * as ApiTokens from "../persistence/ApiTokens.ts";
+import * as AuditEvents from "../persistence/AuditEvents.ts";
+import * as Invitations from "../persistence/Invitations.ts";
+import * as MemberLimits from "../persistence/MemberLimits.ts";
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
+import * as RecoveryCodes from "../persistence/RecoveryCodes.ts";
+import * as SessionPrincipals from "../persistence/SessionPrincipals.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as AgentAwarenessRelay from "../relay/AgentAwarenessRelay.ts";
 import * as CliTokenManager from "./CliTokenManager.ts";
@@ -54,7 +63,6 @@ const proofRequest: RelayLinkProofRequest = {
   },
   origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
 };
-const decodeLinkProofPayload = Schema.decodeUnknownEffect(RelayEnvironmentLinkProofPayload);
 
 class LinkProofTestApi extends HttpApi.make("environment").add(
   EnvironmentHttpApi.groups.auth,
@@ -75,10 +83,47 @@ const layerConfig = Layer.effect(
   }),
 ).pipe(Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-link-proof-test-" })));
 
+const layerIdentityRepositories = Layer.mergeAll(
+  Principals.layer,
+  Memberships.layer,
+  Invitations.layer,
+  AuditEvents.layer,
+  ApiTokens.layer,
+  MemberLimits.layer,
+  RecoveryCodes.layer,
+  SessionPrincipals.layer,
+);
+const layerAccess = ProjectAccess.layer.pipe(
+  Layer.provide(layerIdentityRepositories),
+  Layer.provide(ProjectStore.layer),
+);
+const layerMembership = MembershipService.layer.pipe(
+  Layer.provide(layerAccess),
+  Layer.provide(layerIdentityRepositories),
+);
+const layerIdentity = Layer.mergeAll(
+  InvitationService.layer.pipe(
+    Layer.provide(layerMembership),
+    Layer.provide(layerAccess),
+    Layer.provide(layerIdentityRepositories),
+  ),
+  Passwords.layer.pipe(Layer.provide(layerIdentityRepositories)),
+  AuditService.layer.pipe(
+    Layer.provide(layerAccess),
+    Layer.provide(layerIdentityRepositories),
+    Layer.provide(ServerSettings.layerTest()),
+  ),
+  ApiTokenService.layer.pipe(Layer.provide(layerAccess), Layer.provide(layerIdentityRepositories)),
+  layerMembership,
+  layerAccess,
+  layerIdentityRepositories,
+);
+
 // Real credential issuance, verification, origin checks and signing; no relay or tunnel is started.
 const layerLinkProofRoutes = HttpApiBuilder.layer(LinkProofTestApi).pipe(
   Layer.provide([AuthHttp.layer, ConnectHttp.layer]),
   Layer.provide(AuthHttp.layerAuthenticatedAuth),
+  Layer.provide(layerIdentity),
   Layer.provide(ServerHttp.layerApiBodyLimit),
   Layer.provide(CloudLink.layer),
   Layer.provide(ServerSettings.ServerSettingsService.layerTest()),
@@ -177,7 +222,7 @@ const linkProofClient = Effect.gen(function* () {
 
 describe("link proof over a non-loopback transport", () => {
   it.effect(
-    "signs this server's loopback origin for a remote client allowed to configure the relay",
+    "rejects link proof generation for an authorized caller because cloud relay is disabled",
     () =>
       Effect.gen(function* () {
         const { post, exchange } = yield* linkProofClient;
@@ -190,32 +235,16 @@ describe("link proof over a non-loopback transport", () => {
         expect(paired.status).toBe(200);
         const { credential } = (yield* responseJson(paired)) as { credential: string };
         const token = yield* exchange(credential);
-        // The caller's origin and forwarding headers must not steer the tunnel elsewhere.
         const response = yield* post(
           "/api/connect/link-proof",
           { ...proofRequest, origin: { localHttpHost: "172.24.162.233", localHttpPort: 5432 } },
           { authorization: `Bearer ${token}`, "x-forwarded-host": "evil.example.test" },
         );
-        expect(response.status).toBe(200);
-        expect(response.headers.get("cache-control")).toBe("no-store");
-        const proof = (yield* responseJson(response)) as string;
-        const unverified = yield* decodeRelayJwt(proof).pipe(
-          Effect.flatMap(decodeLinkProofPayload),
-        );
-        yield* TestClock.setTime(unverified.iat * 1_000);
-        const verified = yield* verifyRelayJwt(RelayEnvironmentLinkProofPayload, {
-          publicKey: unverified.environmentPublicKey,
-          token: proof,
-          typ: RELAY_LINK_PROOF_TYP,
-          issuer: "t3-env:wsl-environment",
-          audience: proofRequest.relayIssuer,
+        expect(response.status).toBe(500);
+        expect(yield* responseJson(response)).toMatchObject({
+          message: "Cloud relay is permanently disabled in V3 Code.",
         });
-        expect(verified).toMatchObject({
-          origin: { localHttpHost: "127.0.0.1", localHttpPort: 3773 },
-          endpoint: proofRequest.endpoint,
-          challenge: proofRequest.challenge,
-        });
-      }).pipe(Effect.provide(NodeCrypto.layerSignature)),
+      }),
   );
 
   it.effect("offers Turn on to any session allowed to configure the relay", () =>
@@ -251,20 +280,24 @@ describe("link proof over a non-loopback transport", () => {
     }),
   );
 
-  it.effect("allows relay writers to set preferences without creating a link", () =>
-    Effect.gen(function* () {
-      const { post, exchange } = yield* linkProofClient;
-      const path = "/api/connect/live-activity-preference";
-      const payload = { liveActivitiesEnabled: true };
-      const readToken = yield* exchange(DESKTOP_BOOTSTRAP_TOKEN, "relay:read");
-      const denied = yield* post(path, payload, { authorization: `Bearer ${readToken}` });
-      expect(denied.status).toBe(403);
+  it.effect(
+    "requires relay write scope for live-activity preferences and rejects when cloud relay is disabled",
+    () =>
+      Effect.gen(function* () {
+        const { post, exchange } = yield* linkProofClient;
+        const path = "/api/connect/live-activity-preference";
+        const payload = { liveActivitiesEnabled: true };
+        const readToken = yield* exchange(DESKTOP_BOOTSTRAP_TOKEN, "relay:read");
+        const denied = yield* post(path, payload, { authorization: `Bearer ${readToken}` });
+        expect(denied.status).toBe(403);
 
-      const writeToken = yield* exchange(DESKTOP_BOOTSTRAP_TOKEN, "relay:write");
-      const unlinked = yield* post(path, payload, { authorization: `Bearer ${writeToken}` });
-      expect(unlinked.status).toBe(200);
-      expect(yield* responseJson(unlinked)).toEqual({ ok: false });
-    }),
+        const writeToken = yield* exchange(DESKTOP_BOOTSTRAP_TOKEN, "relay:write");
+        const disabled = yield* post(path, payload, { authorization: `Bearer ${writeToken}` });
+        expect(disabled.status).toBe(500);
+        expect(yield* responseJson(disabled)).toMatchObject({
+          message: "Cloud relay is permanently disabled in V3 Code.",
+        });
+      }),
   );
 
   it.effect("requires explicit permission to configure the relay", () =>

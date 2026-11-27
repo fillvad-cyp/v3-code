@@ -368,7 +368,7 @@ const layerTest = Layer.mergeAll(
   Layer.provide(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
@@ -381,7 +381,7 @@ const layerLegacyImportTest = Layer.merge(RuntimeLayer.layer, layerProjectionRep
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerProjectServiceTest),
@@ -1389,7 +1389,7 @@ const layerSharedApplicationDataPlaneTest = Layer.mergeAll(
   Layer.provideMerge(SqlitePersistence.layerMemory),
   Layer.provide(layerCheckpointStoreTest),
   Layer.provide(layerServerConfig),
-  Layer.provide(ServerSettings.layerTest()),
+  Layer.provideMerge(ServerSettings.layerTest()),
   Layer.provide(layerTestProviderInstanceRegistry),
   Layer.provide(layerGitWorkflowTest),
   Layer.provide(layerPlatformTest),
@@ -11296,15 +11296,22 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const eventSink = yield* EventSink.EventSinkV2;
         const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const settings = yield* ServerSettings.ServerSettingsService;
         const threadId = ThreadId.make(`runtime-layer-continuation-start-retry-${stopped}`);
+        const projectId = ProjectId.make(`${threadId}:project`);
         const messageId = (key: string) => MessageId.make(`${threadId}:${key}`);
+        yield* settings.updateSettings({
+          projectSettingsOverrides: {
+            [projectId]: { continueThreadsAfterServerUpdate: true },
+          },
+        });
         yield* orchestrator.dispatch({
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
           commandId: CommandId.make(`${threadId}:create`),
           threadId,
-          projectId: ProjectId.make(`${threadId}:project`),
+          projectId,
           title: "Continuation start retry",
           modelSelection,
           runtimeMode: "full-access",
@@ -11669,14 +11676,21 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
         const orchestrator = yield* Orchestrator.OrchestratorV2;
         const recovery = yield* ProviderRuntimeRecoveryService.ProviderRuntimeRecoveryService;
         const outbox = yield* EffectOutbox.EffectOutboxV2;
+        const settings = yield* ServerSettings.ServerSettingsService;
         const parentThreadId = ThreadId.make(`delegate-resend-${trigger}`);
+        const projectId = ProjectId.make(`${parentThreadId}:project`);
+        yield* settings.updateSettings({
+          projectSettingsOverrides: {
+            [projectId]: { continueThreadsAfterServerUpdate: true },
+          },
+        });
         yield* orchestrator.dispatch({
           type: "thread.create",
           createdBy: "user",
           creationSource: "web",
           commandId: CommandId.make(`${parentThreadId}:create`),
           threadId: parentThreadId,
-          projectId: ProjectId.make(`${parentThreadId}:project`),
+          projectId,
           title: "Delegating parent",
           modelSelection,
           runtimeMode: "full-access",

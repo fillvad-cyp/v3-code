@@ -119,6 +119,14 @@ import Migration0108 from "./Migrations/108_AgentFeedback.ts";
 import Migration0109 from "./Migrations/109_IssueTrackerAccounts.ts";
 import Migration0110 from "./Migrations/110_Workflows.ts";
 import Migration0111 from "./Migrations/111_SupersededRunAttemptIndex.ts";
+import Migration0112 from "./Migrations/112_MultiUser.ts";
+import Migration0113 from "./Migrations/113_InvitationPrincipal.ts";
+import Migration0114 from "./Migrations/114_AccessRevision.ts";
+import Migration0115 from "./Migrations/115_PasswordAndRecovery.ts";
+import Migration0116 from "./Migrations/116_LimitsAndQuotas.ts";
+import Migration0117 from "./Migrations/117_ProjectIsolation.ts";
+import Migration0118 from "./Migrations/118_Crm.ts";
+import Migration0119 from "./Migrations/119_AuditHashChain.ts";
 
 const migrationEntries = [
   [1, "OrchestrationEvents", Migration0001],
@@ -233,6 +241,14 @@ const migrationEntries = [
   [109, "IssueTrackerAccounts", Migration0109],
   [110, "Workflows", Migration0110],
   [111, "SupersededRunAttemptIndex", Migration0111],
+  [112, "MultiUser", Migration0112],
+  [113, "InvitationPrincipal", Migration0113],
+  [114, "AccessRevision", Migration0114],
+  [115, "PasswordAndRecovery", Migration0115],
+  [116, "LimitsAndQuotas", Migration0116],
+  [117, "ProjectIsolation", Migration0117],
+  [118, "Crm", Migration0118],
+  [119, "AuditHashChain", Migration0119],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);

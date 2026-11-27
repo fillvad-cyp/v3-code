@@ -2,6 +2,8 @@ import {
   type AuthMcpApprovalDecision,
   type AuthMcpApprovalDetails,
   type AuthMcpClientAccess,
+  type PrincipalCeilingTemplate,
+  type ProjectId,
   isRuntimeModeAbove,
   parseMcpApprovalCode,
 } from "@t3tools/contracts";
@@ -32,19 +34,43 @@ export function resolveApprovalDecision(input: {
   readonly code: string;
   readonly access: AuthMcpClientAccess;
   readonly details: AuthMcpApprovalDetails;
+  readonly projectIds?: ReadonlyArray<ProjectId>;
+  readonly ceiling?: PrincipalCeilingTemplate | null;
 }): Exclude<AuthMcpApprovalDecision, { readonly _tag: "deny" }> | null {
   const code = input.code.trim();
+  const isPeerLink = input.details.isPeerLink === true;
+  const projectIds =
+    !isPeerLink && input.projectIds !== undefined && input.projectIds.length > 0
+      ? [...new Set(input.projectIds)]
+      : undefined;
+  const ceiling = !isPeerLink && input.ceiling ? input.ceiling : undefined;
+  const scopeFields = {
+    ...(projectIds !== undefined ? { projectIds } : {}),
+    ...(ceiling !== undefined ? { ceiling } : {}),
+  };
+
   if (code.length > 0) {
     return {
       _tag: "pairing-code",
       access: parseMcpApprovalCode(code)?.access ?? input.access,
       code,
+      ...scopeFields,
     };
   }
-  const { csrfToken, oneClickAccess } = input.details;
-  return csrfToken !== undefined && (oneClickAccess ?? []).includes(input.access)
-    ? { _tag: "browser-session", access: input.access, csrfToken }
-    : null;
+  const { csrfToken, oneClickAccess, approverIsOwner } = input.details;
+  if (csrfToken === undefined || !(oneClickAccess ?? []).includes(input.access)) {
+    return null;
+  }
+  // Members must bind the MCP client to at least one project they administer.
+  if (!isPeerLink && approverIsOwner === false && projectIds === undefined) {
+    return null;
+  }
+  return {
+    _tag: "browser-session",
+    access: input.access,
+    csrfToken,
+    ...scopeFields,
+  };
 }
 
 /**

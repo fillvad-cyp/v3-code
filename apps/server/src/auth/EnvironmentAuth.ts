@@ -1,6 +1,8 @@
 import {
   AuthAccessTokenType,
   AuthAccessWriteScope,
+  AuthEnvironmentScope,
+  type AuthGrantScope,
   AuthMcpClientAccess,
   AuthOrchestrationOperateScope,
   AuthAdministrativeClientScopes,
@@ -11,11 +13,13 @@ import {
   type AuthClientSession,
   type AuthConnectDevice,
   type AuthCreatePairingCredentialInput,
-  type AuthEnvironmentScope,
   type AuthPairingLink,
   type AuthPairingCredentialResult,
-  type AuthSessionId,
+  AuthSessionId,
   type AuthSessionState,
+  type BoundProject,
+  PrincipalId,
+  type SessionBinding,
   authScopeResponse,
   type ServerAuthDescriptor,
   type ServerAuthSessionMethod,
@@ -23,7 +27,14 @@ import {
   type AuthWebSocketTicketUse,
   DpopFailureReason,
   type DpopFailureReason as DpopFailureReasonType,
+  capabilitiesForRole,
+  highestProjectRole,
+  intersectScopes,
   mcpClientScopes,
+  type ProjectRole,
+  roleAtLeast,
+  roleHasCapability,
+  roleScopes,
 } from "@t3tools/contracts";
 import { isLocalLoopbackHost } from "@t3tools/shared/hostClassification";
 import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
@@ -44,12 +55,18 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerConfig from "../config.ts";
 import * as EnvironmentAuthPolicy from "./EnvironmentAuthPolicy.ts";
 import * as PairingGrantStore from "./PairingGrantStore.ts";
+import * as PayloadSigner from "./PayloadSigner.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import * as SessionStore from "./SessionStore.ts";
 import { REUSABLE_DEV_SESSION_EXPIRES_AT, resolveReusableDevAuth } from "./ReusableDevAuth.ts";
 import { verifyRequestDpopProof } from "./dpop.ts";
 import { DESKTOP_RENDERER_ORIGINS } from "../httpCors.ts";
+import { API_TOKEN_SIGNING_SECRET_NAME, isApiTokenFormat } from "../identity/ApiTokenCodes.ts";
+import * as ApiTokens from "../persistence/ApiTokens.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as ManagedLimits from "../policy/managedLimits.ts";
 import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
 import {
@@ -100,10 +117,15 @@ export interface McpClientSession {
   readonly sessionId: AuthSessionId;
   readonly label: string;
   readonly access: AuthMcpClientAccess;
+  readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   /** Another T3 Code environment's link, whose work here stays within it. */
   readonly peerLink: boolean;
   /** When a peer link's session ends unless it is used again; the linking side keeps this. */
   readonly linkExpiresAt?: DateTime.Utc;
+  /** Principal that owns or approved this MCP client session, when bound. */
+  readonly principalId?: PrincipalId;
+  /** Project or environment binding stored in `session_principals`. */
+  readonly binding?: SessionBinding;
 }
 
 export interface AuthenticatedSession {
@@ -113,6 +135,10 @@ export interface AuthenticatedSession {
   readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
   readonly expiresAt?: DateTime.DateTime;
+  /** Absent on a single-owner server; otherwise the principal the session was issued for. */
+  readonly principalId?: PrincipalId;
+  /** Absent means `environment`; only a principal or projects binding narrows a session. */
+  readonly binding?: SessionBinding;
 }
 
 const serverAuthInternalErrorContext = {
@@ -598,6 +624,23 @@ export class EnvironmentAuth extends Context.Service<
       readonly scopes?: ReadonlyArray<AuthEnvironmentScope>;
       readonly label?: string;
     }) => Effect.Effect<IssuedBearerSession, ServerAuthInternalError>;
+    readonly issuePrincipalSession: (input: {
+      readonly principalId: PrincipalId;
+      readonly binding: SessionBinding;
+      readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+      readonly method: "browser-session-cookie" | "bearer-access-token";
+      readonly client: AuthClientMetadata;
+      readonly ttl?: Duration.Duration;
+    }) => Effect.Effect<
+      {
+        readonly sessionId: AuthSessionId;
+        readonly token: string;
+        readonly method: "browser-session-cookie" | "bearer-access-token";
+        readonly scopes: ReadonlyArray<AuthEnvironmentScope>;
+        readonly expiresAt: DateTime.Utc;
+      },
+      ServerAuthInternalError | SessionStore.SessionLimitExceededError
+    >;
     readonly listSessions: () => Effect.Effect<
       ReadonlyArray<AuthClientSession>,
       ServerAuthInternalError
@@ -647,6 +690,10 @@ export class EnvironmentAuth extends Context.Service<
       readonly access: AuthMcpClientAccess;
       readonly peerLink: boolean;
       readonly client: AuthClientMetadata;
+      /** Narrowed scopes when a ceiling was applied; defaults to `mcpClientScopes(access)`. */
+      readonly scopes?: ReadonlyArray<AuthGrantScope>;
+      readonly principalId?: PrincipalId;
+      readonly binding?: SessionBinding;
       /**
        * `otherSessionRevocationCount` read before the sign-in was approved. The session is
        * refused when "revoke all others" has run since.
@@ -668,6 +715,7 @@ export class EnvironmentAuth extends Context.Service<
       code: string,
       access: AuthMcpClientAccess,
       peerLink?: boolean,
+      requiredScopes?: ReadonlyArray<AuthGrantScope>,
     ) => Effect.Effect<
       AuthMcpClientAccess,
       ServerAuthMcpApprovalCodeError | ServerAuthInternalError
@@ -684,6 +732,25 @@ type BootstrapExchangeResult = {
 
 const AUTHORIZATION_PREFIX = "Bearer ";
 const DPOP_AUTHORIZATION_PREFIX = "DPoP ";
+const API_TOKEN_LAST_USED_THROTTLE_MS = 60_000;
+const isAuthEnvironmentScope = Schema.is(AuthEnvironmentScope);
+
+function roleContainsRole(granted: ProjectRole, requested: ProjectRole): boolean {
+  return (
+    roleAtLeast(granted, requested) &&
+    capabilitiesForRole(requested).every((capability) => roleHasCapability(granted, capability))
+  );
+}
+
+function narrowProjectRole(boundRole: ProjectRole, liveRole: ProjectRole): ProjectRole {
+  if (roleContainsRole(liveRole, boundRole)) {
+    return boundRole;
+  }
+  if (roleContainsRole(boundRole, liveRole)) {
+    return liveRole;
+  }
+  return "viewer";
+}
 const WebSocketUpgradeQuery = Schema.Struct({
   wsTicket: Schema.optionalKey(Schema.RedactedFromValue(Schema.String)),
   dpop: Schema.optionalKey(Schema.RedactedFromValue(Schema.String)),
@@ -822,7 +889,26 @@ export const make = Effect.gen(function* () {
   const descriptor = yield* policy.getDescriptor();
   const config = yield* ServerConfig.ServerConfig;
   const managedPolicy = yield* ManagedPolicy.ManagedPolicy;
+  const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+  const principalsRepo = yield* Effect.serviceOption(Principals.PrincipalRepository);
+  const membershipsRepo = yield* Effect.serviceOption(Memberships.MembershipRepository);
+  const apiTokensRepo = yield* Effect.serviceOption(ApiTokens.ApiTokenRepository);
+  const apiTokenSigner = yield* PayloadSigner.make(API_TOKEN_SIGNING_SECRET_NAME);
+  const apiTokenLastTouchedAt = new Map<string, number>();
   const devAuth = resolveReusableDevAuth(config);
+
+  const resolveDescriptor = Option.match(serverSettings, {
+    onNone: () => Effect.succeed(descriptor),
+    onSome: (settingsService) =>
+      settingsService.getSettings.pipe(
+        Effect.map((settings) =>
+          settings.multiUser
+            ? ({ ...descriptor, authMode: "multi-user" } satisfies ServerAuthDescriptor)
+            : descriptor,
+        ),
+        Effect.orElseSucceed(() => descriptor),
+      ),
+  });
 
   const authenticateToken = (
     token: string,
@@ -849,6 +935,8 @@ export const make = Effect.gen(function* () {
         scopes: session.scopes,
         ...(session.proofKeyThumbprint ? { proofKeyThumbprint: session.proofKeyThumbprint } : {}),
         ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
+        ...(session.principalId !== undefined ? { principalId: session.principalId } : {}),
+        ...(session.binding !== undefined ? { binding: session.binding } : {}),
       })),
     );
 
@@ -875,6 +963,146 @@ export const make = Effect.gen(function* () {
     ...config.devAllowedOrigins,
   ]);
 
+  const authenticateApiToken = Effect.fn("EnvironmentAuth.authenticateApiToken")(function* (
+    rawToken: string,
+  ): Effect.fn.Return<
+    AuthenticatedSession,
+    ServerAuthInvalidCredentialError | ServerAuthInternalError
+  > {
+    if (Option.isNone(apiTokensRepo) || Option.isNone(principalsRepo)) {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "API token authentication is unavailable.",
+      });
+    }
+    const tokenHmac = yield* apiTokenSigner
+      .sign(rawToken)
+      .pipe(Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })));
+    const maybeToken = yield* apiTokensRepo.value
+      .getByHmac(tokenHmac)
+      .pipe(Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })));
+    if (Option.isNone(maybeToken)) {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "API token was not found.",
+      });
+    }
+    const token = maybeToken.value;
+    if (token.revokedAt !== null) {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "API token has been revoked.",
+      });
+    }
+    const now = yield* DateTime.now;
+    const nowMs = now.epochMilliseconds;
+    if (token.expiresAt !== null && Date.parse(token.expiresAt) <= nowMs) {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "API token has expired.",
+      });
+    }
+    const maybePrincipal = yield* principalsRepo.value
+      .get(token.principalId)
+      .pipe(Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })));
+    if (Option.isNone(maybePrincipal) || maybePrincipal.value.status !== "active") {
+      return yield* new ServerAuthInvalidCredentialError({
+        diagnostic: "API token principal is not active.",
+      });
+    }
+    const principal = maybePrincipal.value;
+    const rawTokenScopes = token.scopes.filter(isAuthEnvironmentScope);
+
+    let effectiveScopes: ReadonlyArray<AuthEnvironmentScope>;
+    let effectiveBinding: SessionBinding = token.binding;
+
+    if (principal.kind === "owner") {
+      if (token.binding._tag === "projects") {
+        const boundScopeUnion = [
+          ...new Set(token.binding.projects.flatMap((entry) => roleScopes(entry.role))),
+        ];
+        effectiveScopes = intersectScopes(rawTokenScopes, boundScopeUnion);
+      } else {
+        effectiveScopes = rawTokenScopes;
+      }
+    } else {
+      const ceiling = principal.ceiling.filter(isAuthEnvironmentScope);
+      const membershipRows = Option.isSome(membershipsRepo)
+        ? yield* membershipsRepo.value
+            .listForPrincipal(principal.id)
+            .pipe(
+              Effect.mapError((cause) => new ServerAuthSessionCredentialValidationError({ cause })),
+            )
+        : [];
+      const activeByProject = new Map(
+        membershipRows
+          .filter((row) => row.state === "active")
+          .map((row) => [row.projectId, row.role] as const),
+      );
+      if (token.binding._tag === "projects") {
+        const narrowedProjects: Array<BoundProject> = [];
+        for (const entry of token.binding.projects) {
+          const liveRole = activeByProject.get(entry.projectId);
+          if (liveRole === undefined) {
+            continue;
+          }
+          narrowedProjects.push({
+            projectId: entry.projectId,
+            role: narrowProjectRole(entry.role, liveRole),
+          });
+        }
+        effectiveBinding = { _tag: "projects", projects: narrowedProjects };
+        const boundScopeUnion = [
+          ...new Set(narrowedProjects.flatMap((entry) => roleScopes(entry.role))),
+        ];
+        effectiveScopes = intersectScopes(
+          intersectScopes(rawTokenScopes, ceiling),
+          boundScopeUnion,
+        );
+      } else if (token.binding._tag === "principal") {
+        const activeRoleScopes = [
+          ...new Set([...activeByProject.values()].flatMap((role) => roleScopes(role))),
+        ];
+        effectiveScopes = intersectScopes(
+          intersectScopes(rawTokenScopes, ceiling),
+          activeRoleScopes,
+        );
+      } else {
+        effectiveScopes = intersectScopes(rawTokenScopes, ceiling);
+      }
+    }
+
+    const lastDbTouchMs = token.lastUsedAt === null ? undefined : Date.parse(token.lastUsedAt);
+    const lastMemTouchMs = apiTokenLastTouchedAt.get(token.id);
+    const recentDbTouch =
+      lastDbTouchMs !== undefined &&
+      Number.isFinite(lastDbTouchMs) &&
+      nowMs >= lastDbTouchMs &&
+      nowMs - lastDbTouchMs < API_TOKEN_LAST_USED_THROTTLE_MS;
+    const recentMemTouch =
+      lastMemTouchMs !== undefined &&
+      nowMs >= lastMemTouchMs &&
+      nowMs - lastMemTouchMs < API_TOKEN_LAST_USED_THROTTLE_MS;
+
+    if (!recentDbTouch && !recentMemTouch) {
+      apiTokenLastTouchedAt.set(token.id, nowMs);
+      yield* apiTokensRepo.value.touchLastUsed(token.id, DateTime.formatIso(now)).pipe(
+        Effect.catch((cause) =>
+          Effect.logWarning("Failed to update API token last_used_at.", {
+            tokenId: token.id,
+            cause,
+          }),
+        ),
+      );
+    }
+
+    return {
+      sessionId: AuthSessionId.make(`pat:${token.id}`),
+      subject: `pat:${token.id}`,
+      method: "bearer-access-token",
+      scopes: effectiveScopes,
+      ...(token.expiresAt !== null ? { expiresAt: DateTime.makeUnsafe(token.expiresAt) } : {}),
+      principalId: token.principalId,
+      binding: effectiveBinding,
+    } satisfies AuthenticatedSession;
+  });
+
   const authenticateRequest = (
     request: HttpServerRequest.HttpServerRequest,
   ): Effect.Effect<AuthenticatedSession, ServerAuthCredentialError | ServerAuthInternalError> => {
@@ -893,7 +1121,11 @@ export const make = Effect.gen(function* () {
         }),
       );
     }
-    return authenticateToken(credential.token).pipe(
+    const verifyCredential =
+      credential.source === "bearer" && isApiTokenFormat(credential.token)
+        ? authenticateApiToken(credential.token)
+        : authenticateToken(credential.token);
+    return verifyCredential.pipe(
       Effect.flatMap((session) => {
         if (session.proofKeyThumbprint) {
           if (!dpopToken || dpopToken !== credential.token) {
@@ -927,26 +1159,70 @@ export const make = Effect.gen(function* () {
     );
   };
 
-  const getSessionState: EnvironmentAuth["Service"]["getSessionState"] = (request) =>
-    authenticateRequest(request).pipe(
-      Effect.map(
-        (session) =>
-          ({
+  const getSessionState: EnvironmentAuth["Service"]["getSessionState"] = Effect.fn(
+    "EnvironmentAuth.getSessionState",
+  )(function* (request) {
+    const currentDescriptor = yield* resolveDescriptor;
+    return yield* authenticateRequest(request).pipe(
+      Effect.flatMap((session) =>
+        Effect.gen(function* () {
+          let principalFields: Pick<
+            AuthSessionState,
+            "principal" | "binding_kind" | "binding" | "role"
+          > = {};
+          if (session.principalId !== undefined) {
+            const binding: SessionBinding = session.binding ?? { _tag: "environment" };
+            const principal = Option.isSome(principalsRepo)
+              ? Option.getOrUndefined(
+                  yield* principalsRepo.value
+                    .get(session.principalId)
+                    .pipe(Effect.orElseSucceed(() => Option.none())),
+                )
+              : undefined;
+            let role: ProjectRole | undefined;
+            if (principal?.kind === "owner") {
+              role = "owner";
+            } else if (binding._tag === "projects") {
+              role = highestProjectRole(binding.projects.map((entry) => entry.role));
+            } else if (Option.isSome(membershipsRepo)) {
+              const membershipRows = yield* membershipsRepo.value
+                .listForPrincipal(session.principalId)
+                .pipe(Effect.orElseSucceed(() => []));
+              role = highestProjectRole(
+                membershipRows.filter((row) => row.state === "active").map((row) => row.role),
+              );
+            }
+            principalFields = {
+              ...(principal !== undefined ? { principal } : {}),
+              binding_kind: binding._tag,
+              binding,
+              ...(role !== undefined ? { role } : {}),
+            };
+          }
+          const accessRevision = Option.isSome(principalsRepo)
+            ? yield* principalsRepo.value.getEnvironmentAccessRevision.pipe(
+                Effect.orElseSucceed(() => undefined),
+              )
+            : undefined;
+          return {
             authenticated: true,
-            auth: descriptor,
+            auth: currentDescriptor,
             ...authScopeResponse(session.scopes),
             sessionMethod: session.method,
             ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
-          }) satisfies AuthSessionState,
+            ...principalFields,
+            ...(accessRevision !== undefined ? { accessRevision } : {}),
+          } satisfies AuthSessionState;
+        }),
       ),
       Effect.catchIf(isServerAuthCredentialError, () =>
         Effect.succeed({
           authenticated: false,
-          auth: descriptor,
+          auth: currentDescriptor,
         } satisfies AuthSessionState),
       ),
-      Effect.withSpan("EnvironmentAuth.getSessionState"),
     );
+  });
 
   // T3 Connect credential issuance, DPoP exchanges and device revocation take turns. Two mints
   // at once would open two requests with one code, and a revoke landing between an exchange
@@ -1400,6 +1676,33 @@ export const make = Effect.gen(function* () {
         Effect.withSpan("EnvironmentAuth.issueSession"),
       );
 
+  const issuePrincipalSession: EnvironmentAuth["Service"]["issuePrincipalSession"] = (input) =>
+    sessions
+      .issue({
+        method: input.method,
+        subject: `principal:${input.principalId}`,
+        scopes: input.scopes,
+        principalId: input.principalId,
+        binding: input.binding,
+        client: input.client,
+        ...(input.ttl ? { ttl: input.ttl } : {}),
+      })
+      .pipe(
+        Effect.map((issued) => ({
+          sessionId: issued.sessionId,
+          token: issued.token,
+          method: input.method,
+          scopes: issued.scopes,
+          expiresAt: DateTime.toUtc(issued.expiresAt),
+        })),
+        Effect.mapError((cause) =>
+          SessionStore.isSessionLimitExceededError(cause)
+            ? cause
+            : new ServerAuthAuthenticatedAccessTokenIssueError({ cause }),
+        ),
+        Effect.withSpan("EnvironmentAuth.issuePrincipalSession"),
+      );
+
   const listSessions: EnvironmentAuth["Service"]["listSessions"] = () =>
     sessions.listActive().pipe(
       Effect.map((activeSessions) => activeSessions.toSorted(bySessionPriority)),
@@ -1621,6 +1924,8 @@ export const make = Effect.gen(function* () {
               ? { proofKeyThumbprint: session.proofKeyThumbprint }
               : {}),
             ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
+            ...(session.principalId !== undefined ? { principalId: session.principalId } : {}),
+            ...(session.binding !== undefined ? { binding: session.binding } : {}),
           };
         }
       }
@@ -1670,7 +1975,10 @@ export const make = Effect.gen(function* () {
             access: session.scopes.includes(AuthOrchestrationOperateScope)
               ? (session.runtimeModeCeiling ?? "approval-required")
               : "read-only",
+            scopes: session.scopes,
             peerLink: session.peerLink === true,
+            ...(session.principalId !== undefined ? { principalId: session.principalId } : {}),
+            ...(session.binding !== undefined ? { binding: session.binding } : {}),
           } satisfies McpClientSession;
           if (session.peerLink !== true || session.expiresAt === undefined) return client;
           return {
@@ -1702,15 +2010,20 @@ export const make = Effect.gen(function* () {
   });
 
   const issueMcpClientSession: EnvironmentAuth["Service"]["issueMcpClientSession"] = (input) => {
+    const scopes = input.scopes ?? mcpClientScopes(input.access);
+    const principalId =
+      input.principalId ?? (input.binding !== undefined ? PrincipalId.make("owner") : undefined);
     const issue = sessions
       .issue({
         subject: MCP_CLIENT_SUBJECT,
         method: "bearer-access-token",
-        scopes: mcpClientScopes(input.access),
+        scopes,
         ttl: MCP_CLIENT_SESSION_TTL,
         ...(input.access === "read-only" ? {} : { runtimeModeCeiling: input.access }),
         peerLink: input.peerLink,
         client: { ...input.client, label: input.label, deviceType: "bot" },
+        ...(principalId !== undefined ? { principalId } : {}),
+        ...(input.binding !== undefined ? { binding: input.binding } : {}),
       })
       .pipe(
         Effect.map((issued) => ({
@@ -1731,9 +2044,10 @@ export const make = Effect.gen(function* () {
     code,
     access,
     peerLink = false,
+    requiredScopes,
   ) =>
     resolveBootstrapGrant(code.trim(), {
-      requiredScopes: mcpClientScopes(access),
+      requiredScopes: requiredScopes ?? mcpClientScopes(access),
       allowedSubject: `${peerLink ? PEER_LINK_PAIRING_SUBJECT_PREFIX : MCP_APPROVAL_SUBJECT_PREFIX}${access}`,
     }).pipe(
       Effect.catchTags({
@@ -1759,7 +2073,7 @@ export const make = Effect.gen(function* () {
 
   return EnvironmentAuth.of({
     getDescriptor: Effect.fn("EnvironmentAuth.getDescriptor")(function () {
-      return Effect.succeed(descriptor);
+      return resolveDescriptor;
     }),
     getSessionState,
     createBrowserSession,
@@ -1777,6 +2091,7 @@ export const make = Effect.gen(function* () {
     listPairingLinks,
     revokePairingLink,
     issueSession,
+    issuePrincipalSession,
     listSessions,
     revokeSession,
     listClientSessions,

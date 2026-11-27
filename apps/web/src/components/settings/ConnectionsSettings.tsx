@@ -2,7 +2,7 @@ import { errorDisplayMessage, thrownErrorMessage } from "@t3tools/client-runtime
 import { m as resolveMessage } from "~/i18n/messages";
 import { managedCapabilityDenial } from "@t3tools/client-runtime/contract-labels";
 import { SessionPermissions } from "./SessionPermissions";
-import { useSearch } from "@tanstack/react-router";
+import { Link, useSearch } from "@tanstack/react-router";
 import { ChevronRightIcon, EllipsisIcon } from "lucide-react";
 import { useAtom, useAtomValue } from "@effect/atom-react";
 import { type ReactNode, useState } from "react";
@@ -151,6 +151,10 @@ import {
   SavedBackendListRow,
 } from "./SavedEnvironmentRows";
 import { AddEnvironmentDialog } from "./AddEnvironmentDialog";
+import { ApiTokensAccessRow } from "./ApiTokensSettings";
+import { AuditLogAccessRow } from "./AuditLogSettings";
+import { MembersSettings } from "./MembersSettings";
+import { MyAccessSection } from "./MyAccessSettings";
 import {
   type ConnectDeviceRevokeRequest,
   RevokeConnectDeviceDialog,
@@ -1431,6 +1435,30 @@ function ConnectionsSettingsContent({
               />
             ) : null}
             {accessEnvironment ? (
+              <SettingsRow
+                title={gt("Roles & permissions")}
+                description={gt(
+                  "Compare project roles, capabilities, and L0 host access boundaries.",
+                )}
+                control={
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Button size="sm" variant="outline" render={<Link to="/settings/roles" />}>
+                      <T>View matrix</T>
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost-muted"
+                      render={<Link to="/settings/my-access" />}
+                    >
+                      <T>My access</T>
+                    </Button>
+                  </div>
+                }
+              />
+            ) : null}
+            <ApiTokensAccessRow environmentId={accessEnvironmentId} />
+            <AuditLogAccessRow environmentId={accessEnvironmentId} />
+            {accessEnvironment ? (
               <details className="group px-3 sm:px-4">
                 <summary className="flex min-h-11 cursor-pointer list-none items-center gap-2 rounded-md text-sm font-medium outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring [&::-webkit-details-marker]:hidden">
                   <T>Permissions</T>
@@ -1447,6 +1475,8 @@ function ConnectionsSettingsContent({
             ) : null}
           </SettingsSection>
 
+          <MembersSettings environmentId={accessEnvironmentId} />
+          <MyAccessSection environmentId={accessEnvironmentId} embedded />
           {canReadAccess || canWriteAccess ? (
             <FoldedSettingsSection
               id="authorized-clients"

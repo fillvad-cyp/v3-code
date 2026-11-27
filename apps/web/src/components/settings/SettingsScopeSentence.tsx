@@ -57,6 +57,10 @@ export const SETTINGS_DEVICE_ONLY_PATHS: ReadonlySet<string> = new Set([
   "/settings/connections",
   // Access picks its environment on the page itself.
   "/settings/access",
+  "/settings/api-tokens",
+  "/settings/audit",
+  "/settings/roles",
+  "/settings/my-access",
   "/settings/about",
 ]);
 

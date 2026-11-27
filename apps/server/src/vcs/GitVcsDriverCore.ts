@@ -27,6 +27,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import {
   GitCommandError,
   type GitCommandFailureReason,
+  ProjectId,
   T3_PROJECT_FILE_NAME,
   type ReviewBranchCommitsInput,
   type ReviewDiffChangeType,
@@ -59,6 +60,7 @@ import {
 } from "../git/remoteRefs.ts";
 import { makeIsServerInternalPath } from "../auth/serverInternalPaths.ts";
 import * as ServerConfig from "../config.ts";
+import * as ProjectIsolation from "../isolation/ProjectIsolation.ts";
 import { sourceControlDefinitions } from "../sourceControl/sourceControlDefinitions.ts";
 
 const DEFAULT_TIMEOUT_MS = 30_000;
@@ -1045,6 +1047,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
   const hostPlatform = yield* HostProcess.Platform;
   const serviceScope = yield* Effect.scope;
   const automaticFetchInterval = yield* VcsAutomaticFetchInterval;
+  const projectIsolation = yield* Effect.serviceOption(ProjectIsolation.ProjectIsolation);
   type StatusFetchState = {
     phase: "queued" | "running" | "claimed";
     claimed: Deferred.Deferred<void>;
@@ -1092,7 +1095,16 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           ...trace2Monitor.env,
         };
         const env = { ...baseEnv, ...serverGitConfigEnv(baseEnv, hostPlatform) };
-        const spawnEnv = { ...env, ...windowsLongPathConfigEnv(hostPlatform, env) };
+        const isolatedGitEnv = Option.isSome(projectIsolation)
+          ? yield* projectIsolation.value
+              .resolveGitEnvForPath(commandInput.cwd, env)
+              .pipe(Effect.orElseSucceed(() => ({})))
+          : {};
+        const envWithIsolation = { ...env, ...isolatedGitEnv };
+        const spawnEnv = {
+          ...envWithIsolation,
+          ...windowsLongPathConfigEnv(hostPlatform, envWithIsolation),
+        };
         const resolved = yield* resolveSpawnCommand("git", [], { env: spawnEnv });
         const spawnError = (cause: unknown) =>
           new GitCommandError({
@@ -5912,6 +5924,17 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     const targetBranch = input.newRefName ?? input.refName;
     // Resolve sub/.. before taking the basename.
     const repoName = path.basename(path.resolve(input.cwd));
+    const isolatedContext = Option.isSome(projectIsolation)
+      ? Option.getOrNull(
+          options?.projectId
+            ? yield* projectIsolation.value
+                .resolveForProject(ProjectId.make(options.projectId))
+                .pipe(Effect.orElseSucceed(() => Option.none()))
+            : yield* projectIsolation.value
+                .resolveForPath(input.cwd)
+                .pipe(Effect.orElseSucceed(() => Option.none())),
+        )
+      : null;
     let worktreePath = input.path;
     if (worktreePath == null) {
       const parentDir = resolveWorktreesDirectory(
@@ -5936,7 +5959,13 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         if (Buffer.byteLength(prefix + character) > 23) break;
         prefix += character;
       }
-      const basePath = path.join(parentDir, repoName, `${prefix}-${Hex.encode(hash).slice(0, 16)}`);
+      // L1 isolated projects land under a per-project worktrees dir owned by the project group.
+      const worktreeBucket = isolatedContext !== null ? isolatedContext.projectId : repoName;
+      const basePath = path.join(
+        parentDir,
+        worktreeBucket,
+        `${prefix}-${Hex.encode(hash).slice(0, 16)}`,
+      );
       // The name is stable per branch, so a folder left by an earlier worktree must not block it.
       worktreePath = basePath;
       for (
@@ -6276,6 +6305,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         ),
       ),
     );
+    if (isolatedContext !== null && Option.isSome(projectIsolation)) {
+      yield* projectIsolation.value.ensureWorktreeOwnership(
+        isolatedContext.projectId,
+        worktreePath,
+      );
+    }
 
     if (newRefName && base) {
       yield* Effect.gen(function* () {

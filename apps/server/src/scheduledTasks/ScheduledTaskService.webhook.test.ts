@@ -259,6 +259,14 @@ const withService = <A, E>(
     return yield* Effect.gen(function* () {
       const service = yield* ScheduledTaskService.ScheduledTaskService;
       const sql = yield* SqlClient.SqlClient;
+      yield* sql`
+        INSERT OR IGNORE INTO projection_projects (
+          project_id, title, workspace_root, scripts_json, created_at, updated_at
+        ) VALUES (
+          'project-webhook', 'Webhook Project', '/projects/webhook', '[]',
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+        )
+      `;
       return yield* body({ service, launches, sql, secretsByRef });
     }).pipe(
       Effect.provide(
@@ -2220,3 +2228,79 @@ it.effect("filters run before replay and coalescing without claiming ignored del
     { workers },
   );
 });
+
+it.effect(
+  "refuses webhook deliveries when the task's project is deleted, removed, or archived",
+  () =>
+    withService(({ service, launches, sql }) =>
+      Effect.gen(function* () {
+        const { task } = yield* service.upsert(yield* webhookTaskInput());
+
+        // Soft-deleted project: rejected as not_found without launching or logging a delivery.
+        yield* sql`
+        UPDATE projection_projects
+        SET deleted_at = '2026-11-25T12:00:00.000Z'
+        WHERE project_id = ${task.projectId}
+      `;
+        const softDeleted = yield* service.triggerWebhook(requestFor(task));
+        assert.equal(softDeleted._tag, "not_found");
+        assert.equal(yield* Queue.size(launches), 0);
+        assert.equal((yield* service.listWebhookDeliveries({ id: task.id })).deliveries.length, 0);
+
+        // Archived (inactive) project: refused as disabled without launching.
+        yield* sql`
+        UPDATE projection_projects
+        SET deleted_at = NULL, archived_at = '2026-11-25T12:05:00.000Z'
+        WHERE project_id = ${task.projectId}
+      `;
+        const archived = yield* service.triggerWebhook(requestFor(task));
+        assert.equal(archived._tag, "disabled");
+        assert.equal(yield* Queue.size(launches), 0);
+
+        // Hard-deleted project row: rejected as not_found without launching.
+        yield* sql`DELETE FROM projection_projects WHERE project_id = ${task.projectId}`;
+        const missing = yield* service.triggerWebhook(requestFor(task));
+        assert.equal(missing._tag, "not_found");
+        assert.equal(yield* Queue.size(launches), 0);
+      }),
+    ),
+);
+
+it.effect("pushes projectIds filtering down to SQL for scheduled task list and subscribeList", () =>
+  withService(({ service, sql }) =>
+    Effect.gen(function* () {
+      yield* sql`
+        INSERT OR IGNORE INTO projection_projects (
+          project_id, title, workspace_root, scripts_json, created_at, updated_at
+        ) VALUES (
+          'project-foreign', 'Foreign Project', '/tmp/project-foreign', '[]',
+          '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z'
+        )
+      `;
+      const own = (yield* service.upsert(
+        yield* webhookTaskInput({ id: "scheduled-task:own", title: "Own task" }),
+      )).task;
+      const foreign = (yield* service.upsert(
+        yield* webhookTaskInput({
+          id: "scheduled-task:foreign",
+          title: "Foreign task",
+          projectId: "project-foreign" as typeof own.projectId,
+        }),
+      )).task;
+
+      const filtered = yield* service.list({ projectIds: [own.projectId] });
+      assert.deepEqual(
+        filtered.tasks.map((entry) => entry.id),
+        [own.id],
+      );
+      const empty = yield* service.list({ projectIds: [] });
+      assert.deepEqual(empty.tasks, []);
+
+      const all = yield* service.list();
+      assert.sameMembers(
+        all.tasks.map((entry) => entry.id),
+        [own.id, foreign.id],
+      );
+    }),
+  ),
+);

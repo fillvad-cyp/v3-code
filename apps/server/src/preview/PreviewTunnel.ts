@@ -2,7 +2,7 @@
 // connection per WebSocket. Raw bytes, so pages keep their own origin, HMR sockets and TLS.
 import * as NodeHttpServerRequest from "@effect/platform-node/NodeHttpServerRequest";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
-import { allowsPreviewTunnel, AuthTerminalOperateScope } from "@t3tools/contracts";
+import { allowsPreviewTunnel, AuthTerminalOperateScope, ProjectId } from "@t3tools/contracts";
 import type * as NodeNet from "node:net";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -15,6 +15,8 @@ import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import type * as Socket from "effect/socket/Socket";
 
 import { authenticateMediaRequest } from "../auth/http.ts";
+import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ProjectIsolation from "../isolation/ProjectIsolation.ts";
 import * as SessionStore from "../auth/SessionStore.ts";
 import { requestUrl } from "../requestUrl.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
@@ -167,6 +169,70 @@ const handler = Effect.gen(function* () {
     return HttpServerResponse.text("Bad Request", { status: 400 });
   }
   const session = yield* authenticateMediaRequest(AuthTerminalOperateScope);
+  const projectIsolation = yield* Effect.serviceOption(ProjectIsolation.ProjectIsolation);
+  const rawProjectId = Option.getOrUndefined(url)?.searchParams.get("projectId")?.trim();
+  if (rawProjectId !== undefined && rawProjectId.length > 0) {
+    const projectAccess = yield* ProjectAccess.ProjectAccess;
+    const authorization = yield* projectAccess.resolve(session).pipe(
+      Effect.flatMap((actor) =>
+        projectAccess.assert(actor, rawProjectId, "project:preview.operate"),
+      ),
+      Effect.as<HttpServerResponse.HttpServerResponse | undefined>(undefined),
+      Effect.catchTags({
+        AccessResolveError: (error) =>
+          Effect.succeed(
+            error.reason === "repository_error"
+              ? HttpServerResponse.text("Internal Server Error", { status: 500 })
+              : HttpServerResponse.text(error.message, { status: 401 }),
+          ),
+        project_forbidden: (error) =>
+          Effect.succeed(HttpServerResponse.text(error.message, { status: 403 })),
+      }),
+    );
+    if (authorization !== undefined) {
+      return authorization;
+    }
+    if (Option.isSome(projectIsolation)) {
+      const portCheck = yield* projectIsolation.value.isPortAllowedForProject(
+        ProjectId.make(rawProjectId),
+        port,
+      );
+      if (!portCheck.allowed) {
+        const rangeLabel =
+          portCheck.portsFrom !== null && portCheck.portsTo !== null
+            ? `${portCheck.portsFrom}-${portCheck.portsTo}`
+            : "none";
+        return HttpServerResponse.text(
+          `Port ${port} is outside the allocated preview port range (${rangeLabel}) for isolated project ${rawProjectId}.`,
+          { status: 403, headers: PORT_REFUSED_HEADERS },
+        );
+      }
+    }
+  } else if (Option.isSome(projectIsolation)) {
+    const ownerIsolation = yield* projectIsolation.value.findByPort(port);
+    if (Option.isSome(ownerIsolation)) {
+      const projectAccess = yield* ProjectAccess.ProjectAccess;
+      const authorization = yield* projectAccess.resolve(session).pipe(
+        Effect.flatMap((actor) =>
+          projectAccess.assert(actor, ownerIsolation.value.projectId, "project:preview.operate"),
+        ),
+        Effect.as<HttpServerResponse.HttpServerResponse | undefined>(undefined),
+        Effect.catchTags({
+          AccessResolveError: (error) =>
+            Effect.succeed(
+              error.reason === "repository_error"
+                ? HttpServerResponse.text("Internal Server Error", { status: 500 })
+                : HttpServerResponse.text(error.message, { status: 401 }),
+            ),
+          project_forbidden: (error) =>
+            Effect.succeed(HttpServerResponse.text(error.message, { status: 403 })),
+        }),
+      );
+      if (authorization !== undefined) {
+        return authorization;
+      }
+    }
+  }
   const sessions = yield* SessionStore.SessionStore;
   const tunnel = yield* PreviewTunnel;
   const connection = NodeHttpServerRequest.toIncomingMessage(request).socket;

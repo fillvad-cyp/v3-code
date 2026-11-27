@@ -20,7 +20,7 @@ import {
   PullRequestUnavailableError,
   resolvePullRequestAuthorFilter,
   type OrchestrationProjectShell,
-  type ProjectId,
+  ProjectId,
   type PullRequestAction,
   type PullRequestActionInput,
   type PullRequestActivity,
@@ -168,6 +168,19 @@ const FILES_VIEWED_CACHE_CAPACITY = 128;
 const VIEWER_CACHE_CAPACITY = 32;
 
 export type PullRequestError = PullRequestUnavailableError | PullRequestOperationError;
+
+/** Non-owner project restriction; `undefined` means unrestricted (owner / environment binding). */
+class AllowedProjectIds extends Context.Reference<ReadonlySet<string> | undefined>(
+  "v3code/pullRequest/PullRequestService/AllowedProjectIds",
+  { defaultValue: () => undefined },
+) {}
+
+export const withAllowedProjectIds =
+  (allowedProjectIds: ReadonlySet<string> | undefined) =>
+  <A, E, R>(effect: Effect.Effect<A, E, R>): Effect.Effect<A, E, R> =>
+    allowedProjectIds === undefined
+      ? effect
+      : Effect.provideService(effect, AllowedProjectIds, allowedProjectIds);
 
 const routingCredential = Context.Reference<{
   readonly credentialFingerprint: string;
@@ -919,16 +932,23 @@ export const make = Effect.gen(function* () {
   const listWorkspaceProjects = (
     filter: Pick<PullRequestListInput, "projectId" | "projectIds" | "host">,
   ): Effect.Effect<WorkspaceProjects, PullRequestError> =>
-    Effect.flatMap(sharedProjectReads, (shared) => {
-      if (shared === null || !shared.open) return readWorkspaceProjects(filter);
-      const key = JSON.stringify([filter.projectId, filter.projectIds, filter.host]);
-      const existing = shared.reads.get(key);
-      if (existing !== undefined) return existing;
-      return Effect.cached(readWorkspaceProjects(filter)).pipe(
-        Effect.tap((read) => Effect.sync(() => shared.reads.set(key, read))),
-        Effect.flatten,
-      );
-    });
+    Effect.flatMap(AllowedProjectIds, (allowed) =>
+      Effect.flatMap(sharedProjectReads, (shared) => {
+        if (shared === null || !shared.open) return readWorkspaceProjects(filter);
+        const key = JSON.stringify([
+          filter.projectId,
+          filter.projectIds,
+          filter.host,
+          allowed === undefined ? null : [...allowed].sort(),
+        ]);
+        const existing = shared.reads.get(key);
+        if (existing !== undefined) return existing;
+        return Effect.cached(readWorkspaceProjects(filter)).pipe(
+          Effect.tap((read) => Effect.sync(() => shared.reads.set(key, read))),
+          Effect.flatten,
+        );
+      }),
+    );
 
   const withSharedProjectReads = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
     Effect.suspend(() => {
@@ -944,217 +964,265 @@ export const make = Effect.gen(function* () {
       );
     });
 
+  const emptyWorkspaceProjects = (): WorkspaceProjects => ({
+    projects: [],
+    supported: [],
+    unimplemented: new Map(),
+    viewerRoots: new Map(),
+    refinedProjectIdsByHost: new Map(),
+  });
+
   const readWorkspaceProjects = (
     filter: Pick<PullRequestListInput, "projectId" | "projectIds" | "host">,
   ): Effect.Effect<WorkspaceProjects, PullRequestError> =>
-    (filter.projectId === undefined
-      ? projects.listShells(
-          filter.projectIds === undefined ? undefined : { projectIds: filter.projectIds },
-        )
-      : projects.getShell(filter.projectId).pipe(Effect.map(Option.toArray))
-    ).pipe(
-      Effect.mapError(
-        (error) =>
-          new PullRequestOperationError({
-            operation: "listProjects",
-            detail: "The project list could not be read.",
-            cause: error,
-          }),
-      ),
-      Effect.flatMap((projects) =>
-        Effect.forEach(
-          projects,
-          (project) =>
-            project.repositoryIdentity != null
-              ? Effect.succeed(project)
-              : repositoryIdentities
-                  .resolve(project.workspaceRoot)
-                  .pipe(Effect.map((repositoryIdentity) => ({ ...project, repositoryIdentity }))),
-          { concurrency: REPOSITORY_CONCURRENCY },
-        ),
-      ),
-      Effect.flatMap((projects) =>
-        resolveRemoteHosts(projects, filter).pipe(
-          Effect.map((remoteHosts) => ({ remoteHosts, projects })),
-        ),
-      ),
-      Effect.map(({ remoteHosts, projects }) => {
-        const supported: SupportedProject[] = [];
-        const unimplemented = new Map<
-          string,
-          { kind: SourceControlProviderKind; projectCount: number }
-        >();
-        const viewerRoots = new Map<string, string[]>();
-        const refinedProjectIdsByHost = new Map<string, ProjectId[]>();
-        const seen = new Set<string>();
-        for (const project of projects) {
-          if (filter.projectId !== undefined && project.id !== filter.projectId) continue;
-          if (filter.projectIds !== undefined && !filter.projectIds.includes(project.id)) continue;
-          const identity = project.repositoryIdentity;
-          let kind = identity?.provider;
-          const repository = sourceControlDefinitions.repositorySelector(
-            project.repositoryIdentity,
-          );
-          if (!identity || kind === undefined || repository === null) continue;
-          const recognized = sourceControlDefinitions.recognizeRemote(identity.locator.remoteUrl);
-          const remote =
-            recognized === null
-              ? undefined
-              : remoteHosts.get(remoteHostKey(recognized, identity.locator.remoteUrl));
-          kind = remote?.kind ?? kind;
-          const host = remote?.host ?? sourceControlDefinitions.changeRequestHost(identity, kind);
-          if (filter.host !== undefined && host !== filter.host.toLowerCase()) {
-            continue;
-          }
-          if (host !== sourceControlDefinitions.changeRequestHost(identity, identity.provider)) {
-            const projectIds = refinedProjectIdsByHost.get(host);
-            if (projectIds === undefined) refinedProjectIdsByHost.set(host, [project.id]);
-            else projectIds.push(project.id);
-          }
-          const registered = registry.get(kind);
-          const api = registered?.servesHost?.(host) === false ? null : registered;
-          if (api !== null) {
-            const roots = viewerRoots.get(host);
-            if (roots === undefined) viewerRoots.set(host, [project.workspaceRoot]);
-            else if (!roots.includes(project.workspaceRoot)) roots.push(project.workspaceRoot);
-          }
-          const repositoryKey =
-            api?.repositoryKey?.({ canonicalKey: identity.canonicalKey }) ?? null;
-          const key = listCursorKey(host, repositoryKey ?? repository);
-          if (seen.has(key)) continue;
-          seen.add(key);
-          if (api === null) {
-            const counted = unimplemented.get(host);
-            if (counted === undefined) unimplemented.set(host, { kind, projectCount: 1 });
-            else counted.projectCount += 1;
-            continue;
-          }
-          supported.push({
-            cursorKey: key,
-            project,
-            api: withRateLimitBackoff(api, host, rateLimits),
-            kind,
-            repository,
-            host,
-            remote:
-              repositoryKey ??
-              sourceControlDefinitions.repositoryKeyFromRemote(`https://${host}/${repository}`),
-            repositoryKey:
-              repositoryKey === null
-                ? null
-                : sourceControlDefinitions.canonicalRepositoryKey(repositoryKey.toLowerCase()),
-          });
+    Effect.flatMap(AllowedProjectIds, (allowed) => {
+      let effectiveProjectIds = filter.projectIds;
+      if (allowed !== undefined) {
+        if (filter.projectId !== undefined) {
+          if (!allowed.has(filter.projectId)) return Effect.succeed(emptyWorkspaceProjects());
+        } else {
+          effectiveProjectIds =
+            filter.projectIds === undefined
+              ? Array.from(allowed, (id) => ProjectId.make(id))
+              : filter.projectIds.filter((id) => allowed.has(id));
+          if (effectiveProjectIds.length === 0) return Effect.succeed(emptyWorkspaceProjects());
         }
-        return { projects, supported, unimplemented, viewerRoots, refinedProjectIdsByHost };
-      }),
-    );
+      }
+      const effectiveFilter = { ...filter, projectIds: effectiveProjectIds };
+      return (
+        effectiveFilter.projectId === undefined
+          ? projects.listShells(
+              effectiveFilter.projectIds === undefined
+                ? undefined
+                : { projectIds: effectiveFilter.projectIds },
+            )
+          : projects.getShell(effectiveFilter.projectId).pipe(Effect.map(Option.toArray))
+      ).pipe(
+        Effect.mapError(
+          (error) =>
+            new PullRequestOperationError({
+              operation: "listProjects",
+              detail: "The project list could not be read.",
+              cause: error,
+            }),
+        ),
+        Effect.flatMap((projects) =>
+          Effect.forEach(
+            projects,
+            (project) =>
+              project.repositoryIdentity != null
+                ? Effect.succeed(project)
+                : repositoryIdentities
+                    .resolve(project.workspaceRoot)
+                    .pipe(Effect.map((repositoryIdentity) => ({ ...project, repositoryIdentity }))),
+            { concurrency: REPOSITORY_CONCURRENCY },
+          ),
+        ),
+        Effect.flatMap((projects) =>
+          resolveRemoteHosts(projects, effectiveFilter).pipe(
+            Effect.map((remoteHosts) => ({ remoteHosts, projects })),
+          ),
+        ),
+        Effect.map(({ remoteHosts, projects }) => {
+          const supported: SupportedProject[] = [];
+          const unimplemented = new Map<
+            string,
+            { kind: SourceControlProviderKind; projectCount: number }
+          >();
+          const viewerRoots = new Map<string, string[]>();
+          const refinedProjectIdsByHost = new Map<string, ProjectId[]>();
+          const seen = new Set<string>();
+          for (const project of projects) {
+            if (effectiveFilter.projectId !== undefined && project.id !== effectiveFilter.projectId)
+              continue;
+            if (
+              effectiveFilter.projectIds !== undefined &&
+              !effectiveFilter.projectIds.includes(project.id)
+            )
+              continue;
+            const identity = project.repositoryIdentity;
+            let kind = identity?.provider;
+            const repository = sourceControlDefinitions.repositorySelector(
+              project.repositoryIdentity,
+            );
+            if (!identity || kind === undefined || repository === null) continue;
+            const recognized = sourceControlDefinitions.recognizeRemote(identity.locator.remoteUrl);
+            const remote =
+              recognized === null
+                ? undefined
+                : remoteHosts.get(remoteHostKey(recognized, identity.locator.remoteUrl));
+            kind = remote?.kind ?? kind;
+            const host = remote?.host ?? sourceControlDefinitions.changeRequestHost(identity, kind);
+            if (effectiveFilter.host !== undefined && host !== effectiveFilter.host.toLowerCase()) {
+              continue;
+            }
+            if (host !== sourceControlDefinitions.changeRequestHost(identity, identity.provider)) {
+              const projectIds = refinedProjectIdsByHost.get(host);
+              if (projectIds === undefined) refinedProjectIdsByHost.set(host, [project.id]);
+              else projectIds.push(project.id);
+            }
+            const registered = registry.get(kind);
+            const api = registered?.servesHost?.(host) === false ? null : registered;
+            if (api !== null) {
+              const roots = viewerRoots.get(host);
+              if (roots === undefined) viewerRoots.set(host, [project.workspaceRoot]);
+              else if (!roots.includes(project.workspaceRoot)) roots.push(project.workspaceRoot);
+            }
+            const repositoryKey =
+              api?.repositoryKey?.({ canonicalKey: identity.canonicalKey }) ?? null;
+            const key = listCursorKey(host, repositoryKey ?? repository);
+            if (seen.has(key)) continue;
+            seen.add(key);
+            if (api === null) {
+              const counted = unimplemented.get(host);
+              if (counted === undefined) unimplemented.set(host, { kind, projectCount: 1 });
+              else counted.projectCount += 1;
+              continue;
+            }
+            supported.push({
+              cursorKey: key,
+              project,
+              api: withRateLimitBackoff(api, host, rateLimits),
+              kind,
+              repository,
+              host,
+              remote:
+                repositoryKey ??
+                sourceControlDefinitions.repositoryKeyFromRemote(`https://${host}/${repository}`),
+              repositoryKey:
+                repositoryKey === null
+                  ? null
+                  : sourceControlDefinitions.canonicalRepositoryKey(repositoryKey.toLowerCase()),
+            });
+          }
+          return { projects, supported, unimplemented, viewerRoots, refinedProjectIdsByHost };
+        }),
+      );
+    });
 
   // Azure derives organization from the checkout; require the matching repository.
   const requireProject = (ref: PullRequestRef): Effect.Effect<SupportedProject, PullRequestError> =>
-    listWorkspaceProjects({ projectId: ref.projectId }).pipe(
-      Effect.flatMap(({ supported }): Effect.Effect<SupportedProject, PullRequestError> => {
-        const own = supported[0];
-        const repository = ref.repository.trim();
-        const host = ref.host?.trim().toLowerCase();
-        if (own !== undefined && own.repository.toLowerCase() === repository.toLowerCase()) {
-          if (host === undefined || host === own.host) return Effect.succeed(own);
-        }
-        if (host === undefined) {
-          if (own === undefined) {
-            return Effect.fail(new PullRequestUnavailableError({ reason: "provider-unsupported" }));
+    Effect.flatMap(AllowedProjectIds, (allowed) => {
+      if (allowed !== undefined && !allowed.has(ref.projectId)) {
+        return Effect.fail(new PullRequestUnavailableError({ reason: "provider-unsupported" }));
+      }
+      return listWorkspaceProjects({ projectId: ref.projectId }).pipe(
+        Effect.flatMap(({ supported }): Effect.Effect<SupportedProject, PullRequestError> => {
+          const own = supported[0];
+          const repository = ref.repository.trim();
+          const host = ref.host?.trim().toLowerCase();
+          if (own !== undefined && own.repository.toLowerCase() === repository.toLowerCase()) {
+            if (host === undefined || host === own.host) return Effect.succeed(own);
           }
-          return Effect.fail(
-            new PullRequestOperationError({
-              operation: "resolveRepository",
-              detail: "The change request does not belong to the selected project.",
-            }),
-          );
-        }
-        const referenceKey = `${host}/${repository}`.toLowerCase();
-        const repositoryKey = sourceControlDefinitions.canonicalRepositoryKey(referenceKey);
-        // A host that spells one repository several ways (Azure's SSH and legacy clone hosts)
-        // can differ from the browser URL's host. Compare the complete repository identity
-        // before narrowing those checkouts by host.
-        return listWorkspaceProjects(
-          sourceControlDefinitions.findByRepositoryKey(referenceKey) ? {} : { host },
-        ).pipe(
-          Effect.flatMap(({ supported }) => {
-            const onHost = supported.filter((candidate) => candidate.host === host);
-            const route =
-              supported.find(
-                (candidate) =>
-                  candidate.repositoryKey !== null && candidate.repositoryKey === repositoryKey,
-              ) ??
-              onHost.find(
-                (candidate) =>
-                  candidate.repositoryKey === null &&
-                  candidate.repository.toLowerCase() === repository.toLowerCase(),
-              ) ??
-              onHost.find((candidate) => candidate.repositoryKey === null);
-            if (route === undefined) {
-              return Effect.gen(function* () {
-                const publicHost = sourceControlDefinitions.findByPublicHost(host);
-                const api = publicHost === undefined ? null : registry.get(publicHost.kind);
-                if (publicHost !== undefined && api?.readsPublicHostWithoutCheckout) {
-                  const selected = yield* projects.getShell(ref.projectId).pipe(
-                    Effect.mapError(
-                      (cause) =>
-                        new PullRequestOperationError({
-                          operation: "resolveRepository",
-                          detail: "The selected project could not be read.",
-                          cause,
-                        }),
-                    ),
-                  );
-                  if (Option.isSome(selected)) {
-                    return {
-                      cursorKey: listCursorKey(host, repository),
-                      project: selected.value,
-                      api: withRateLimitBackoff(api, host, rateLimits),
-                      kind: publicHost.kind,
+          if (host === undefined) {
+            if (own === undefined) {
+              return Effect.fail(
+                new PullRequestUnavailableError({ reason: "provider-unsupported" }),
+              );
+            }
+            return Effect.fail(
+              new PullRequestOperationError({
+                operation: "resolveRepository",
+                detail: "The change request does not belong to the selected project.",
+              }),
+            );
+          }
+          const referenceKey = `${host}/${repository}`.toLowerCase();
+          const repositoryKey = sourceControlDefinitions.canonicalRepositoryKey(referenceKey);
+          // A host that spells one repository several ways (Azure's SSH and legacy clone hosts)
+          // can differ from the browser URL's host. Compare the complete repository identity
+          // before narrowing those checkouts by host.
+          return listWorkspaceProjects(
+            sourceControlDefinitions.findByRepositoryKey(referenceKey) ? {} : { host },
+          ).pipe(
+            Effect.flatMap(({ supported }) => {
+              const onHost = supported.filter((candidate) => candidate.host === host);
+              // Non-owners require an exact repositoryIdentity match on an accessible project;
+              // unmapped repositories remain owner-only.
+              const route =
+                supported.find(
+                  (candidate) =>
+                    candidate.repositoryKey !== null && candidate.repositoryKey === repositoryKey,
+                ) ??
+                onHost.find(
+                  (candidate) =>
+                    candidate.repositoryKey === null &&
+                    candidate.repository.toLowerCase() === repository.toLowerCase(),
+                ) ??
+                (allowed === undefined
+                  ? onHost.find((candidate) => candidate.repositoryKey === null)
+                  : undefined);
+              if (route === undefined) {
+                return Effect.gen(function* () {
+                  if (allowed !== undefined) {
+                    return yield* new PullRequestUnavailableError({
+                      reason: "repository-without-project",
                       repository,
-                      host,
+                    });
+                  }
+                  const publicHost = sourceControlDefinitions.findByPublicHost(host);
+                  const api = publicHost === undefined ? null : registry.get(publicHost.kind);
+                  if (publicHost !== undefined && api?.readsPublicHostWithoutCheckout) {
+                    const selected = yield* projects.getShell(ref.projectId).pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new PullRequestOperationError({
+                            operation: "resolveRepository",
+                            detail: "The selected project could not be read.",
+                            cause,
+                          }),
+                      ),
+                    );
+                    if (Option.isSome(selected)) {
+                      return {
+                        cursorKey: listCursorKey(host, repository),
+                        project: selected.value,
+                        api: withRateLimitBackoff(api, host, rateLimits),
+                        kind: publicHost.kind,
+                        repository,
+                        host,
+                        remote: sourceControlDefinitions.repositoryKeyFromRemote(
+                          `https://${host}/${repository}`,
+                        ),
+                        repositoryKey: null,
+                      };
+                    }
+                  }
+                  const owner =
+                    publicHost ?? sourceControlDefinitions.findByRepositoryKey(referenceKey);
+                  const readable = owner === undefined ? null : registry.get(owner.kind);
+                  if (
+                    readable !== null &&
+                    !readable.readsPublicHostWithoutCheckout &&
+                    readable.servesHost?.(host) !== false
+                  ) {
+                    // Without repository keys, any checkout on the host routes the read.
+                    return yield* new PullRequestUnavailableError(
+                      readable.repositoryKey === undefined
+                        ? { reason: "repository-without-project", host }
+                        : { reason: "repository-without-project", repository },
+                    );
+                  }
+                  return yield* new PullRequestUnavailableError({ reason: "provider-unsupported" });
+                });
+              }
+              return Effect.succeed(
+                route.repositoryKey !== null ||
+                  route.repository.toLowerCase() === repository.toLowerCase()
+                  ? route
+                  : {
+                      ...route,
+                      repository,
                       remote: sourceControlDefinitions.repositoryKeyFromRemote(
                         `https://${host}/${repository}`,
                       ),
-                      repositoryKey: null,
-                    };
-                  }
-                }
-                const owner =
-                  publicHost ?? sourceControlDefinitions.findByRepositoryKey(referenceKey);
-                const readable = owner === undefined ? null : registry.get(owner.kind);
-                if (
-                  readable !== null &&
-                  !readable.readsPublicHostWithoutCheckout &&
-                  readable.servesHost?.(host) !== false
-                ) {
-                  // Without repository keys, any checkout on the host routes the read.
-                  return yield* new PullRequestUnavailableError(
-                    readable.repositoryKey === undefined
-                      ? { reason: "repository-without-project", host }
-                      : { reason: "repository-without-project", repository },
-                  );
-                }
-                return yield* new PullRequestUnavailableError({ reason: "provider-unsupported" });
-              });
-            }
-            return Effect.succeed(
-              route.repositoryKey !== null ||
-                route.repository.toLowerCase() === repository.toLowerCase()
-                ? route
-                : {
-                    ...route,
-                    repository,
-                    remote: sourceControlDefinitions.repositoryKeyFromRemote(
-                      `https://${host}/${repository}`,
-                    ),
-                  },
-            );
-          }),
-        );
-      }),
-    );
+                    },
+              );
+            }),
+          );
+        }),
+      );
+    });
 
   const canonicalRef = Effect.fn("PullRequestService.canonicalRef")(function* <
     I extends PullRequestRef,
@@ -3318,38 +3386,63 @@ export const make = Effect.gen(function* () {
       timeToLive: (exit) => (Exit.isSuccess(exit) ? LIST_CACHE_TTL : Duration.zero),
     },
   );
-  const list: PullRequestService["Service"]["list"] = (input) => {
-    const key = JSON.stringify([
-      listingsEpoch,
-      input.state,
-      input.involvement ?? null,
-      input.filters === undefined
-        ? null
-        : [
-            input.filters.draft ?? null,
-            input.filters.review ?? null,
-            input.filters.checks ?? null,
-            input.filters.author ?? null,
-            input.filters.labels ?? null,
-            input.filters.excludedLabels ?? null,
-          ],
-      input.projectId ?? null,
-      input.projectIds === undefined ? null : [...input.projectIds].sort(),
-      input.host ?? null,
-      input.limit ?? null,
-      input.query ?? null,
-      input.cursors === undefined
-        ? null
-        : Object.entries(input.cursors).toSorted(([left], [right]) => left.localeCompare(right)),
-    ]);
-    // A replacement reader can join a lookup still finishing its previous reader's cancellation.
-    return Cache.get(listCache, key).pipe(
-      Effect.catchCauseIf(
-        (cause) => Cause.hasInterruptsOnly(cause),
-        (_cause) => Cache.get(listCache, key),
-      ),
-    );
+  const emptyListResult: PullRequestListResult = {
+    viewers: {} as PullRequestListResult["viewers"],
+    providers: [],
+    entries: [],
+    errors: [],
+    truncated: false,
+    nextCursors: {},
   };
+
+  const list: PullRequestService["Service"]["list"] = (input) =>
+    Effect.flatMap(AllowedProjectIds, (allowed) => {
+      let effectiveInput = input;
+      if (allowed !== undefined) {
+        if (input.projectId !== undefined) {
+          if (!allowed.has(input.projectId)) return Effect.succeed(emptyListResult);
+        } else {
+          const narrowed =
+            input.projectIds === undefined
+              ? Array.from(allowed, (id) => ProjectId.make(id))
+              : input.projectIds.filter((id) => allowed.has(id));
+          if (narrowed.length === 0) return Effect.succeed(emptyListResult);
+          effectiveInput = { ...input, projectIds: narrowed };
+        }
+      }
+      const key = JSON.stringify([
+        listingsEpoch,
+        effectiveInput.state,
+        effectiveInput.involvement ?? null,
+        effectiveInput.filters === undefined
+          ? null
+          : [
+              effectiveInput.filters.draft ?? null,
+              effectiveInput.filters.review ?? null,
+              effectiveInput.filters.checks ?? null,
+              effectiveInput.filters.author ?? null,
+              effectiveInput.filters.labels ?? null,
+              effectiveInput.filters.excludedLabels ?? null,
+            ],
+        effectiveInput.projectId ?? null,
+        effectiveInput.projectIds === undefined ? null : [...effectiveInput.projectIds].sort(),
+        effectiveInput.host ?? null,
+        effectiveInput.limit ?? null,
+        effectiveInput.query ?? null,
+        effectiveInput.cursors === undefined
+          ? null
+          : Object.entries(effectiveInput.cursors).toSorted(([left], [right]) =>
+              left.localeCompare(right),
+            ),
+      ]);
+      // A replacement reader can join a lookup still finishing its previous reader's cancellation.
+      return Cache.get(listCache, key).pipe(
+        Effect.catchCauseIf(
+          (cause) => Cause.hasInterruptsOnly(cause),
+          (_cause) => Cache.get(listCache, key),
+        ),
+      );
+    });
 
   const checksCache = yield* Cache.makeWith(
     (key: string) => {

@@ -3,6 +3,8 @@ import {
   CommandId,
   EnvironmentHttpCommonError,
   PROJECT_TRACKED_FOLDERS_MAX,
+  Project,
+  type ProjectIsolationLevel,
   type ProjectMutation,
   type ProjectSnapshot,
   ProjectId,
@@ -26,7 +28,11 @@ import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 
 import * as ServerConfig from "../config.ts";
+import * as ProjectIsolation from "../isolation/ProjectIsolation.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ProjectIsolationRepo from "../persistence/ProjectIsolationRepo.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as ProcessRunner from "../processRunner.ts";
 import type * as RuntimeLayer from "../orchestration-v2/runtimeLayer.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
 import * as ProjectFaviconResolver from "../project/ProjectFaviconResolver.ts";
@@ -50,6 +56,7 @@ type ProjectMutationTarget = {
 type ProjectCliDispatchCommand = ProjectMutation;
 
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
+const decodeProjectOption = Schema.decodeUnknownOption(Project);
 
 export class ProjectCommandIdGenerationError extends Schema.TaggedError<ProjectCommandIdGenerationError>()(
   "ProjectCommandIdGenerationError",
@@ -200,6 +207,13 @@ const projectCommandUuid = SecureRandom.SecureRandom.pipe(
 
 const makeProjectCliRuntimeLayer = (layerProjectService: typeof RuntimeLayer.layerProjectService) =>
   layerProjectService.pipe(
+    Layer.provideMerge(
+      ProjectIsolation.layer.pipe(
+        Layer.provide(ProjectIsolationRepo.layer),
+        Layer.provide(ProjectStore.layer),
+        Layer.provide(ProcessRunner.layer),
+      ),
+    ),
     Layer.provideMerge(ProjectEnrichmentService.layer),
     Layer.provideMerge(RepositoryIdentityResolver.layer),
     Layer.provideMerge(
@@ -307,7 +321,11 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
     readonly snapshot: ProjectSnapshot;
     readonly dispatch: (
       command: ProjectCliDispatchCommand,
-    ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
+    ) => Effect.Effect<
+      Project | undefined,
+      Error,
+      FileSystem.FileSystem | HttpClient.HttpClient | Path.Path
+    >;
   }) => Effect.Effect<
     string,
     Error,
@@ -329,9 +347,11 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
         return yield* run({
           snapshot: yield* client.projects.snapshot({ headers: {} }),
           dispatch: (command) =>
-            client.projects.mutate({ headers: {}, payload: command } as Parameters<
-              typeof client.projects.mutate
-            >[0]),
+            client.projects
+              .mutate({ headers: {}, payload: command } as Parameters<
+                typeof client.projects.mutate
+              >[0])
+              .pipe(Effect.map((response) => Option.getOrUndefined(decodeProjectOption(response)))),
         });
       }, Effect.mapError(projectCommandErrorFromServerAnswer)),
       locally: Effect.promise(() => import("../orchestration-v2/runtimeLayer.ts")).pipe(
@@ -340,8 +360,7 @@ const runProjectMutation = Effect.fn("runProjectMutation")(function* (
             const projects = yield* ProjectService.ProjectService;
             return yield* run({
               snapshot: yield* projects.snapshot,
-              dispatch: (command) =>
-                projectMutationOperation(projects, command).pipe(Effect.asVoid),
+              dispatch: (command) => projectMutationOperation(projects, command),
             });
           }).pipe(
             Effect.provide(
@@ -391,7 +410,11 @@ const projectAddCommand = Command.make("add", {
         readonly snapshot: ProjectSnapshot;
         readonly dispatch: (
           command: ProjectCliDispatchCommand,
-        ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
+        ) => Effect.Effect<
+          Project | undefined,
+          Error,
+          FileSystem.FileSystem | HttpClient.HttpClient | Path.Path
+        >;
       }) {
         const workspaceRoot = yield* normalizeWorkspaceRootForProjectCommand(flags.workspaceRoot);
         const existingProject = snapshot.projects.find(
@@ -502,7 +525,11 @@ const projectRemoveCommand = Command.make("remove", {
         readonly snapshot: ProjectSnapshot;
         readonly dispatch: (
           command: ProjectCliDispatchCommand,
-        ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
+        ) => Effect.Effect<
+          Project | undefined,
+          Error,
+          FileSystem.FileSystem | HttpClient.HttpClient | Path.Path
+        >;
       }) {
         const project = yield* findActiveProjectTarget({
           snapshot,
@@ -538,7 +565,11 @@ const projectRenameCommand = Command.make("rename", {
         readonly snapshot: ProjectSnapshot;
         readonly dispatch: (
           command: ProjectCliDispatchCommand,
-        ) => Effect.Effect<void, Error, FileSystem.FileSystem | HttpClient.HttpClient | Path.Path>;
+        ) => Effect.Effect<
+          Project | undefined,
+          Error,
+          FileSystem.FileSystem | HttpClient.HttpClient | Path.Path
+        >;
       }) {
         const project = yield* findActiveProjectTarget({
           snapshot,
@@ -561,7 +592,61 @@ const projectRenameCommand = Command.make("rename", {
   ),
 );
 
+const ISOLATION_LEVEL_CHOICES = ["0", "1"] as const;
+
+const projectIsolationCommand = Command.make("isolation", {
+  ...projectLocationFlags,
+  project: Argument.String("project").pipe(
+    Argument.withDescription("Project id or workspace root to configure isolation for."),
+  ),
+  level: Flag.Literals("level", ISOLATION_LEVEL_CHOICES).pipe(
+    Flag.withDescription("Target isolation level (0 = L0 logical, 1 = L1 OS service user)."),
+  ),
+}).pipe(
+  Command.withDescription("Configure OS-level isolation for a project."),
+  Command.withHandler((flags) =>
+    runProjectMutation(
+      flags,
+      Effect.fn("projectIsolationMutation")(function* ({
+        snapshot,
+        dispatch,
+      }: {
+        readonly snapshot: ProjectSnapshot;
+        readonly dispatch: (
+          command: ProjectCliDispatchCommand,
+        ) => Effect.Effect<
+          Project | undefined,
+          Error,
+          FileSystem.FileSystem | HttpClient.HttpClient | Path.Path
+        >;
+      }) {
+        const project = yield* findActiveProjectTarget({
+          snapshot,
+          identifier: flags.project,
+        });
+        const requestedLevel: ProjectIsolationLevel = flags.level === "1" ? 1 : 0;
+        const updated = yield* dispatch({
+          type: "project.update",
+          commandId: CommandId.make(yield* projectCommandUuid),
+          projectId: project.id,
+          isolationLevel: requestedLevel,
+        });
+        const effectiveLevel = updated?.isolationLevel ?? 0;
+        if (requestedLevel === 1 && effectiveLevel === 0) {
+          return `Project ${project.id} (${project.title}) requested isolation level 1 but fell back to level 0 (requires Linux with root or passwordless sudo).`;
+        }
+        return `Set isolation level for project ${project.id} (${project.title}) to ${effectiveLevel}.`;
+      }),
+    ),
+  ),
+);
+
 export const projectCommand = Command.make("project").pipe(
   Command.withDescription("Manage projects."),
-  Command.withSubcommands([projectAddCommand, projectRemoveCommand, projectRenameCommand]),
+  Command.withSubcommands([
+    projectAddCommand,
+    projectRemoveCommand,
+    projectRenameCommand,
+    projectIsolationCommand,
+  ]),
 );

@@ -2,6 +2,7 @@ import { RouterProvider } from "@tanstack/react-router";
 
 import { ElectronBrowserHost } from "./browser/ElectronBrowserHost";
 import { QuitHoldOverlay } from "./components/QuitHoldOverlay";
+import { isElectron } from "./env";
 import { I18nProvider } from "./i18n/I18nProvider";
 import { isPopoutWindowRuntime } from "./lib/threadPopout";
 import { AppAtomRegistryProvider } from "./rpc/atomRegistry";
@@ -15,7 +16,7 @@ export function AppRoot({ router }: { readonly router: AppRouter }) {
       <AppAtomRegistryProvider>
         <RouterProvider router={router} />
         {!isPopoutWindow ? <ElectronBrowserHost /> : null}
-        <QuitHoldOverlay />
+        {!isPopoutWindow || isElectron ? <QuitHoldOverlay /> : null}
       </AppAtomRegistryProvider>
     </I18nProvider>
   );

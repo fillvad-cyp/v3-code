@@ -3,7 +3,7 @@ import {
   scopeProjectRef,
   scopeThreadRef,
 } from "@t3tools/client-runtime/environment";
-import type { ScopedThreadRef } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import type { ClientSettings } from "@t3tools/contracts/settings";
 import { createBrowserHistory, createHashHistory } from "@tanstack/react-router";
 import * as Schema from "effect/Schema";
@@ -39,7 +39,7 @@ import { startDefaultThemeAdoption } from "./hooks/useDefaultTheme";
 import { startEnvironmentThemeRepaint } from "./hooks/useEnvironmentTheme";
 import { startThemeBackground } from "./themeBackground";
 import { readLocalStorageValue, subscribeLocalStorageKey } from "./hooks/useLocalStorage";
-import { startHostEnvironmentLookup } from "./state/primaryEnvironment";
+import { startHostEnvironmentLookup, primaryEnvironmentIdAtom } from "./state/primaryEnvironment";
 import {
   getClientSettings,
   startModelPreferencesMigration,
@@ -50,7 +50,11 @@ import { startThreadVisitedMigration } from "./hooks/useThreadVisitedMigration";
 import { installDesktopPasteAsText } from "./lib/desktopPasteAsText";
 import { startPrivacyShieldService } from "./lib/privacyShield";
 import { refreshPrivacyVault } from "./lib/privacyVaultClient";
-import { isPopoutWindowRuntime } from "./lib/threadPopout";
+import {
+  isPopoutWindowRuntime,
+  readCachedPopoutThreadMeta,
+  startPrimaryPopoutCoordinator,
+} from "./lib/threadPopout";
 import { startPwaInstallService } from "./lib/pwaInstall";
 import {
   syncDocumentElectronPlatformClasses,
@@ -136,12 +140,21 @@ function startClientAppearance(): void {
 }
 
 function readOpenThreadRef(router: AppRouter): ScopedThreadRef | null {
-  const target = resolveThreadRouteTarget(router.state.matches.at(-1)?.params ?? {});
-  const draft =
-    target?.kind === "draft"
-      ? useComposerDraftStore.getState().getDraftSession(target.draftId)
-      : null;
-  return resolveActiveThreadRouteRef(target, draft);
+  const latestMatch = router.state.matches.at(-1);
+  const params = latestMatch?.params ?? {};
+  const target = resolveThreadRouteTarget(params);
+  if (target !== null) {
+    const draft =
+      target.kind === "draft"
+        ? useComposerDraftStore.getState().getDraftSession(target.draftId)
+        : null;
+    return resolveActiveThreadRouteRef(target, draft);
+  }
+  const threadId = (params as { threadId?: string }).threadId;
+  if (!threadId) return null;
+  const searchEnv = (latestMatch?.search as { env?: EnvironmentId } | undefined)?.env;
+  const environmentId = searchEnv ?? appAtomRegistry.get(primaryEnvironmentIdAtom);
+  return environmentId !== null ? scopeThreadRef(environmentId, threadId as ThreadId) : null;
 }
 
 function windowTitleThreadStatus(
@@ -258,15 +271,92 @@ function startThreadOverlayRetention(router: AppRouter): void {
   });
 }
 
+/** Lightweight window title updater for popout windows: reads cached title and only the single thread shell. */
+function startPopoutDocumentTitle(router: AppRouter): void {
+  let openThreadRef = readOpenThreadRef(router);
+  const write = () => {
+    const latestMatch = router.state.matches.at(-1);
+    const fallbackThreadId = ((latestMatch?.params as { threadId?: string } | undefined)
+      ?.threadId ?? null) as ThreadId | null;
+    const thread =
+      openThreadRef === null
+        ? null
+        : appAtomRegistry.get(environmentThreadShells.quietThreadShellAtom(openThreadRef));
+    const cached =
+      thread === null ? readCachedPopoutThreadMeta(openThreadRef, fallbackThreadId) : null;
+    const threadTitle = thread?.title ?? cached?.title ?? null;
+    const title = resolveWindowTitle({
+      appDisplayName: APP_DISPLAY_NAME,
+      projectTitle: cached?.projectTitle ?? null,
+      threadTitle,
+      desktop: isElectron,
+    });
+    if (document.title !== title) document.title = title;
+  };
+  let unsubscribeOpenThread = () => {};
+  const watchOpenThread = () => {
+    unsubscribeOpenThread();
+    unsubscribeOpenThread =
+      openThreadRef === null
+        ? () => {}
+        : appAtomRegistry.subscribe(
+            environmentThreadShells.quietThreadShellAtom(openThreadRef),
+            write,
+          );
+  };
+  const updateOpenThread = () => {
+    const next = readOpenThreadRef(router);
+    if ((next && scopedThreadKey(next)) === (openThreadRef && scopedThreadKey(openThreadRef))) {
+      return;
+    }
+    openThreadRef = next;
+    watchOpenThread();
+    write();
+  };
+  watchOpenThread();
+  write();
+  appAtomRegistry.subscribe(primaryEnvironmentIdAtom, updateOpenThread);
+  router.subscribe("onResolved", updateOpenThread);
+}
+
+/**
+ * Starts only the minimal services required by a popped-out chat thread window, skipping global
+ * navigation, sidebar, notification, migration, and provider-bootstrap coordinators.
+ */
+function startPopoutAppServices(router: AppRouter): AppRouter {
+  if (isElectron) {
+    syncDocumentElectronPlatformClasses(navigator.platform);
+    syncDocumentWindowControlsOverlayClass();
+    startHostEnvironmentLookup();
+  }
+  startPrivacyShieldService();
+  installDesktopPasteAsText(window.desktopBridge, window);
+  guardDomAgainstPageTranslation();
+  startClientAppearance();
+  startI18n();
+  startPopoutDocumentTitle(router);
+  startThemeBackground();
+  startBrowserChromeThemeSync(router);
+  installChatRouteCommands(router);
+  startThreadOverlayRetention(router);
+  return router;
+}
+
 /**
  * Starts every app-lifetime service once, before the first render, and returns the router.
  * They run for the life of the page, so their disposers are dropped here.
  */
 export function startAppServices(): AppRouter {
+  // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
+  const isPopoutWindow = isPopoutWindowRuntime();
+  if (isPopoutWindow) {
+    const router = getRouter(isElectron ? createHashHistory() : createBrowserHistory());
+    return startPopoutAppServices(router);
+  }
+
   // Ahead of the history: the provider auth code must leave the address before anything reads it.
   startProviderAuthDelivery();
 
-  // Electron loads the app from a file-backed shell, so hash history avoids path resolution issues.
   const router = getRouter(isElectron ? createHashHistory() : createBrowserHistory());
 
   if (isElectron) {
@@ -277,6 +367,7 @@ export function startAppServices(): AppRouter {
   }
   startPrivacyShieldService();
   void refreshPrivacyVault();
+  startPrimaryPopoutCoordinator();
 
   installDesktopPasteAsText(window.desktopBridge, window);
   guardDomAgainstPageTranslation();
@@ -290,13 +381,10 @@ export function startAppServices(): AppRouter {
   startBrowserChromeThemeSync(router);
   startDefaultThemeAdoption();
   startModelPreferencesMigration();
-  const isPopoutWindow = isPopoutWindowRuntime();
-  if (!isPopoutWindow) {
-    startAgentOpenedPreviews();
-    if (isElectron) startElectronBrowserHost();
-    startPreviewTitleRecording();
-    startBrowserProfileReporting();
-  }
+  startAgentOpenedPreviews();
+  if (isElectron) startElectronBrowserHost();
+  startPreviewTitleRecording();
+  startBrowserProfileReporting();
   installChatRouteCommands(router);
   installCommandPaletteCommands(router);
   registerOpenFavoriteEditorCommand();
@@ -325,11 +413,9 @@ export function startAppServices(): AppRouter {
   startHostFreezeToasts();
   startLegacyThreadMigrationToast();
   startPermissionUpdateNotices(router);
-  if (!isPopoutWindow) {
-    startThreadNotifications(appAtomRegistry, router);
-    startGuideRunNotifications(appAtomRegistry, router);
-    if (isElectron) startDesktopUpdateLaunchNotice();
-  }
+  startThreadNotifications(appAtomRegistry, router);
+  startGuideRunNotifications(appAtomRegistry, router);
+  if (isElectron) startDesktopUpdateLaunchNotice();
 
   return router;
 }

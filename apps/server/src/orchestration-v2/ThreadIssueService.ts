@@ -11,6 +11,7 @@ import {
   type IssueLinkedThreadsResult,
   type IssueOperationError,
   type IssueRef,
+  type ProjectId,
   type ThreadId,
   type ThreadIssueKey,
   type ThreadIssueLinkSource,
@@ -51,6 +52,7 @@ export class ThreadIssueService extends Context.Service<
     /** Every thread the issue is linked to, most recently active first. */
     readonly linkedThreads: (
       key: ThreadIssueKey,
+      options?: { readonly projectIds?: ReadonlyArray<ProjectId> },
     ) => Effect.Effect<IssueLinkedThreadsResult, IssueOperationError>;
   }
 >()("v3code/orchestration-v2/ThreadIssueService") {}
@@ -112,8 +114,8 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const linkedThreads: ThreadIssueService["Service"]["linkedThreads"] = (key) =>
-    listLinkedIssueThreads(key).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+  const linkedThreads: ThreadIssueService["Service"]["linkedThreads"] = (key, options) =>
+    listLinkedIssueThreads(key, options).pipe(Effect.provideService(SqlClient.SqlClient, sql));
 
   return ThreadIssueService.of({ link, unlink, linkedThreads });
 });

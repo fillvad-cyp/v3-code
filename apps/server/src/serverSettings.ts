@@ -159,6 +159,145 @@ export function redactServerSettingsForClient(
   return { ...shaped, secretProviders: withoutUnknownSecretProviderConfigs(shaped) };
 }
 
+const MEMBER_STRIPPED_PROVIDER_CONFIG_KEYS = new Set<string>([
+  "binaryPath",
+  "homePath",
+  "shadowHomePath",
+  "configPath",
+  "executablePath",
+  "command",
+  "launchArgs",
+  "args",
+  "environment",
+  "env",
+  "apiKey",
+  "token",
+  "secret",
+  "password",
+  "credentials",
+  "authToken",
+  "accessToken",
+  "refreshToken",
+  "headers",
+  "cwd",
+]);
+
+function looksLikeFilesystemPath(value: string): boolean {
+  const trimmed = value.trim();
+  if (trimmed.length === 0) return false;
+  return (
+    trimmed.startsWith("/") ||
+    trimmed === "~" ||
+    trimmed.startsWith("~/") ||
+    trimmed.startsWith("~\\") ||
+    trimmed.startsWith("./") ||
+    trimmed.startsWith("../") ||
+    trimmed.startsWith(".\\") ||
+    trimmed.startsWith("..\\") ||
+    /^[A-Za-z]:[\\/]/.test(trimmed) ||
+    trimmed.startsWith("\\\\")
+  );
+}
+
+function sanitizeProviderConfigForMember(value: unknown): unknown {
+  if (value === null || value === undefined) return value;
+  if (typeof value === "string") {
+    return value === SECRET_REDACTED || looksLikeFilesystemPath(value) ? undefined : value;
+  }
+  if (isSecretReference(value)) return undefined;
+  if (Array.isArray(value)) {
+    return value.map(sanitizeProviderConfigForMember).filter((entry) => entry !== undefined);
+  }
+  if (typeof value === "object") {
+    const sanitizedRecord: Record<string, unknown> = {};
+    for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      if (MEMBER_STRIPPED_PROVIDER_CONFIG_KEYS.has(key)) continue;
+      const sanitized = sanitizeProviderConfigForMember(entry);
+      if (sanitized !== undefined) {
+        sanitizedRecord[key] = sanitized;
+      }
+    }
+    return sanitizedRecord;
+  }
+  return value;
+}
+
+function filterProjectMap<V>(
+  record: Readonly<Record<string, V>>,
+  allowedProjectIds: ReadonlySet<string>,
+): Record<string, V> {
+  const filtered: Record<string, V> = {};
+  for (const [projectId, value] of Object.entries(record)) {
+    if (allowedProjectIds.has(projectId)) {
+      filtered[projectId] = value;
+    }
+  }
+  return filtered;
+}
+
+/**
+ * Redacts host-wide secrets, paths, relay/device config, and foreign project overrides for
+ * non-owners while keeping the `ServerSettings` wire shape compatible for all clients.
+ */
+export function redactServerSettingsForMember(
+  settings: ServerSettings,
+  allowedProjectIds: ReadonlySet<string>,
+): ServerSettings {
+  const providerInstances: Record<string, ProviderInstanceConfig> = {};
+  for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {
+    const sanitizedConfig =
+      instance.config === undefined ? undefined : sanitizeProviderConfigForMember(instance.config);
+    providerInstances[instanceId] = {
+      driver: instance.driver,
+      ...(instance.displayName === undefined ? {} : { displayName: instance.displayName }),
+      ...(instance.accentColor === undefined ? {} : { accentColor: instance.accentColor }),
+      ...(instance.enabled === undefined ? {} : { enabled: instance.enabled }),
+      ...(sanitizedConfig === undefined ? {} : { config: sanitizedConfig }),
+    };
+  }
+  return {
+    ...settings,
+    providerInstances: providerInstances as ServerSettings["providerInstances"],
+    projectSettingsOverrides: filterProjectMap(
+      settings.projectSettingsOverrides,
+      allowedProjectIds,
+    ) as ServerSettings["projectSettingsOverrides"],
+    projectScriptOverrides: filterProjectMap(
+      settings.projectScriptOverrides,
+      allowedProjectIds,
+    ) as ServerSettings["projectScriptOverrides"],
+    projectAgentBrowserAccessOverrides: filterProjectMap(
+      settings.projectAgentBrowserAccessOverrides,
+      allowedProjectIds,
+    ) as ServerSettings["projectAgentBrowserAccessOverrides"],
+    projectAutoPullOverrides: filterProjectMap(
+      settings.projectAutoPullOverrides,
+      allowedProjectIds,
+    ) as ServerSettings["projectAutoPullOverrides"],
+    secretProviders: {},
+    cloudSpeechCredentials: { openai: "", xai: "", openrouter: "" },
+    sourceControlHosts: {},
+    usageLimitSources: {},
+    textGenerators: {},
+    deviceHosts: [],
+    easDeviceHosts: [],
+    simlockDeviceHosts: [],
+    simlockDeviceHostsEnabled: false,
+    enableDeviceSupport: false,
+    enableAgentDeviceAccess: false,
+    deviceOnboardingCompleted: false,
+    requireConnectDeviceApproval: false,
+    enablePreviewTunnel: false,
+    linkedEnvironmentsEnabled: false,
+    guestSharingEnabled: false,
+    worktreesDirectory: "",
+    previousWorktreesDirectories: [],
+    addProjectBaseDirectory: "",
+    defaultProjectScripts: [],
+    observability: { otlpTracesUrl: "", otlpMetricsUrl: "", otlpLogsUrl: "" },
+  };
+}
+
 /** A client shown a reference as a saved secret sends that marker back; it keeps the reference. */
 function withEchoedSecretReferences(current: ServerSettings, next: ServerSettings): ServerSettings {
   const references = new Map<string, SecretReference>();

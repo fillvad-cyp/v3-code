@@ -11,8 +11,8 @@ import {
   AuthSourceControlWriteScope,
   AuthTerminalOperateScope,
   type AuthEnvironmentScope,
-  mcpClientScopes,
 } from "./auth.ts";
+import { mcpClientScopes } from "./roleScopes.ts";
 import { PeerLinkLinkPairingInput } from "./peerLink.ts";
 import { ORCHESTRATION_V2_WS_METHODS } from "./orchestrationV2.ts";
 import { WS_METHODS } from "./rpc.ts";

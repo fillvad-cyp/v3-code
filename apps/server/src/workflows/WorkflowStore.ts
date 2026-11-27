@@ -376,6 +376,10 @@ export class WorkflowStore extends Context.Service<
     ) => Effect.Effect<void>;
     /** What the run touched, in the order it first did. */
     readonly references: (runId: string) => Effect.Effect<ReadonlyArray<WorkflowRunReference>>;
+    /** Every local project id associated with each run, from references, steps' threads, and input. */
+    readonly runProjectIds: (
+      runIds: ReadonlyArray<string>,
+    ) => Effect.Effect<ReadonlyMap<string, ReadonlySet<string>>>;
   }
 >()("v3code/workflows/WorkflowStore") {}
 
@@ -1138,6 +1142,42 @@ export const make = Effect.gen(function* () {
         steps: jsonValue(row.steps_json) as ReadonlyArray<string>,
         origin: row.origin,
       }));
+    }),
+    runProjectIds: Effect.fn("WorkflowStore.runProjectIds")(function* (runIds) {
+      const result = new Map<string, Set<string>>();
+      if (runIds.length === 0) return result;
+      const rows = yield* sql<{ readonly run_id: string; readonly project_id: string }>`
+        SELECT run_id, json_extract(address_json, '$.projectId') AS project_id
+        FROM workflow_run_references
+        WHERE run_id IN ${sql.in(runIds)}
+          AND json_valid(address_json)
+          AND json_type(address_json, '$.projectId') = 'text'
+        UNION
+        SELECT s.run_id, t.project_id
+        FROM workflow_steps s
+        JOIN orchestration_v2_projection_threads t ON t.thread_id = s.thread_id
+        WHERE s.run_id IN ${sql.in(runIds)}
+          AND s.environment_id IS NULL
+          AND s.thread_id IS NOT NULL
+        UNION
+        SELECT run_id, json_extract(input_json, '$.projectId') AS project_id
+        FROM workflow_runs
+        WHERE run_id IN ${sql.in(runIds)}
+          AND input_json IS NOT NULL
+          AND json_valid(input_json)
+          AND json_type(input_json, '$.projectId') = 'text'
+      `.pipe(Effect.orDie);
+      for (const row of rows) {
+        const trimmed = row.project_id.trim();
+        if (trimmed.length === 0) continue;
+        let ids = result.get(row.run_id);
+        if (ids === undefined) {
+          ids = new Set<string>();
+          result.set(row.run_id, ids);
+        }
+        ids.add(trimmed);
+      }
+      return result;
     }),
   });
 });

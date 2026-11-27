@@ -78,6 +78,48 @@ describe("applyServerConfigProjection settingsUpdated", () => {
     } as ServerConfigStreamEvent);
     expect(Option.getOrThrow(next).config).toBe(Option.getOrThrow(current).config);
   });
+
+  it("synchronizes environment capabilities and authMode when settings.multiUser toggles", () => {
+    const baseSettings = decodeSettings(structuredClone(encodeSettings(DEFAULT_SERVER_SETTINGS)));
+    const current = Option.some({
+      config: {
+        settings: baseSettings,
+        environment: {
+          environmentId: "env-1",
+          label: "Hub",
+          platform: { os: "linux", arch: "x64" },
+          serverVersion: "0.2.0",
+          capabilities: { repositoryIdentity: true },
+        },
+      } as unknown as ServerConfig,
+      latestEvent: {} as ServerConfigStreamEvent,
+      source: "live" as const,
+    });
+
+    const enabled = applyServerConfigProjection(current, {
+      version: 1,
+      type: "settingsUpdated",
+      payload: { settings: { ...baseSettings, multiUser: true } },
+    } as ServerConfigStreamEvent);
+    const enabledEnv = Option.getOrThrow(enabled).config.environment;
+    expect(enabledEnv.authMode).toBe("multi-user");
+    expect(enabledEnv.capabilities.members).toBe(true);
+    expect(enabledEnv.capabilities.audit).toBe(true);
+    expect(enabledEnv.capabilities.projectSecrets).toBe(true);
+    expect(enabledEnv.capabilities.crm).toBe(true);
+
+    const disabled = applyServerConfigProjection(enabled, {
+      version: 1,
+      type: "settingsUpdated",
+      payload: { settings: { ...baseSettings, multiUser: false } },
+    } as ServerConfigStreamEvent);
+    const disabledEnv = Option.getOrThrow(disabled).config.environment;
+    expect(disabledEnv.authMode).toBeUndefined();
+    expect(disabledEnv.capabilities.members).toBeUndefined();
+    expect(disabledEnv.capabilities.audit).toBeUndefined();
+    expect(disabledEnv.capabilities.projectSecrets).toBeUndefined();
+    expect(disabledEnv.capabilities.crm).toBeUndefined();
+  });
 });
 
 describe("applyServerConfigProjection provider catalogs", () => {

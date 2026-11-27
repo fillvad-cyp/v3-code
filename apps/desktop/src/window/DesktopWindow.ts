@@ -94,25 +94,39 @@ const MAIN_WINDOW_BOUNDS_PERSIST_DEBOUNCE_MS = 500;
 const THREAD_POPOUT_DEFAULT_SIZE = { width: 960, height: 760 } as const;
 const THREAD_POPOUT_MIN_SIZE = { width: 480, height: 420 } as const;
 const THREAD_POPOUT_CASCADE_STEP_PX = 28;
-const THREAD_POPOUT_ROUTE_PATTERN = /^\/[A-Za-z0-9._~:%-]+\/[A-Za-z0-9._~:%-]+$/;
+const THREAD_POPOUT_LEGACY_ROUTE_PATTERN = /^\/[A-Za-z0-9._~:%-]+\/[A-Za-z0-9._~:%-]+$/;
+const THREAD_POPOUT_DEDICATED_ROUTE_PATTERN =
+  /^\/popout\/thread\/[A-Za-z0-9._~:%-]+(?:\?env=[A-Za-z0-9._~:%-]+)?$/;
 const THREAD_POPOUT_MAX_ROUTE_LENGTH = 512;
+
+function isSafeEncodedSegment(segment: string): boolean {
+  try {
+    const decoded = decodeURIComponent(segment);
+    return decoded.length > 0 && decoded !== "." && decoded !== "..";
+  } catch {
+    return false;
+  }
+}
 
 function isValidThreadPopoutRoutePath(routePath: string): boolean {
   if (routePath.length === 0 || routePath.length > THREAD_POPOUT_MAX_ROUTE_LENGTH) {
     return false;
   }
-  if (!THREAD_POPOUT_ROUTE_PATTERN.test(routePath)) {
+  if (THREAD_POPOUT_DEDICATED_ROUTE_PATTERN.test(routePath)) {
+    const [pathname, query] = routePath.split("?");
+    const threadSegment = pathname?.slice("/popout/thread/".length) ?? "";
+    if (!isSafeEncodedSegment(threadSegment)) return false;
+    if (query !== undefined) {
+      const envSegment = query.slice("env=".length);
+      return isSafeEncodedSegment(envSegment);
+    }
+    return true;
+  }
+  if (!THREAD_POPOUT_LEGACY_ROUTE_PATTERN.test(routePath)) {
     return false;
   }
   const segments = routePath.slice(1).split("/");
-  return segments.every((segment) => {
-    try {
-      const decoded = decodeURIComponent(segment);
-      return decoded.length > 0 && decoded !== "." && decoded !== "..";
-    } catch {
-      return false;
-    }
-  });
+  return segments.every(isSafeEncodedSegment);
 }
 const DEVELOPMENT_LOAD_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
 const RENDERER_RECOVERY_RELOAD_DELAY_MS = 500;
@@ -1569,9 +1583,22 @@ export const make = Effect.gen(function* () {
         );
       });
 
-      popout.on("closed", cleanupPopout);
+      popout.on("closed", () => {
+        cleanupPopout();
+        void runPromise(
+          Effect.gen(function* () {
+            if (yield* Ref.get(desktopState.quitting)) return;
+            const mainWindow = yield* electronWindow.main;
+            if (Option.isSome(mainWindow) && !mainWindow.value.isDestroyed()) {
+              yield* electronWindow.reveal(mainWindow.value);
+            }
+          }),
+        );
+      });
 
-      const popoutUrl = `${applicationUrl}#${routePath}?popout=1`;
+      const popoutUrl = routePath.startsWith("/popout/")
+        ? `${applicationUrl}#${routePath}`
+        : `${applicationUrl}#${routePath}?popout=1`;
       void popout.loadURL(popoutUrl).catch(() => undefined);
       yield* logWindowInfo("thread pop-out window created", { routePath });
       return true;

@@ -54,6 +54,9 @@ import {
 } from "./ProjectFaviconPickerDialog";
 import { ProjectActionsSettings } from "./ProjectActionsSettings";
 import { ProjectDefaultsSettings } from "./ProjectDefaultsSettings";
+import { ProjectCrmSettings } from "./ProjectCrmSettings";
+import { ProjectMembersSettings } from "./ProjectMembersSettings";
+import { ProjectSecretsSettings } from "./ProjectSecretsSettings";
 import { ProjectRepositoriesSettings } from "./ProjectRepositoriesSettings";
 import {
   defaultProjectIcon,
@@ -693,6 +696,9 @@ function ProjectDetail({
         </SettingsSection>
         <ProjectDefaultsSettings category="project" />
         <ProjectActionsSettings />
+        <ProjectMembersSettings members={group.memberProjects} />
+        <ProjectSecretsSettings members={group.memberProjects} />
+        <ProjectCrmSettings members={group.memberProjects} />
         <ProjectRepositoriesSettings members={group.memberProjects} />
         {checkoutChoices}
         <SettingsSection title={gt("Danger")}>

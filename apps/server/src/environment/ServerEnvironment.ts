@@ -10,6 +10,7 @@ import * as SecureRandom from "effect/crypto/SecureRandom";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
@@ -21,6 +22,7 @@ import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
 import { databaseMigrationHead } from "../persistence/databaseMigrationHead.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import { isSpeechPlatformSupported } from "../speech/platform.ts";
 import { resolveServerEnvironmentLabel } from "./ServerEnvironmentLabel.ts";
 import { detectServerEnvironmentMachineKind } from "./ServerEnvironmentMachine.ts";
@@ -186,6 +188,7 @@ export const make = Effect.gen(function* () {
   const path = yield* Path.Path;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const _secrets = yield* ServerSecretStore.ServerSecretStore;
+  const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
   const identity = yield* ServerEnvironmentIdentity;
   const hostPlatform = yield* HostProcess.Platform;
   const hostArchitecture = yield* HostProcess.Architecture;
@@ -309,12 +312,26 @@ export const make = Effect.gen(function* () {
     },
   };
 
+  const isMultiUserEnabled = Option.match(serverSettings, {
+    onNone: () => Effect.succeed(false),
+    onSome: (settingsService) =>
+      settingsService.getSettings.pipe(
+        Effect.map((settings) => settings.multiUser === true),
+        Effect.orElseSucceed(() => false),
+      ),
+  });
+
   return ServerEnvironment.of({
     getEnvironmentId: Effect.succeed(environmentId),
-    getDescriptor: Effect.succeed({
+    getDescriptor: Effect.map(isMultiUserEnabled, (multiUser) => ({
       ...descriptor,
-      capabilities: { ...descriptor.capabilities, agentActivityPublishing: false },
-    }),
+      ...(multiUser ? { authMode: "multi-user" as const } : {}),
+      capabilities: {
+        ...descriptor.capabilities,
+        agentActivityPublishing: false,
+        ...(multiUser ? { members: true, audit: true, projectSecrets: true, crm: true } : {}),
+      },
+    })),
   });
 });
 

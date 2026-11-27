@@ -6,8 +6,17 @@ import {
   ForwardCompatibleArray,
   ClientSurface,
   ClientWebDeployment,
+  NonNegativeInt,
+  ProjectId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import {
+  Principal,
+  PrincipalCeilingTemplate,
+  ProjectRole,
+  SessionBinding,
+  SessionBindingKind,
+} from "./membership.ts";
 import { RuntimeMode } from "./providerPolicy.ts";
 
 export const ServerAuthPolicy = Schema.Literals([
@@ -190,9 +199,10 @@ export const ServerAuthDescriptor = Schema.Struct({
   sessionCookieName: TrimmedNonEmptyString,
   /** Older servers omit this and authorize self-updates with orchestration:operate. */
   serverUpdateScope: Schema.optionalKey(Schema.Literal(AuthEnvironmentMaintainScope)),
+  /** Older servers are single-owner; the switch to multi-user is off until an owner enables it. */
+  authMode: Schema.optionalKey(Schema.Literals(["single-owner", "multi-user"])),
 });
 export type ServerAuthDescriptor = typeof ServerAuthDescriptor.Type;
-
 export const AuthBrowserSessionRequest = Schema.Struct({
   credential: TrimmedNonEmptyString,
 });
@@ -203,8 +213,26 @@ export const AuthBrowserSessionResult = Schema.Struct({
   ...authScopeResponseFields,
   sessionMethod: ServerAuthSessionMethod,
   expiresAt: Schema.DateTimeUtc,
+  /** Older servers omit the binding; an absent one behaves as `environment`. */
+  binding_kind: Schema.optionalKey(SessionBindingKind),
+  binding: Schema.optionalKey(SessionBinding),
+  /** The role the credential carries on its projects. */
+  role: Schema.optionalKey(ProjectRole),
 });
 export type AuthBrowserSessionResult = typeof AuthBrowserSessionResult.Type;
+
+export const AuthInvitationSessionResult = Schema.Struct({
+  authenticated: Schema.Literal(true),
+  token: TrimmedNonEmptyString,
+  expiresAt: Schema.DateTimeUtc,
+  ...authScopeResponseFields,
+  sessionMethod: ServerAuthSessionMethod,
+  binding_kind: SessionBindingKind,
+  binding: SessionBinding,
+  role: Schema.optionalKey(ProjectRole),
+  principal: Principal,
+});
+export type AuthInvitationSessionResult = typeof AuthInvitationSessionResult.Type;
 
 export const AuthClientMetadataDeviceType = Schema.Literals([
   "desktop",
@@ -276,19 +304,6 @@ export const AuthMcpClientAccess = Schema.Literals([
 ]);
 export type AuthMcpClientAccess = typeof AuthMcpClientAccess.Type;
 
-/** The scopes an agent session gets for an access level, and a pairing code must carry. */
-export const mcpClientScopes = (access: AuthMcpClientAccess): ReadonlyArray<AuthGrantScope> =>
-  access === "read-only"
-    ? [AuthOrchestrationReadScope]
-    : access === "full-access"
-      ? [
-          AuthOrchestrationReadScope,
-          AuthOrchestrationOperateScope,
-          AuthSettingsWriteScope,
-          AuthSourceControlWriteScope,
-        ]
-      : [AuthOrchestrationReadScope, AuthOrchestrationOperateScope];
-
 /** The random part of a one-time pairing code: this many characters from this alphabet. */
 export const PAIRING_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ";
 export const PAIRING_CODE_LENGTH = 12;
@@ -331,6 +346,10 @@ export const AuthPairingCredentialResult = Schema.Struct({
   purpose: Schema.optionalKey(Schema.Literal("peer-link")),
   /** Set when the code approves one agent sign-in at this level. Older servers omit it. */
   access: Schema.optionalKey(AuthMcpClientAccess),
+  /** Older servers omit the binding; an absent one behaves as `environment`. */
+  binding_kind: Schema.optionalKey(SessionBindingKind),
+  binding: Schema.optionalKey(SessionBinding),
+  role: Schema.optionalKey(ProjectRole),
 });
 export type AuthPairingCredentialResult = typeof AuthPairingCredentialResult.Type;
 
@@ -376,6 +395,10 @@ export const AuthPairingLink = Schema.Struct({
   expiresAt: Schema.DateTimeUtc,
   /** Set while a T3 Connect device waits for approval. Older servers never send it. */
   connectDeviceRequest: Schema.optionalKey(AuthConnectDeviceRequest),
+  /** Older servers omit the binding; an absent one behaves as `environment`. */
+  binding_kind: Schema.optionalKey(SessionBindingKind),
+  binding: Schema.optionalKey(SessionBinding),
+  role: Schema.optionalKey(ProjectRole),
 });
 export type AuthPairingLink = typeof AuthPairingLink.Type;
 
@@ -407,6 +430,8 @@ export const AuthAccessSnapshot = Schema.Struct({
   clientSessions: Schema.Array(AuthClientSession),
   /** Older servers omit it; they have no device approval. */
   connectDevices: Schema.optionalKey(Schema.Array(AuthConnectDevice)),
+  /** Monotonic environment-level counter bumped on membership, ceiling, role, or principal changes. */
+  revision: Schema.optionalKey(NonNegativeInt),
 });
 export type AuthAccessSnapshot = typeof AuthAccessSnapshot.Type;
 
@@ -487,7 +512,9 @@ export const AuthRevokePairingLinkInput = Schema.Struct({
 export type AuthRevokePairingLinkInput = typeof AuthRevokePairingLinkInput.Type;
 
 export const AuthRevokeClientSessionInput = Schema.Struct({
-  sessionId: AuthSessionId,
+  sessionId: Schema.optionalKey(AuthSessionId),
+  /** Revoke the caller's own session (sign out) without requiring access:write. */
+  current: Schema.optionalKey(Schema.Boolean),
 });
 export type AuthRevokeClientSessionInput = typeof AuthRevokeClientSessionInput.Type;
 
@@ -537,6 +564,12 @@ export const AuthSessionState = Schema.Struct({
   permissions: authScopeResponseFields.permissions,
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
+  principal: Schema.optionalKey(Principal),
+  binding_kind: Schema.optionalKey(SessionBindingKind),
+  binding: Schema.optionalKey(SessionBinding),
+  role: Schema.optionalKey(ProjectRole),
+  /** Monotonic environment-level counter bumped on membership, ceiling, role, or principal changes. */
+  accessRevision: Schema.optionalKey(NonNegativeInt),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;
 
@@ -616,6 +649,12 @@ export const AuthMcpAuthorizationRequest = Schema.Struct({
 });
 export type AuthMcpAuthorizationRequest = typeof AuthMcpAuthorizationRequest.Type;
 
+export const AuthMcpApprovalProjectOption = Schema.Struct({
+  id: ProjectId,
+  title: Schema.String,
+});
+export type AuthMcpApprovalProjectOption = typeof AuthMcpApprovalProjectOption.Type;
+
 /** Server-validated request details, trusted by the client only for display. */
 export const AuthMcpApprovalDetails = Schema.Struct({
   /** Self-declared by the client, so shown as such. */
@@ -625,6 +664,14 @@ export const AuthMcpApprovalDetails = Schema.Struct({
   csrfToken: Schema.optionalKey(Schema.String),
   /** Only scopes held by this session qualify; others need a pairing code. Absent with `csrfToken`. */
   oneClickAccess: Schema.optionalKey(Schema.Array(AuthMcpClientAccess)),
+  /** True when the requesting client is another T3 Code environment's peer link (owner-only, environment-bound). */
+  isPeerLink: Schema.optionalKey(Schema.Boolean),
+  /** True when the approving session is the environment owner; false for project-admin members. */
+  approverIsOwner: Schema.optionalKey(Schema.Boolean),
+  /** Projects the approving session may bind this MCP client to. */
+  availableProjects: Schema.optionalKey(Schema.Array(AuthMcpApprovalProjectOption)),
+  /** Scope ceiling templates within the approving session's own ceiling. */
+  availableCeilings: Schema.optionalKey(Schema.Array(PrincipalCeilingTemplate)),
   /** A managed policy's runtime-mode ceiling; the page loads without the server's config. */
   runtimeModeCeiling: Schema.optionalKey(
     Schema.Struct({ organization: Schema.String, maxRuntimeMode: RuntimeMode }),
@@ -642,10 +689,14 @@ export const AuthMcpApprovalDecision = Schema.Union([
   Schema.TaggedStruct("pairing-code", {
     access: AuthMcpClientAccess,
     code: TrimmedNonEmptyString,
+    projectIds: Schema.optionalKey(Schema.Array(ProjectId)),
+    ceiling: Schema.optionalKey(PrincipalCeilingTemplate),
   }),
   Schema.TaggedStruct("browser-session", {
     access: AuthMcpClientAccess,
     csrfToken: Schema.String,
+    projectIds: Schema.optionalKey(Schema.Array(ProjectId)),
+    ceiling: Schema.optionalKey(PrincipalCeilingTemplate),
   }),
 ]);
 export type AuthMcpApprovalDecision = typeof AuthMcpApprovalDecision.Type;

@@ -36,6 +36,10 @@ export type SettingsPath =
   | "/settings/worktrees"
   | "/settings/connections"
   | "/settings/access"
+  | "/settings/api-tokens"
+  | "/settings/audit"
+  | "/settings/roles"
+  | "/settings/my-access"
   | "/settings/secrets"
   | "/settings/maintenance"
   | "/settings/labs"
@@ -74,6 +78,8 @@ export interface SettingsSearchItem {
   readonly peerLinksOnly?: boolean;
   readonly fastWorktreeCheckoutOnly?: boolean;
   readonly agentFeedbackOnly?: boolean;
+  readonly membersOnly?: boolean;
+  readonly auditOnly?: boolean;
   readonly textGeneratorsOnly?: boolean;
   readonly secondary?: boolean;
   readonly requiresThreadAutoSettlement?: boolean;
@@ -91,6 +97,8 @@ export interface SettingsSearchAvailability {
   readonly hasPeerLinkHost?: boolean;
   readonly hasFastWorktreeCheckoutEnvironment?: boolean;
   readonly hasAgentFeedbackEnvironment?: boolean;
+  readonly hasMembersEnvironment?: boolean;
+  readonly hasAuditEnvironment?: boolean;
   /** An environment without a provider allow-list, which hides text generators. */
   readonly hasTextGeneratorsEnvironment?: boolean;
   readonly hasPrimaryEnvironment?: boolean;
@@ -115,6 +123,10 @@ export const SETTINGS_SECTION_LABELS: Readonly<Record<SettingsPath, string>> = {
   "/settings/worktrees": msg("Worktrees"),
   "/settings/connections": msg("Environments"),
   "/settings/access": msg("Sharing & access"),
+  "/settings/api-tokens": msg("API tokens"),
+  "/settings/audit": msg("Audit log"),
+  "/settings/roles": msg("Roles & permissions"),
+  "/settings/my-access": msg("My access"),
   "/settings/secrets": msg("Secrets"),
   "/settings/maintenance": msg("Maintenance"),
   "/settings/labs": msg("Labs"),
@@ -314,6 +326,14 @@ export const SETTINGS_SEARCH_ITEMS = [
     title: msg("Project overview"),
     to: "/settings/projects",
     searchTerms: [msg("name icon emoji image checkout remove delete")],
+  },
+  {
+    id: "project-members",
+    title: msg("Project members"),
+    to: "/settings/projects",
+    scope: "project",
+    membersOnly: true,
+    searchTerms: [msg("invite role admin developer viewer suspend remove login code team access")],
   },
   {
     id: "default-model",
@@ -1510,6 +1530,65 @@ export const SETTINGS_SEARCH_ITEMS = [
     ],
   },
   {
+    id: "multi-user-mode",
+    title: msg("Multi-user mode"),
+    to: "/settings/access",
+    membersOnly: true,
+    searchTerms: [msg("members team multiuser invite login code ceiling owner host access roles")],
+  },
+  {
+    id: "environment-members",
+    title: msg("Members"),
+    to: "/settings/access",
+    membersOnly: true,
+    searchTerms: [
+      msg("team staff ceiling invite login code suspend remove owner host access roles"),
+    ],
+  },
+  {
+    id: "audit-log",
+    title: msg("Audit log"),
+    to: "/settings/audit",
+    auditOnly: true,
+    searchTerms: [
+      msg("audit events security history logins invitations memberships actions filter"),
+    ],
+  },
+  {
+    id: "api-tokens",
+    title: msg("API tokens"),
+    to: "/settings/api-tokens",
+    environmentOnly: true,
+    searchTerms: [
+      msg("personal access token pat bearer api key scopes revoke projects automation"),
+    ],
+  },
+  {
+    id: "audit-retention",
+    title: msg("Audit retention"),
+    to: "/settings/audit",
+    auditOnly: true,
+    searchTerms: [msg("audit log retention days prune cleanup history delete")],
+  },
+  {
+    id: "roles-permissions",
+    title: msg("Roles & permissions"),
+    to: "/settings/roles",
+    searchTerms: [
+      msg(
+        "role matrix capabilities permissions viewer operator developer manager admin owner l0 terminal host create delete project",
+      ),
+    ],
+  },
+  {
+    id: "my-access",
+    title: msg("My access"),
+    to: "/settings/my-access",
+    searchTerms: [
+      msg("my projects role permissions capabilities login code sign out member owner"),
+    ],
+  },
+  {
     id: "connections-environment",
     title: msg("This machine"),
     to: "/settings/access",
@@ -1596,6 +1675,10 @@ const SETTINGS_CATEGORY_SCOPES: Readonly<Record<SettingsPath, SettingsSearchScop
   "/settings/worktrees": "project-defaults",
   "/settings/connections": "connections",
   "/settings/access": "connections",
+  "/settings/api-tokens": "connections",
+  "/settings/audit": "connections",
+  "/settings/roles": "connections",
+  "/settings/my-access": "connections",
   "/settings/secrets": null,
   "/settings/scheduled-tasks": null,
   "/settings/maintenance": null,
@@ -1739,6 +1822,8 @@ export function filterAvailableSettingsSearchItems(
       (!item.fastWorktreeCheckoutOnly ||
         availability.hasFastWorktreeCheckoutEnvironment === true) &&
       (!item.agentFeedbackOnly || availability.hasAgentFeedbackEnvironment === true) &&
+      (!item.membersOnly || availability.hasMembersEnvironment === true) &&
+      (!item.auditOnly || availability.hasAuditEnvironment === true) &&
       (!item.textGeneratorsOnly || availability.hasTextGeneratorsEnvironment === true) &&
       (!item.secretProvidersOnly || availability.hasSecretProvidersEnvironment === true),
   );

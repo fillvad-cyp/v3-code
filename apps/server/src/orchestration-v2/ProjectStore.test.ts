@@ -1,5 +1,5 @@
 import { assert, it } from "@effect/vitest";
-import { EventId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
+import { EventId, PrincipalId, ProjectId, ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -160,6 +160,104 @@ it.layer(ProjectStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMemor
           Option.getOrNull(yield* projects.getShell(projectId))?.title,
           "custom repo",
         );
+      }),
+    );
+
+    it.effect("persists ownerId and visibility and lists projects owned by a principal", () =>
+      Effect.gen(function* () {
+        const projects = yield* ProjectStore.ProjectStoreV2;
+        const creatorId = PrincipalId.make("member-creator");
+        const otherId = PrincipalId.make("member-other");
+        const privateProjectId = ProjectId.make("project-private-1");
+        const sharedProjectId = ProjectId.make("project-shared-1");
+        const at = "2026-03-24T00:00:00.000Z";
+        const meta = {
+          aggregateKind: "project" as const,
+          occurredAt: at,
+          commandId: null,
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+        };
+
+        yield* projects.apply({
+          ...meta,
+          aggregateId: privateProjectId,
+          sequence: 1,
+          eventId: EventId.make("event-priv-created"),
+          type: "project.created",
+          payload: {
+            projectId: privateProjectId,
+            title: "Private App",
+            workspaceRoot: "/tmp/private-app",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: at,
+            updatedAt: at,
+          },
+        });
+        yield* projects.apply({
+          ...meta,
+          aggregateId: sharedProjectId,
+          sequence: 2,
+          eventId: EventId.make("event-shared-created"),
+          type: "project.created",
+          payload: {
+            projectId: sharedProjectId,
+            title: "Shared App",
+            workspaceRoot: "/tmp/shared-app",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: at,
+            updatedAt: at,
+          },
+        });
+
+        const before = Option.getOrNull(yield* projects.get(privateProjectId));
+        assert.strictEqual(before?.ownerId, null);
+        assert.strictEqual(before?.visibility, "shared");
+
+        yield* projects.setOwnership({
+          projectId: privateProjectId,
+          ownerId: creatorId,
+          visibility: "private",
+        });
+
+        const after = Option.getOrNull(yield* projects.get(privateProjectId));
+        assert.strictEqual(after?.ownerId, creatorId);
+        assert.strictEqual(after?.visibility, "private");
+        assert.deepStrictEqual(yield* projects.listOwnedByPrincipal(creatorId), [privateProjectId]);
+        assert.deepStrictEqual(yield* projects.listOwnedByPrincipal(otherId), []);
+
+        // Meta updates and replayed project.created events preserve ownership and privacy.
+        yield* projects.apply({
+          ...meta,
+          aggregateId: privateProjectId,
+          sequence: 3,
+          eventId: EventId.make("event-priv-renamed"),
+          type: "project.meta-updated",
+          payload: { projectId: privateProjectId, title: "Private App 2", updatedAt: at },
+        });
+        yield* projects.apply({
+          ...meta,
+          aggregateId: privateProjectId,
+          sequence: 4,
+          eventId: EventId.make("event-priv-replayed"),
+          type: "project.created",
+          payload: {
+            projectId: privateProjectId,
+            title: "Private App",
+            workspaceRoot: "/tmp/private-app",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: at,
+            updatedAt: at,
+          },
+        });
+
+        const preserved = Option.getOrNull(yield* projects.get(privateProjectId));
+        assert.strictEqual(preserved?.ownerId, creatorId);
+        assert.strictEqual(preserved?.visibility, "private");
       }),
     );
   },

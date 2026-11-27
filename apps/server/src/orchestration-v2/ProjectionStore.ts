@@ -494,6 +494,7 @@ export interface ProjectionTimelinePage {
 export interface ShellSnapshotOptions {
   readonly location?: "active" | "archive";
   readonly projectId?: ProjectId;
+  readonly projectIds?: ReadonlyArray<ProjectId>;
   readonly unsettledOnly?: boolean;
   /**
    * Only the threads sharing this thread's `lineage.rootThreadId`: the root, its forks, and their
@@ -635,10 +636,9 @@ export interface ProjectionStoreV2Shape {
   /** Threads that are not deleted, archived ones included. */
   readonly countThreads: () => Effect.Effect<number, ProjectionStoreV2Error>;
   /** Every active thread, in shell order. */
-  readonly listActiveShellIndex: () => Effect.Effect<
-    ReadonlyArray<ActiveShellIndexEntry>,
-    ProjectionStoreV2Error
-  >;
+  readonly listActiveShellIndex: (options?: {
+    readonly projectIds?: ReadonlyArray<ProjectId>;
+  }) => Effect.Effect<ReadonlyArray<ActiveShellIndexEntry>, ProjectionStoreV2Error>;
   /** Every active thread, or one project's. */
   readonly listActiveThreads: (
     projectId?: ProjectId,
@@ -691,9 +691,11 @@ export interface ProjectionStoreV2Shape {
   /** Titles of the given threads that exist, archived ones included. */
   readonly getThreadLinkMetadata: (
     threadIds: ReadonlyArray<ThreadId>,
+    options?: { readonly projectIds?: ReadonlyArray<ProjectId> },
   ) => Effect.Effect<Record<ThreadId, OrchestrationV2ThreadLinkMetadata>, ProjectionStoreV2Error>;
   readonly getThreadTitles: (
     threadIds: ReadonlyArray<ThreadId>,
+    options?: { readonly projectIds?: ReadonlyArray<ProjectId> },
   ) => Effect.Effect<Record<ThreadId, string>, ProjectionStoreV2Error>;
   readonly getThreadWorktreePaths: (options?: {
     readonly includeArchived?: boolean;
@@ -8408,6 +8410,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       {
         location,
         projectId,
+        projectIds,
         unsettledOnly = false,
         familyOf,
         worktreePath,
@@ -8420,7 +8423,9 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
         readonly includeDeleted?: boolean;
       } = {},
     ) =>
-      sql<ShellThreadRow>`
+      projectIds !== undefined && projectIds.length === 0
+        ? Effect.succeed<ReadonlyArray<ShellThreadRow>>([])
+        : sql<ShellThreadRow>`
             SELECT
               t.thread_id,
               t.payload_json,
@@ -8605,6 +8610,10 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 : sql``
             }${threadId === undefined ? sql`` : sql` AND t.thread_id = ${threadId}`}${
               projectId === undefined ? sql`` : sql` AND t.project_id = ${projectId}`
+            }${
+              projectIds === undefined
+                ? sql``
+                : sql` AND t.project_id IN (SELECT value FROM json_each(${encodeIdList(projectIds)}))`
             }${
               location === "active"
                 ? sql` AND t.archived_at IS NULL`
@@ -9547,22 +9556,27 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
     const PENDING_ITEMS_INDEX = sql.literal(
       "INDEXED BY orchestration_v2_projection_turn_items_shell_pending_idx",
     );
-    const listActiveShellIndex = Effect.fn("ProjectionStore.listActiveShellIndex")(function* () {
-      const rows = yield* sql<{
-        readonly thread_id: string;
-        readonly project_id: string;
-        readonly relationship_to_parent: string | null;
-        readonly parent_thread_id: string | null;
-        readonly root_thread_id: string;
-        readonly side_chat: number | null;
-        readonly settled_override: string | null;
-        readonly settled_at: string | null;
-        readonly pinned_at: string | null;
-        readonly pin_order_key: string | null;
-        readonly snoozed_until: string | null;
-        readonly may_be_live: number;
-        readonly has_remote_tasks: number;
-      }>`
+    const listActiveShellIndex = Effect.fn("ProjectionStore.listActiveShellIndex")(
+      function* (options?: { readonly projectIds?: ReadonlyArray<ProjectId> }) {
+        const projectIds = options?.projectIds;
+        if (projectIds !== undefined && projectIds.length === 0) {
+          return [];
+        }
+        const rows = yield* sql<{
+          readonly thread_id: string;
+          readonly project_id: string;
+          readonly relationship_to_parent: string | null;
+          readonly parent_thread_id: string | null;
+          readonly root_thread_id: string;
+          readonly side_chat: number | null;
+          readonly settled_override: string | null;
+          readonly settled_at: string | null;
+          readonly pinned_at: string | null;
+          readonly pin_order_key: string | null;
+          readonly snoozed_until: string | null;
+          readonly may_be_live: number;
+          readonly has_remote_tasks: number;
+        }>`
         SELECT
           t.thread_id,
           t.project_id,
@@ -9624,25 +9638,31 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
           ) AS has_remote_tasks
         FROM orchestration_v2_projection_threads t
         WHERE t.deleted_at IS NULL
-          AND t.archived_at IS NULL
+          AND t.archived_at IS NULL${
+            projectIds === undefined
+              ? sql``
+              : sql` AND t.project_id IN (SELECT value FROM json_each(${encodeIdList(projectIds)}))`
+          }
         ORDER BY t.updated_at ASC, t.thread_id ASC
       `;
-      return rows.map((row): ActiveShellIndexEntry => ({
-        id: ThreadId.make(row.thread_id),
-        projectId: ProjectId.make(row.project_id),
-        lineage: shellIndexLineage(row),
-        settledOverride:
-          row.settled_override === "settled" || row.settled_override === "active"
-            ? row.settled_override
-            : null,
-        settledAt: row.settled_at === null ? null : DateTime.makeUnsafe(row.settled_at),
-        pinnedAt: row.pinned_at === null ? null : DateTime.makeUnsafe(row.pinned_at),
-        pinOrderKey: row.pin_order_key,
-        snoozedUntil: row.snoozed_until === null ? null : DateTime.makeUnsafe(row.snoozed_until),
-        mayBeLive: row.may_be_live === 1,
-        hasRemoteTasks: row.has_remote_tasks === 1,
-      }));
-    }, Effect.mapError(shellSnapshotReadError));
+        return rows.map((row): ActiveShellIndexEntry => ({
+          id: ThreadId.make(row.thread_id),
+          projectId: ProjectId.make(row.project_id),
+          lineage: shellIndexLineage(row),
+          settledOverride:
+            row.settled_override === "settled" || row.settled_override === "active"
+              ? row.settled_override
+              : null,
+          settledAt: row.settled_at === null ? null : DateTime.makeUnsafe(row.settled_at),
+          pinnedAt: row.pinned_at === null ? null : DateTime.makeUnsafe(row.pinned_at),
+          pinOrderKey: row.pin_order_key,
+          snoozedUntil: row.snoozed_until === null ? null : DateTime.makeUnsafe(row.snoozed_until),
+          mayBeLive: row.may_be_live === 1,
+          hasRemoteTasks: row.has_remote_tasks === 1,
+        }));
+      },
+      Effect.mapError(shellSnapshotReadError),
+    );
 
     const listActiveThreads = Effect.fn("ProjectionStore.listActiveThreads")(function* (
       projectId?: ProjectId,
@@ -9713,8 +9733,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const getThreadLinkMetadata = Effect.fn("ProjectionStore.getThreadLinkMetadata")(function* (
       threadIds: ReadonlyArray<ThreadId>,
+      options?: { readonly projectIds?: ReadonlyArray<ProjectId> },
     ) {
-      if (threadIds.length === 0) return {};
+      const projectIds = options?.projectIds;
+      if (threadIds.length === 0 || (projectIds !== undefined && projectIds.length === 0))
+        return {};
       const rows = yield* sql<{
         readonly thread_id: ThreadId;
         readonly title: string;
@@ -9722,7 +9745,11 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       }>`
         SELECT thread_id, title, project_id
         FROM orchestration_v2_projection_threads
-        WHERE deleted_at IS NULL AND thread_id IN ${sql.in(threadIds)}
+        WHERE deleted_at IS NULL AND thread_id IN ${sql.in(threadIds)}${
+          projectIds === undefined
+            ? sql``
+            : sql` AND project_id IN (SELECT value FROM json_each(${encodeIdList(projectIds)}))`
+        }
       `;
       return Object.fromEntries(
         rows.map((row) => [row.thread_id, { title: row.title, projectId: row.project_id }]),
@@ -9731,12 +9758,19 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
 
     const getThreadTitles = Effect.fn("ProjectionStore.getThreadTitles")(function* (
       threadIds: ReadonlyArray<ThreadId>,
+      options?: { readonly projectIds?: ReadonlyArray<ProjectId> },
     ) {
-      if (threadIds.length === 0) return {};
+      const projectIds = options?.projectIds;
+      if (threadIds.length === 0 || (projectIds !== undefined && projectIds.length === 0))
+        return {};
       const rows = yield* sql<{ readonly thread_id: ThreadId; readonly title: string }>`
         SELECT thread_id, title
         FROM orchestration_v2_projection_threads
-        WHERE deleted_at IS NULL AND thread_id IN ${sql.in(threadIds)}
+        WHERE deleted_at IS NULL AND thread_id IN ${sql.in(threadIds)}${
+          projectIds === undefined
+            ? sql``
+            : sql` AND project_id IN (SELECT value FROM json_each(${encodeIdList(projectIds)}))`
+        }
       `;
       return Object.fromEntries(rows.map((row) => [row.thread_id, row.title]));
     }, Effect.mapError(shellSnapshotReadError));
