@@ -44,11 +44,25 @@ export type ServerClient = HttpApiClient.ForApi<typeof EnvironmentHttpApi>;
 const SESSION_TTL = Duration.minutes(2);
 const REQUEST_TIMEOUT = Duration.seconds(30);
 
+/** The CLI and a server it drives usually share a host; a provider proxy would only add a hop. */
+const bypassProxyFor = (origin: string) => {
+  const host = URL.canParse(origin) ? new URL(origin).hostname : "127.0.0.1";
+  const entries = (process.env.NO_PROXY ?? process.env.no_proxy ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+  if (entries.includes(host)) return;
+  const widened = [...entries, host, "localhost", "127.0.0.1"].join(",");
+  process.env.NO_PROXY = widened;
+  process.env.no_proxy = widened;
+};
+
 /** A client of the server at `origin`, signed in as a short-lived session for the scope. */
 export const serverClient = Effect.fn("RunningServer.serverClient")(function* (
   origin: string,
   scopes: ReadonlyArray<AuthEnvironmentScope>,
 ) {
+  bypassProxyFor(origin);
   const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
   const session = yield* Effect.acquireRelease(
     environmentAuth.issueSession({ scopes, subject: "cli", label: "t3 cli", ttl: SESSION_TTL }),
