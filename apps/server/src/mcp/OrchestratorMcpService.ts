@@ -123,6 +123,7 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
+  clientAllowedProjectIds,
   clientModeCeiling,
   type McpInvocationScope,
   type McpThreadInvocationScope,
@@ -137,7 +138,12 @@ import {
   runtimeModeRank,
   taskPrompt,
 } from "./delegatedTaskModes.ts";
-import { assertTargetWithinLimits, isLiveCallerShell, threadNotFound } from "./threadAccess.ts";
+import {
+  assertClientProjectAccess,
+  assertTargetWithinLimits,
+  isLiveCallerShell,
+  threadNotFound,
+} from "./threadAccess.ts";
 import { WITHHELD, withoutWebhookUrlToken } from "../scheduledTasks/webhookUrlToken.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as PeerForwarding from "../peer/PeerForwarding.ts";
@@ -1477,6 +1483,7 @@ const make = Effect.gen(function* () {
         `Thread ${threadId} was not found.`,
       );
     }
+    yield* assertClientProjectAccess(scope, shell.projectId, "project:read");
     // Keeps legacy import and project validation; callers read only the thread row.
     return yield* threadManagement
       .getProjectThreadRecords({ projectId: shell.projectId, threadId }, [])
@@ -1579,6 +1586,7 @@ const make = Effect.gen(function* () {
         `Thread ${threadId} is no longer available.`,
       );
     }
+    yield* assertClientProjectAccess(scope, shell.projectId, "project:read");
     const input = { projectId: shell.projectId, threadId };
     // Acknowledging a caller's child-task result matches it against every run and transfer.
     if (
@@ -2409,6 +2417,7 @@ const make = Effect.gen(function* () {
    * the caller's limits.
    */
   const loadScheduledTask = Effect.fn("OrchestratorMcpService.loadScheduledTask")(function* (
+    scope: McpInvocationScope,
     scheduledTaskId: ScheduledTask["id"],
     limits: {
       readonly runtimeMode: RuntimeMode;
@@ -2426,6 +2435,7 @@ const make = Effect.gen(function* () {
     if (task === undefined) {
       return yield* failure("task_not_found", `Scheduled task ${scheduledTaskId} was not found.`);
     }
+    yield* assertClientProjectAccess(scope, task.projectId, "project:thread.operate");
     yield* requireScheduledTaskWithinLimits(task, limits);
     return task;
   });
@@ -2434,6 +2444,7 @@ const make = Effect.gen(function* () {
     scheduleTask: Effect.fn("OrchestratorMcpService.scheduleTask")(function* (scope, input) {
       const { parent, limits } = yield* loadCaller(scope, ["runs"]);
       const projectId = yield* resolveProjectTarget(parent, input.projectId);
+      yield* assertClientProjectAccess(scope, projectId, "project:thread.operate");
       yield* assertLiveCallerForOtherProject(scope, parent, projectId);
       const project = yield* requireProject(projectId);
       const bindToCurrentThread =
@@ -2511,6 +2522,10 @@ const make = Effect.gen(function* () {
       function* (scope, input) {
         const { parent } = yield* loadCaller(scope, []);
         const projectId = input.projectId ?? parent?.thread.projectId;
+        if (projectId !== undefined) {
+          yield* assertClientProjectAccess(scope, projectId, "project:read");
+        }
+        const allowedProjects = clientAllowedProjectIds(scope);
         const { tasks } = yield* scheduledTasks
           .list()
           .pipe(
@@ -2522,6 +2537,7 @@ const make = Effect.gen(function* () {
           tasks: tasks
             .filter(
               (task) =>
+                (allowedProjects === undefined || allowedProjects.has(task.projectId)) &&
                 (projectId === undefined || task.projectId === projectId) &&
                 (input.scheduledTaskId === undefined || task.id === input.scheduledTaskId),
             )
@@ -2532,7 +2548,7 @@ const make = Effect.gen(function* () {
     updateScheduledTask: Effect.fn("OrchestratorMcpService.updateScheduledTask")(
       function* (scope, input) {
         const { parent, limits } = yield* loadCaller(scope, ["runs"]);
-        const existing = yield* loadScheduledTask(input.scheduledTaskId, limits);
+        const existing = yield* loadScheduledTask(scope, input.scheduledTaskId, limits);
         yield* assertLiveCallerForOtherProject(scope, parent, existing.projectId);
         if (
           input.bindToCurrentThread === true &&
@@ -2609,7 +2625,7 @@ const make = Effect.gen(function* () {
     deleteScheduledTask: Effect.fn("OrchestratorMcpService.deleteScheduledTask")(
       function* (scope, input) {
         const { parent, limits } = yield* loadCaller(scope, ["runs"]);
-        const existing = yield* loadScheduledTask(input.scheduledTaskId, limits);
+        const existing = yield* loadScheduledTask(scope, input.scheduledTaskId, limits);
         yield* assertLiveCallerForOtherProject(scope, parent, existing.projectId);
         yield* scheduledTasks
           .delete({ id: existing.id })
@@ -3501,16 +3517,20 @@ const make = Effect.gen(function* () {
             "Pass projectId, or allProjects: true for every project. This MCP client is not running inside a T3 thread.",
           );
       if (!input.allProjects && input.projectId !== undefined) {
+        yield* assertClientProjectAccess(scope, input.projectId, "project:read");
         yield* requireProject(input.projectId);
       }
+      const allowedProjects = clientAllowedProjectIds(scope);
       const listFailure = (error: unknown) =>
         failure("orchestration_error", `Unable to list threads: ${errorMessage(error)}`);
-      const projectThreads = yield* threadManagement
+      const projectThreads = (yield* threadManagement
         .listProjectThreads({
           projectId: projectId ?? undefined,
           includeSubagents: input.includeSubagents !== false,
         })
-        .pipe(Effect.mapError(listFailure));
+        .pipe(Effect.mapError(listFailure))).filter(
+        (thread) => allowedProjects === undefined || allowedProjects.has(thread.projectId),
+      );
       const nowMs = yield* Clock.currentTimeMillis;
       // An empty list is no filter: clients that fill every optional field send `[]`.
       const statuses =

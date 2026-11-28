@@ -1379,6 +1379,14 @@ const UsageHistoryRetentionDays = Schema.Union([
   Schema.Literal("unlimited"),
 ]);
 
+export const MIN_AUDIT_RETENTION_DAYS = 1;
+export const MAX_AUDIT_RETENTION_DAYS = 3650;
+export const DEFAULT_AUDIT_RETENTION_DAYS = 90;
+export const AuditRetentionDays = Schema.Int.check(
+  Schema.isBetween({ minimum: MIN_AUDIT_RETENTION_DAYS, maximum: MAX_AUDIT_RETENTION_DAYS }),
+);
+export type AuditRetentionDays = typeof AuditRetentionDays.Type;
+
 const CloudSpeechCredential = SettingsSecretValue.pipe(
   Schema.withDecodingDefault(Effect.succeed("")),
 );
@@ -1509,6 +1517,12 @@ export const ServerSettings = Schema.Struct({
   hideTaggedThreads: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /** Beta: guest links for this machine's threads. Off refuses new links and pauses existing ones. */
   guestSharingEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /** Multi-user mode: advertises authMode "multi-user" so clients show member login instead of single-owner pairing. */
+  multiUser: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /** Days to retain audit_events before hourly background pruning deletes older entries. */
+  auditRetentionDays: AuditRetentionDays.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_AUDIT_RETENTION_DAYS)),
+  ),
   /**
    * Beta: links to the user's other machines, both ways. Off refuses new links, calls over links
    * and tasks on another machine; tasks already running there finish.
@@ -1956,6 +1970,8 @@ export const ServerSettingsPatch = Schema.Struct({
   hiddenThreadTags: Schema.optionalKey(Schema.Array(Schema.String)),
   hideTaggedThreads: Schema.optionalKey(Schema.Boolean),
   guestSharingEnabled: Schema.optionalKey(Schema.Boolean),
+  multiUser: Schema.optionalKey(Schema.Boolean),
+  auditRetentionDays: Schema.optionalKey(AuditRetentionDays),
   linkedEnvironmentsEnabled: Schema.optionalKey(Schema.Boolean),
   workflowsEnabled: Schema.optionalKey(Schema.Boolean),
   promptSuggestionsEnabled: Schema.optionalKey(Schema.Boolean),
@@ -2060,7 +2076,12 @@ export function requiredScopesForServerSettingsPatch(
   let changesAccess = false;
   for (const [key, value] of Object.entries(patch)) {
     if (value === undefined) continue;
-    if (key === "requireConnectDeviceApproval" || key === "enablePreviewTunnel") {
+    if (
+      key === "requireConnectDeviceApproval" ||
+      key === "enablePreviewTunnel" ||
+      key === "multiUser" ||
+      key === "auditRetentionDays"
+    ) {
       changesAccess = true;
     } else if (
       key === "providers" ||
@@ -2089,19 +2110,23 @@ export function requiredScopesForServerSettingsPatch(
   ];
 }
 
-/** Host-executed project scripts require settings-write authority in addition to orchestration:operate. */
+/** Host-executed project scripts and isolation changes require settings-write authority in addition to orchestration:operate. */
 export function requiredScopesForProjectMutation(
   mutation: ProjectMutation,
 ): ReadonlyArray<AuthEnvironmentScope> {
-  if (mutation.type === "project.delete" || mutation.scripts === undefined) {
+  if (mutation.type === "project.delete") {
     return [AuthOrchestrationOperateScope];
   }
-  return [
-    ...new Set([
-      AuthOrchestrationOperateScope,
+  const scopes: Array<AuthEnvironmentScope> = [AuthOrchestrationOperateScope];
+  if (mutation.scripts !== undefined) {
+    scopes.push(
       ...requiredScopesForServerSettingsPatch({ defaultProjectScripts: mutation.scripts }),
-    ]),
-  ];
+    );
+  }
+  if (mutation.type === "project.update" && mutation.isolationLevel !== undefined) {
+    scopes.push(AuthSettingsWriteScope);
+  }
+  return [...new Set(scopes)];
 }
 
 export const ClientSettingsPatch = Schema.Struct({

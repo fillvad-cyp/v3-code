@@ -3,10 +3,12 @@ import {
   IsoDateTime,
   ModelSelection,
   type OrchestrationProjectShell,
+  PrincipalId,
   StoredProjectIcon,
   ProjectId,
   ProjectScript,
   ProjectTrackedFolders,
+  ProjectVisibility,
   ThreadEnvMode,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
@@ -44,6 +46,8 @@ export const ProjectRow = Schema.Struct({
   trackedFolders: ProjectTrackedFolders,
   pinnedAt: Schema.NullOr(IsoDateTime),
   archivedAt: Schema.NullOr(IsoDateTime),
+  ownerId: Schema.NullOr(PrincipalId),
+  visibility: ProjectVisibility,
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
   deletedAt: Schema.NullOr(IsoDateTime),
@@ -104,6 +108,14 @@ export class ProjectStoreV2 extends Context.Service<
     readonly listShells: (options?: {
       readonly projectIds?: ReadonlyArray<ProjectId>;
     }) => Effect.Effect<ReadonlyArray<OrchestrationProjectShell>, ProjectStoreV2Error>;
+    readonly setOwnership: (input: {
+      readonly projectId: ProjectId;
+      readonly ownerId: PrincipalId;
+      readonly visibility: ProjectVisibility;
+    }) => Effect.Effect<void, ProjectStoreV2Error>;
+    readonly listOwnedByPrincipal: (
+      principalId: PrincipalId,
+    ) => Effect.Effect<ReadonlyArray<ProjectId>, ProjectStoreV2Error>;
   }
 >()("v3code/orchestration-v2/ProjectStore/ProjectStoreV2") {}
 
@@ -135,6 +147,8 @@ export const make = Effect.gen(function* () {
         tracked_folders_json AS "trackedFolders",
         pinned_at AS "pinnedAt",
         archived_at AS "archivedAt",
+        owner_id AS "ownerId",
+        visibility,
         created_at AS "createdAt",
         updated_at AS "updatedAt",
         deleted_at AS "deletedAt"
@@ -169,6 +183,8 @@ export const make = Effect.gen(function* () {
             tracked_folders_json,
             pinned_at,
             archived_at,
+            owner_id,
+            visibility,
             created_at,
             updated_at,
             deleted_at
@@ -187,6 +203,8 @@ export const make = Effect.gen(function* () {
             ${encoded.trackedFolders},
             ${encoded.pinnedAt},
             ${encoded.archivedAt},
+            ${encoded.ownerId},
+            ${encoded.visibility},
             ${encoded.createdAt},
             ${encoded.updatedAt},
             ${encoded.deletedAt}
@@ -209,12 +227,28 @@ export const make = Effect.gen(function* () {
             tracked_folders_json = excluded.tracked_folders_json,
             pinned_at = excluded.pinned_at,
             archived_at = excluded.archived_at,
+            owner_id = COALESCE(excluded.owner_id, projection_projects.owner_id),
+            visibility = CASE
+              WHEN projection_projects.visibility = 'private' THEN 'private'
+              ELSE excluded.visibility
+            END,
             created_at = excluded.created_at,
             updated_at = excluded.updated_at,
             deleted_at = excluded.deleted_at
         `,
       ),
     );
+
+  const selectOwnedProjectIds = SqlSchema.findAll({
+    Request: PrincipalId,
+    Result: Schema.Struct({ projectId: ProjectId }),
+    execute: (principalId) => sql`
+      SELECT project_id AS "projectId"
+      FROM projection_projects
+      WHERE deleted_at IS NULL AND owner_id = ${principalId}
+      ORDER BY created_at ASC, project_id ASC
+    `,
+  });
 
   const mapError =
     (operation: string) =>
@@ -243,6 +277,26 @@ export const make = Effect.gen(function* () {
       mapError("findActiveByWorkspaceRoot"),
     );
 
+  const setOwnership: ProjectStoreV2["Service"]["setOwnership"] = Effect.fn(
+    "ProjectStoreV2.setOwnership",
+  )(function* ({ projectId, ownerId, visibility }) {
+    yield* sql`
+      UPDATE projection_projects
+      SET owner_id = ${ownerId}, visibility = ${visibility}
+      WHERE project_id = ${projectId}
+    `.pipe(Effect.asVoid, mapError("setOwnership"));
+  });
+
+  const listOwnedByPrincipal: ProjectStoreV2["Service"]["listOwnedByPrincipal"] = Effect.fn(
+    "ProjectStoreV2.listOwnedByPrincipal",
+  )(function* (principalId) {
+    return yield* selectOwnedProjectIds(principalId).pipe(
+      NodeSqliteClient.readOnly,
+      Effect.map((rows) => rows.map((row) => row.projectId)),
+      mapError("listOwnedByPrincipal"),
+    );
+  });
+
   const apply: ProjectStoreV2["Service"]["apply"] = Effect.fn("ProjectStoreV2.apply")(
     function* (event) {
       if (event.type === "project.created") {
@@ -261,6 +315,8 @@ export const make = Effect.gen(function* () {
           trackedFolders: payload.trackedFolders ?? [],
           pinnedAt: null,
           archivedAt: null,
+          ownerId: null,
+          visibility: "shared",
           createdAt: payload.createdAt,
           updatedAt: payload.updatedAt,
           deletedAt: null,
@@ -312,6 +368,8 @@ export const make = Effect.gen(function* () {
         options?.projectIds === undefined ? undefined : { projectIds: options.projectIds },
       ).pipe(Effect.map((rows) => rows.map(toShell)));
     }),
+    setOwnership,
+    listOwnedByPrincipal,
   });
 });
 

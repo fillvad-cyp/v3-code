@@ -2,7 +2,11 @@ import { MarkedText, markedTextEnglish, translatableMessage } from "../errors/tr
 import { msg } from "gt-i18n";
 import {
   EnvironmentHttpApi,
+  EnvironmentHttpBadRequestError,
   EnvironmentHttpCommonError,
+  EnvironmentHttpConflictError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentHttpTooManyRequestsError,
   type EnvironmentAuthInvalidError,
   type EnvironmentConnectApprovalPendingError,
   type EnvironmentInternalError,
@@ -21,6 +25,10 @@ import { FetchHttpClient, HttpClient, HttpClientError } from "effect/http";
 import * as HttpApiClient from "effect/http-api/HttpApiClient";
 
 const isEnvironmentHttpCommonError = Schema.is(EnvironmentHttpCommonError);
+const isEnvironmentHttpBadRequestError = Schema.is(EnvironmentHttpBadRequestError);
+const isEnvironmentHttpConflictError = Schema.is(EnvironmentHttpConflictError);
+const isEnvironmentHttpForbiddenError = Schema.is(EnvironmentHttpForbiddenError);
+const isEnvironmentHttpTooManyRequestsError = Schema.is(EnvironmentHttpTooManyRequestsError);
 
 export class RemoteEnvironmentAuthFetchError extends Schema.TaggedError<RemoteEnvironmentAuthFetchError>()(
   "RemoteEnvironmentAuthFetchError",
@@ -92,6 +100,10 @@ export type RemoteEnvironmentRequestError =
   | EnvironmentResourceNotFoundError
   | EnvironmentInternalError
   | EnvironmentConnectApprovalPendingError
+  | EnvironmentHttpBadRequestError
+  | EnvironmentHttpConflictError
+  | EnvironmentHttpForbiddenError
+  | EnvironmentHttpTooManyRequestsError
   | RemoteEnvironmentAuthFetchError
   | RemoteEnvironmentAuthInvalidJsonError
   | RemoteEnvironmentAuthUndeclaredStatusError
@@ -144,7 +156,13 @@ const failRemoteRequest = (
   if (isRemoteEnvironmentAuthTimeoutError(cause)) {
     return Effect.fail(cause);
   }
-  if (isEnvironmentHttpCommonError(cause)) {
+  if (
+    isEnvironmentHttpCommonError(cause) ||
+    isEnvironmentHttpBadRequestError(cause) ||
+    isEnvironmentHttpConflictError(cause) ||
+    isEnvironmentHttpForbiddenError(cause) ||
+    isEnvironmentHttpTooManyRequestsError(cause)
+  ) {
     return Effect.fail(cause);
   }
   if (Schema.isSchemaError(cause)) {

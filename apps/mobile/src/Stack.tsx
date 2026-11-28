@@ -80,6 +80,7 @@ import {
 import { McpAppFullscreenScreen } from "./features/threads/McpAppFullscreenScreen";
 import { ConnectionsRouteScreen } from "./features/connection/ConnectionsRouteScreen";
 import { ConnectionsNewRouteScreen } from "./features/connection/ConnectionsNewRouteScreen";
+import { EnvironmentLoginRouteScreen } from "./features/connection/EnvironmentLoginRouteScreen";
 import { AddProjectDestinationRoute } from "./features/projects/AddProjectDestinationRoute";
 import { AddProjectLocalRoute } from "./features/projects/AddProjectLocalRoute";
 import { AddProjectNewRoute } from "./features/projects/AddProjectNewRoute";
@@ -217,6 +218,7 @@ const ROUTE_TITLES: Readonly<Record<string, string>> = {
   ConnectOnboarding: msg("Set up {product}", { product: "T3 Connect" }),
   Connections: msg("Environments"),
   ConnectionsNew: msg("Add Environment"),
+  EnvironmentLogin: msg("Sign in"),
 };
 
 // Thread settings keep the Duo's vertical bar so cancel, search, filter and confirm sit in the
@@ -866,6 +868,11 @@ const RootStackConfig = createWorkspaceStackNavigator({
       screen: ConnectionsNewRouteScreen,
       linking: "connections/new",
       options: sheetRoute({ detent: 0.55, maxDetent: 0.7 }),
+    }),
+    EnvironmentLogin: createNativeStackScreen({
+      screen: EnvironmentLoginRouteScreen,
+      linking: "login",
+      options: sheetRoute({ detent: 0.65, maxDetent: 0.85, android: "card" }),
     }),
     NotFound: createNativeStackScreen({
       screen: NotFoundScreen,

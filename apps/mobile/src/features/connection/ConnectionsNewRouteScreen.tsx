@@ -280,6 +280,23 @@ function PairingForm({
                     ))}
             </Text>
           </View>
+
+          <Pressable
+            accessibilityRole="button"
+            disabled={connecting}
+            onPress={() =>
+              navigation.navigate("EnvironmentLogin", {
+                ...(hostInput.trim().length > 0 ? { host: hostInput.trim() } : {}),
+                ...(routeFor === undefined ? {} : { environmentId: routeFor }),
+                ...(linked ? { label: linked.label } : {}),
+              })
+            }
+            className="items-center rounded-[18px] bg-grouped-card px-4 py-3.5 active:opacity-70"
+          >
+            <Text className="text-sm font-t3-medium text-foreground">
+              <T>Sign in with a one-time code instead</T>
+            </Text>
+          </Pressable>
         </View>
       </ScrollView>
     </SettingsScreen>

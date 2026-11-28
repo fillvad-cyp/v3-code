@@ -91,6 +91,8 @@ function makeHarness(
               trackedFolders: [],
               pinnedAt: null,
               archivedAt: null,
+              ownerId: null,
+              visibility: "shared" as const,
               createdAt: "2026-06-20T00:00:00.000Z",
               updatedAt: "2026-06-20T00:00:00.000Z",
               deletedAt: null,

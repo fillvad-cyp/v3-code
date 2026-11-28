@@ -400,9 +400,24 @@ export class PreviewClearProfileError extends Schema.TaggedError<PreviewClearPro
   }
 }
 
+export class PreviewTabLimitExceededError extends Schema.TaggedError<PreviewTabLimitExceededError>()(
+  "PreviewTabLimitExceededError",
+  {
+    status: Schema.Literal(429),
+    limit: NonNegativeInt,
+    activeCount: NonNegativeInt,
+    retryAfterSeconds: PositiveInt,
+  },
+) {
+  override get message() {
+    return `Preview tab limit (${this.limit}) reached (${this.activeCount} open). Close a preview tab and retry after ${this.retryAfterSeconds}s.`;
+  }
+}
+
 export const PreviewError = Schema.Union([
   PreviewSessionLookupError,
   PreviewInvalidUrlError,
   PreviewControlRequiredError,
+  PreviewTabLimitExceededError,
 ]);
 export type PreviewError = typeof PreviewError.Type;

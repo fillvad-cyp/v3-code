@@ -42,6 +42,10 @@ function PairRouteView() {
     return <HostedPairingRouteSurface />;
   }
 
+  if (authGateState.status !== "requires-auth") {
+    return null;
+  }
+
   return (
     <PairingRouteSurface
       auth={authGateState.auth}

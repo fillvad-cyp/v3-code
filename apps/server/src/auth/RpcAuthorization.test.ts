@@ -1,12 +1,19 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
+  AuthAccessReadScope,
   AuthEnvironmentMaintainScope,
   AuthDiagnosticsReadScope,
   AuthFilesystemReadScope,
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
   AuthAccessWriteScope,
+  AuthSessionId,
+  AuthStandardClientScopes,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  mcpClientScopes,
+  PrincipalId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProjectId,
@@ -25,6 +32,7 @@ import {
   RunId,
   WS_METHODS,
   WsRpcGroup,
+  type OrchestrationV2AppThread,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -32,6 +40,19 @@ import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 import * as RpcTest from "effect/rpc/RpcTest";
 
+import * as ServerConfig from "../config.ts";
+import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
+import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ResourceResolver from "../access/ResourceResolver.ts";
+import * as EnvironmentAuth from "./EnvironmentAuth.ts";
+import * as ServerSecretStore from "./ServerSecretStore.ts";
 import {
   RPC_REQUIRED_SCOPES,
   requiredScopeForRpcMethod,
@@ -398,22 +419,18 @@ it.effect("hands out a link code or a guest link only within what the session it
       yield* manager[WS_METHODS.peerLinksPairLink]({ environmentId, access: "read-only" }).pipe(
         Effect.flip,
       ),
-    ).toMatchObject({ requiredPermission: AuthOrchestrationReadScope });
+    ).toMatchObject({ requiredPermission: AuthAccessReadScope });
     expect(
       yield* manager[WS_METHODS.guestShareCreate]({ threadId }).pipe(Effect.flip),
     ).toMatchObject({ requiredPermission: AuthOrchestrationReadScope });
 
-    const supervisor = yield* clientWith([
-      AuthAccessWriteScope,
-      AuthOrchestrationReadScope,
-      AuthOrchestrationOperateScope,
-    ]);
+    const supervisor = yield* clientWith([AuthAccessWriteScope, ...mcpClientScopes("auto")]);
     expect(
       yield* supervisor[WS_METHODS.peerLinksPairLink]({
         environmentId,
         access: "full-access",
       }).pipe(Effect.flip),
-    ).toMatchObject({ requiredPermission: AuthSettingsWriteScope });
+    ).toMatchObject({ requiredPermission: AuthProvidersManageScope });
     expect(handled).toBe(0);
 
     expect(
@@ -1094,3 +1111,729 @@ it.effect(
       expect(handled).toEqual([false, true]);
     }).pipe(Effect.scoped),
 );
+
+describe("RPC project access gate", () => {
+  const accessTags = [
+    ORCHESTRATION_V2_WS_METHODS.launchThread,
+    ORCHESTRATION_V2_WS_METHODS.getThreadProjection,
+    ORCHESTRATION_V2_WS_METHODS.dispatchCommand,
+    ORCHESTRATION_V2_WS_METHODS.searchThreads,
+    WS_METHODS.projectsMutate,
+    WS_METHODS.projectsCreateNew,
+  ] as const;
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof accessTags)[number]> =>
+        !(accessTags as ReadonlyArray<string>).includes(tag),
+    ),
+  );
+
+  const projectA = ProjectId.make("project-a");
+  const projectB = ProjectId.make("project-b");
+  const threadA = ThreadId.make("thread-a");
+  const threadB = ThreadId.make("thread-b");
+  const threadMissing = ThreadId.make("thread-missing");
+  const baseScopes = [AuthOrchestrationReadScope, AuthOrchestrationOperateScope] as const;
+
+  const launchPayload = (projectId: ProjectId) => ({
+    commandId: CommandId.make(`launch:${projectId}`),
+    projectId,
+    title: "Test",
+    modelSelection: {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5.4",
+    },
+    runtimeMode: "auto" as const,
+    interactionMode: "default" as const,
+    workspaceStrategy: { type: "root" as const },
+  });
+
+  const makeGateServices = (
+    threads: ReadonlyMap<string, ProjectId>,
+    onThreadLookup?: (threadId: ThreadId) => void,
+  ) =>
+    Layer.mergeAll(
+      ProjectAccess.layer.pipe(
+        Layer.provide(
+          Layer.mergeAll(
+            Layer.succeed(Principals.PrincipalRepository, {
+              get: () => Effect.succeedNone,
+            } as unknown as Principals.PrincipalRepository["Service"]),
+            Layer.succeed(Memberships.MembershipRepository, {
+              listForPrincipal: () => Effect.succeed([]),
+            } as unknown as Memberships.MembershipRepository["Service"]),
+            Layer.succeed(ProjectStore.ProjectStoreV2, {
+              listOwnedByPrincipal: () => Effect.succeed([]),
+            } as unknown as ProjectStore.ProjectStoreV2["Service"]),
+          ),
+        ),
+      ),
+      ResourceResolver.layer.pipe(
+        Layer.provide(
+          Layer.succeed(ProjectionStore.ProjectionStoreV2, {
+            findThread: (threadId: ThreadId) => {
+              onThreadLookup?.(threadId);
+              const projectId = threads.get(threadId);
+              return Effect.succeed(
+                projectId === undefined
+                  ? null
+                  : ({ id: threadId, projectId } as unknown as OrchestrationV2AppThread),
+              );
+            },
+          } as unknown as ProjectionStore.ProjectionStoreV2["Service"]),
+        ),
+      ),
+    );
+
+  const makeHandlers = (handled: Array<string>) =>
+    Layer.mergeAll(
+      group.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.launchThread, ({ projectId }) =>
+        Effect.sync(() => {
+          handled.push(`launch:${projectId}`);
+          return {
+            threadId: threadA,
+            resumed: false,
+            sequence: 1,
+            projection: {} as never,
+          };
+        }),
+      ),
+      group.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.getThreadProjection, ({ threadId }) =>
+        Effect.sync(() => {
+          handled.push(`get:${threadId}`);
+          return {} as never;
+        }),
+      ),
+      group.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.dispatchCommand, ({ commandId }) =>
+        Effect.sync(() => {
+          handled.push(`dispatch:${commandId}`);
+          return { sequence: 1 };
+        }),
+      ),
+      group.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.searchThreads, ({ projectIds }) =>
+        Effect.sync(() => {
+          handled.push(`search:${(projectIds ?? []).join(",")}`);
+          return { matches: [] };
+        }),
+      ),
+      group.toLayerHandler(WS_METHODS.projectsMutate, (mutation) =>
+        Effect.sync(() => {
+          handled.push(`mutate:${mutation.type}:${mutation.projectId}`);
+          return {
+            id: mutation.projectId,
+            title: mutation.type === "project.create" ? mutation.title : "Project",
+            workspaceRoot:
+              mutation.type === "project.create" ? mutation.workspaceRoot : "/work/project",
+            defaultModelSelection: null,
+            scripts: [],
+            createdAt: "2026-11-25T00:00:00.000Z",
+            updatedAt: "2026-11-25T00:00:00.000Z",
+            deletedAt: null,
+          };
+        }),
+      ),
+      group.toLayerHandler(WS_METHODS.projectsCreateNew, ({ name }) =>
+        Effect.sync(() => {
+          handled.push(`createNew:${name}`);
+          return {
+            projectId: ProjectId.make("project-created"),
+            workspaceRoot: `/managed/projects/${name}`,
+          };
+        }),
+      ),
+    );
+
+  it.effect("lets owner and legacy environment-binding actors pass without thread lookups", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const lookups: Array<string> = [];
+      const access = yield* ProjectAccess.ProjectAccess;
+      const resolver = yield* ResourceResolver.ResourceResolver;
+      const legacyActor = yield* access.resolve({
+        sessionId: AuthSessionId.make("legacy"),
+        subject: "legacy-cli",
+        scopes: baseScopes,
+      });
+      const gate = RpcAuthorization.makeAccessGate({ actor: legacyActor, access, resolver });
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(makeHandlers(handled), RpcAuthorization.layer(baseScopes, undefined, gate)),
+        ),
+      );
+
+      yield* client[ORCHESTRATION_V2_WS_METHODS.launchThread](launchPayload(projectB));
+      yield* client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({ threadId: threadB });
+      yield* client[ORCHESTRATION_V2_WS_METHODS.searchThreads]({
+        query: "hello",
+        projectIds: [projectA, projectB],
+      });
+
+      expect(handled).toEqual([
+        `launch:${projectB}`,
+        `get:${threadB}`,
+        `search:${projectA},${projectB}`,
+      ]);
+      expect(lookups).toEqual([]);
+    }).pipe(
+      Effect.provide(
+        makeGateServices(
+          new Map([
+            [threadA, projectA],
+            [threadB, projectB],
+          ]),
+          () => {
+            throw new Error("owner/legacy actor must not trigger thread lookups");
+          },
+        ),
+      ),
+      Effect.scoped,
+    ),
+  );
+
+  it.effect(
+    "blocks a viewer on launchThread of a foreign project or its own project with project_forbidden",
+    () =>
+      Effect.gen(function* () {
+        const handled: Array<string> = [];
+        const access = yield* ProjectAccess.ProjectAccess;
+        const resolver = yield* ResourceResolver.ResourceResolver;
+        const viewerActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("viewer-session"),
+          subject: "viewer",
+          scopes: baseScopes,
+          principalId: PrincipalId.make("principal-viewer"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "viewer"]]),
+        };
+        const gate = RpcAuthorization.makeAccessGate({ actor: viewerActor, access, resolver });
+        const client = yield* RpcTest.makeClient(group).pipe(
+          Effect.provide(
+            Layer.merge(makeHandlers(handled), RpcAuthorization.layer(baseScopes, undefined, gate)),
+          ),
+        );
+
+        const foreignFailure = yield* client[ORCHESTRATION_V2_WS_METHODS.launchThread](
+          launchPayload(projectB),
+        ).pipe(Effect.flip);
+        expect(foreignFailure).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: projectB,
+          requiredPermission: "project:thread.operate",
+        });
+
+        const ownProjectFailure = yield* client[ORCHESTRATION_V2_WS_METHODS.launchThread](
+          launchPayload(projectA),
+        ).pipe(Effect.flip);
+        expect(ownProjectFailure).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: projectA,
+          requiredPermission: "project:thread.operate",
+        });
+
+        expect(handled).toEqual([]);
+      }).pipe(Effect.provide(makeGateServices(new Map())), Effect.scoped),
+  );
+
+  it.effect("resolves threadId to its project and passes missing threads through to handlers", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const access = yield* ProjectAccess.ProjectAccess;
+      const resolver = yield* ResourceResolver.ResourceResolver;
+      const devActor: ProjectAccess.AccessActor = {
+        sessionId: AuthSessionId.make("dev-session"),
+        subject: "developer",
+        scopes: baseScopes,
+        principalId: PrincipalId.make("principal-dev"),
+        binding: { _tag: "principal" },
+        isOwner: false,
+        roles: new Map([[projectA, "developer"]]),
+      };
+      const gate = RpcAuthorization.makeAccessGate({ actor: devActor, access, resolver });
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(makeHandlers(handled), RpcAuthorization.layer(baseScopes, undefined, gate)),
+        ),
+      );
+
+      yield* client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({ threadId: threadA });
+      yield* client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({ threadId: threadMissing });
+      const foreignRead = yield* client[ORCHESTRATION_V2_WS_METHODS.getThreadProjection]({
+        threadId: threadB,
+      }).pipe(Effect.flip);
+      expect(foreignRead).toMatchObject({
+        _tag: "project_forbidden",
+        projectId: projectB,
+        requiredPermission: "project:read",
+      });
+
+      const foreignArchive = yield* client[ORCHESTRATION_V2_WS_METHODS.dispatchCommand]({
+        type: "thread.archive",
+        commandId: CommandId.make("archive-b"),
+        threadId: threadB,
+      }).pipe(Effect.flip);
+      expect(foreignArchive).toMatchObject({
+        _tag: "project_forbidden",
+        projectId: projectB,
+        requiredPermission: "project:thread.manage",
+      });
+
+      expect(handled).toEqual([`get:${threadA}`, `get:${threadMissing}`]);
+    }).pipe(
+      Effect.provide(
+        makeGateServices(
+          new Map([
+            [threadA, projectA],
+            [threadB, projectB],
+          ]),
+        ),
+      ),
+      Effect.scoped,
+    ),
+  );
+
+  it.effect("requires every projectId in projectIds to pass access checks", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const access = yield* ProjectAccess.ProjectAccess;
+      const resolver = yield* ResourceResolver.ResourceResolver;
+      const viewerActor: ProjectAccess.AccessActor = {
+        sessionId: AuthSessionId.make("viewer-multi"),
+        subject: "viewer",
+        scopes: baseScopes,
+        principalId: PrincipalId.make("principal-viewer"),
+        binding: { _tag: "principal" },
+        isOwner: false,
+        roles: new Map([[projectA, "viewer"]]),
+      };
+      const gate = RpcAuthorization.makeAccessGate({ actor: viewerActor, access, resolver });
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(makeHandlers(handled), RpcAuthorization.layer(baseScopes, undefined, gate)),
+        ),
+      );
+
+      yield* client[ORCHESTRATION_V2_WS_METHODS.searchThreads]({
+        query: "hello",
+        projectIds: [projectA],
+      });
+      const mixedFailure = yield* client[ORCHESTRATION_V2_WS_METHODS.searchThreads]({
+        query: "hello",
+        projectIds: [projectA, projectB],
+      }).pipe(Effect.flip);
+      expect(mixedFailure).toMatchObject({
+        _tag: "project_forbidden",
+        projectId: projectB,
+        requiredPermission: "project:read",
+      });
+      expect(handled).toEqual([`search:${projectA}`]);
+    }).pipe(Effect.provide(makeGateServices(new Map())), Effect.scoped),
+  );
+
+  it.effect("enforces the principal ceiling before checking project roles", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const access = yield* ProjectAccess.ProjectAccess;
+      const resolver = yield* ResourceResolver.ResourceResolver;
+      const ceilingActor: ProjectAccess.AccessActor = {
+        sessionId: AuthSessionId.make("ceiling-session"),
+        subject: "capped-dev",
+        scopes: baseScopes,
+        principalId: PrincipalId.make("principal-capped"),
+        binding: { _tag: "principal" },
+        isOwner: false,
+        ceiling: [AuthOrchestrationReadScope],
+        roles: new Map([[projectA, "developer"]]),
+      };
+      const gate = RpcAuthorization.makeAccessGate({ actor: ceilingActor, access, resolver });
+      const client = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(makeHandlers(handled), RpcAuthorization.layer(baseScopes, undefined, gate)),
+        ),
+      );
+
+      const refused = yield* client[ORCHESTRATION_V2_WS_METHODS.launchThread](
+        launchPayload(projectA),
+      ).pipe(Effect.flip);
+      expect(refused).toMatchObject({
+        _tag: "EnvironmentAuthorizationError",
+        requiredPermission: AuthOrchestrationOperateScope,
+      });
+      expect(handled).toEqual([]);
+    }).pipe(Effect.provide(makeGateServices(new Map())), Effect.scoped),
+  );
+
+  it.effect(
+    "gates project:create without a project resource: viewer forbidden, developer and owner allowed",
+    () =>
+      Effect.gen(function* () {
+        const access = yield* ProjectAccess.ProjectAccess;
+        const resolver = yield* ResourceResolver.ResourceResolver;
+        const newProjectId = ProjectId.make("project-brand-new");
+        const createMutation = {
+          type: "project.create" as const,
+          commandId: CommandId.make("create-new"),
+          projectId: newProjectId,
+          title: "My New App",
+          workspaceRoot: "/managed/projects/my-new-app",
+        };
+
+        const runWithActor = (actor: ProjectAccess.AccessActor) =>
+          Effect.gen(function* () {
+            const handled: Array<string> = [];
+            const gate = RpcAuthorization.makeAccessGate({ actor, access, resolver });
+            const client = yield* RpcTest.makeClient(group).pipe(
+              Effect.provide(
+                Layer.merge(
+                  makeHandlers(handled),
+                  RpcAuthorization.layer(baseScopes, undefined, gate),
+                ),
+              ),
+            );
+            return { client, handled };
+          });
+
+        const viewerActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("viewer-create"),
+          subject: "viewer",
+          scopes: baseScopes,
+          principalId: PrincipalId.make("principal-viewer"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "viewer"]]),
+        };
+        const { client: viewerClient, handled: viewerHandled } = yield* runWithActor(viewerActor);
+        const viewerMutateErr = yield* viewerClient[WS_METHODS.projectsMutate](createMutation).pipe(
+          Effect.flip,
+        );
+        expect(viewerMutateErr).toMatchObject({
+          _tag: "project_forbidden",
+          requiredPermission: "project:create",
+        });
+        const viewerCreateNewErr = yield* viewerClient[WS_METHODS.projectsCreateNew]({
+          name: "My New App",
+        }).pipe(Effect.flip);
+        expect(viewerCreateNewErr).toMatchObject({
+          _tag: "project_forbidden",
+          requiredPermission: "project:create",
+        });
+        expect(viewerHandled).toEqual([]);
+
+        const devActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("dev-create"),
+          subject: "developer",
+          scopes: baseScopes,
+          principalId: PrincipalId.make("principal-dev"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "developer"]]),
+        };
+        const { client: devClient, handled: devHandled } = yield* runWithActor(devActor);
+        yield* devClient[WS_METHODS.projectsMutate](createMutation);
+        yield* devClient[WS_METHODS.projectsCreateNew]({ name: "Another App" });
+        expect(devHandled).toEqual([
+          `mutate:project.create:${newProjectId}`,
+          "createNew:Another App",
+        ]);
+
+        // Even an admin cannot delete a project; delete stays owner-only.
+        const adminActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("admin-delete"),
+          subject: "admin",
+          scopes: baseScopes,
+          principalId: PrincipalId.make("principal-admin"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "admin"]]),
+        };
+        const { client: adminClient, handled: adminHandled } = yield* runWithActor(adminActor);
+        const adminDeleteErr = yield* adminClient[WS_METHODS.projectsMutate]({
+          type: "project.delete",
+          commandId: CommandId.make("delete-a"),
+          projectId: projectA,
+        }).pipe(Effect.flip);
+        expect(adminDeleteErr).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: projectA,
+          requiredPermission: "project:delete",
+        });
+        expect(adminHandled).toEqual([]);
+
+        const ownerActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("owner-create"),
+          subject: "owner",
+          scopes: baseScopes,
+          principalId: PrincipalId.make("owner"),
+          binding: { _tag: "environment" },
+          isOwner: true,
+          roles: new Map(),
+        };
+        const { client: ownerClient, handled: ownerHandled } = yield* runWithActor(ownerActor);
+        yield* ownerClient[WS_METHODS.projectsMutate](createMutation);
+        yield* ownerClient[WS_METHODS.projectsMutate]({
+          type: "project.delete",
+          commandId: CommandId.make("owner-delete-a"),
+          projectId: projectA,
+        });
+        expect(ownerHandled).toEqual([
+          `mutate:project.create:${newProjectId}`,
+          `mutate:project.delete:${projectA}`,
+        ]);
+      }).pipe(Effect.provide(makeGateServices(new Map())), Effect.scoped),
+  );
+
+  it.effect(
+    "multiUser settings toggle rejects non-owner admin patches, allows owner patches, and switches descriptor authMode",
+    () =>
+      Effect.gen(function* () {
+        const access = yield* ProjectAccess.ProjectAccess;
+        const resolver = yield* ResourceResolver.ResourceResolver;
+        const settingsService = yield* ServerSettings.ServerSettingsService;
+        const environmentAuth = yield* EnvironmentAuth.EnvironmentAuth;
+
+        const settingsGroup = WsRpcGroup.omit(
+          ...[...WsRpcGroup.requests.keys()].filter(
+            (
+              tag,
+            ): tag is Exclude<
+              keyof typeof RPC_REQUIRED_SCOPES,
+              typeof WS_METHODS.serverUpdateSettings
+            > => tag !== WS_METHODS.serverUpdateSettings,
+          ),
+        );
+        const settingsHandlers = settingsGroup.toLayerHandler(
+          WS_METHODS.serverUpdateSettings,
+          ({ patch }) => settingsService.updateSettings(patch),
+        );
+
+        const makeClientForActor = (actor: ProjectAccess.AccessActor) => {
+          const gate = RpcAuthorization.makeAccessGate({ actor, access, resolver });
+          return RpcTest.makeClient(settingsGroup).pipe(
+            Effect.provide(
+              Layer.merge(settingsHandlers, RpcAuthorization.layer(actor.scopes, undefined, gate)),
+            ),
+          );
+        };
+
+        const adminActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("admin-multiuser"),
+          subject: "admin",
+          scopes: [AuthAccessWriteScope, AuthSettingsWriteScope],
+          principalId: PrincipalId.make("principal-admin"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "admin"]]),
+        };
+        const ownerActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("owner-multiuser"),
+          subject: "owner",
+          scopes: AuthStandardClientScopes,
+          principalId: PrincipalId.make("owner"),
+          binding: { _tag: "environment" },
+          isOwner: true,
+          roles: new Map(),
+        };
+
+        const adminClient = yield* makeClientForActor(adminActor);
+        const ownerClient = yield* makeClientForActor(ownerActor);
+
+        // Starts in single-owner mode (authMode omitted).
+        expect((yield* environmentAuth.getDescriptor()).authMode).toBeUndefined();
+
+        // Non-owner admin (even with access:write) cannot toggle multiUser.
+        const rejectedEnable = yield* adminClient[WS_METHODS.serverUpdateSettings]({
+          patch: { multiUser: true },
+        }).pipe(Effect.flip);
+        expect(rejectedEnable).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthEnvironmentMaintainScope,
+        });
+        expect((yield* environmentAuth.getDescriptor()).authMode).toBeUndefined();
+
+        // Owner enables multi-user mode; descriptor switches authMode to "multi-user".
+        const enabled = yield* ownerClient[WS_METHODS.serverUpdateSettings]({
+          patch: { multiUser: true },
+        });
+        expect(enabled.multiUser).toBe(true);
+        expect((yield* environmentAuth.getDescriptor()).authMode).toBe("multi-user");
+
+        // Non-owner admin cannot disable multi-user mode either.
+        const rejectedDisable = yield* adminClient[WS_METHODS.serverUpdateSettings]({
+          patch: { multiUser: false },
+        }).pipe(Effect.flip);
+        expect(rejectedDisable).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthEnvironmentMaintainScope,
+        });
+        expect((yield* environmentAuth.getDescriptor()).authMode).toBe("multi-user");
+
+        // Owner disables multi-user mode; descriptor switches back to single-owner (omitted).
+        const disabled = yield* ownerClient[WS_METHODS.serverUpdateSettings]({
+          patch: { multiUser: false },
+        });
+        expect(disabled.multiUser).toBe(false);
+        expect((yield* environmentAuth.getDescriptor()).authMode).toBeUndefined();
+      }).pipe(
+        Effect.provide(
+          (() => {
+            const config = ServerConfig.layerTest(process.cwd(), {
+              prefix: "t3-rpc-auth-multiuser-test-",
+            });
+            const sqlite = Layer.fresh(SqlitePersistence.layerMemory);
+            const secrets = ServerSecretStore.layer.pipe(Layer.provide(config));
+            const settingsLayer = ServerSettings.layer.pipe(
+              Layer.provide(secrets),
+              Layer.provide(ManagedPolicy.layerTest()),
+              Layer.provide(sqlite),
+              Layer.provide(config),
+            );
+            const authLayer = EnvironmentAuth.layer.pipe(
+              Layer.provide(settingsLayer),
+              Layer.provide(ManagedPolicy.layerTest()),
+              Layer.provide(sqlite),
+              Layer.provide(secrets),
+              Layer.provide(ServerEnvironment.layerIdentity),
+              Layer.provide(config),
+            );
+            return Layer.mergeAll(makeGateServices(new Map()), settingsLayer, authLayer).pipe(
+              Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+            );
+          })(),
+        ),
+        Effect.scoped,
+      ),
+  );
+
+  it.effect(
+    "allows project admins to patch own projectSettingsOverrides and projectScriptOverrides, and rejects foreign projects, non-admins, and global settings",
+    () =>
+      Effect.gen(function* () {
+        const access = yield* ProjectAccess.ProjectAccess;
+        const resolver = yield* ResourceResolver.ResourceResolver;
+        const settingsService = yield* ServerSettings.ServerSettingsService;
+
+        const settingsGroup = WsRpcGroup.omit(
+          ...[...WsRpcGroup.requests.keys()].filter(
+            (
+              tag,
+            ): tag is Exclude<
+              keyof typeof RPC_REQUIRED_SCOPES,
+              typeof WS_METHODS.serverUpdateSettings
+            > => tag !== WS_METHODS.serverUpdateSettings,
+          ),
+        );
+        const settingsHandlers = settingsGroup.toLayerHandler(
+          WS_METHODS.serverUpdateSettings,
+          ({ patch }) => settingsService.updateSettings(patch),
+        );
+
+        const makeClientForActor = (actor: ProjectAccess.AccessActor) => {
+          const gate = RpcAuthorization.makeAccessGate({ actor, access, resolver });
+          return RpcTest.makeClient(settingsGroup).pipe(
+            Effect.provide(
+              Layer.merge(settingsHandlers, RpcAuthorization.layer(actor.scopes, undefined, gate)),
+            ),
+          );
+        };
+
+        const adminActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("admin-project-settings"),
+          subject: "admin",
+          scopes: [AuthSettingsWriteScope, AuthOrchestrationOperateScope, AuthAccessWriteScope],
+          principalId: PrincipalId.make("principal-admin"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "admin"]]),
+        };
+        const devActor: ProjectAccess.AccessActor = {
+          sessionId: AuthSessionId.make("dev-project-settings"),
+          subject: "dev",
+          scopes: [AuthSettingsWriteScope, AuthOrchestrationOperateScope],
+          principalId: PrincipalId.make("principal-dev"),
+          binding: { _tag: "principal" },
+          isOwner: false,
+          roles: new Map([[projectA, "developer"]]),
+        };
+
+        const adminClient = yield* makeClientForActor(adminActor);
+        const devClient = yield* makeClientForActor(devActor);
+
+        // Project admin may patch own project settings & script overrides.
+        const updatedSettings = yield* adminClient[WS_METHODS.serverUpdateSettings]({
+          patch: {
+            projectSettingsOverrides: { [projectA]: { defaultAutoPull: true } },
+          },
+        });
+        expect(updatedSettings.projectSettingsOverrides[projectA]).toMatchObject({
+          defaultAutoPull: true,
+        });
+
+        const updatedScripts = yield* adminClient[WS_METHODS.serverUpdateSettings]({
+          patch: {
+            projectScriptOverrides: {
+              [projectA]: [
+                {
+                  id: "test",
+                  name: "Test",
+                  command: "vp test",
+                  icon: "test",
+                  runOnWorktreeCreate: false,
+                },
+              ],
+            },
+          },
+        });
+        expect(updatedScripts.projectScriptOverrides[projectA]?.map((s) => s.id)).toEqual(["test"]);
+
+        // Project admin cannot patch a foreign project's overrides.
+        const foreignErr = yield* adminClient[WS_METHODS.serverUpdateSettings]({
+          patch: { projectSettingsOverrides: { [projectB]: { defaultAutoPull: true } } },
+        }).pipe(Effect.flip);
+        expect(foreignErr).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: projectB,
+          requiredPermission: "project:settings",
+        });
+
+        // Developer on projectA lacks project:settings.
+        const devErr = yield* devClient[WS_METHODS.serverUpdateSettings]({
+          patch: { projectSettingsOverrides: { [projectA]: { defaultAutoPull: false } } },
+        }).pipe(Effect.flip);
+        expect(devErr).toMatchObject({
+          _tag: "project_forbidden",
+          projectId: projectA,
+          requiredPermission: "project:settings",
+        });
+
+        // Non-owner admin cannot patch any non-project global setting.
+        const globalErr = yield* adminClient[WS_METHODS.serverUpdateSettings]({
+          patch: { enablePreviewTunnel: true },
+        }).pipe(Effect.flip);
+        expect(globalErr).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthEnvironmentMaintainScope,
+        });
+        expect(globalErr.message).toContain("enablePreviewTunnel");
+      }).pipe(
+        Effect.provide(
+          (() => {
+            const config = ServerConfig.layerTest(process.cwd(), {
+              prefix: "t3-rpc-auth-project-settings-test-",
+            });
+            const sqlite = Layer.fresh(SqlitePersistence.layerMemory);
+            const secrets = ServerSecretStore.layer.pipe(Layer.provide(config));
+            const settingsLayer = ServerSettings.layer.pipe(
+              Layer.provide(secrets),
+              Layer.provide(ManagedPolicy.layerTest()),
+              Layer.provide(sqlite),
+              Layer.provide(config),
+            );
+            return Layer.mergeAll(makeGateServices(new Map()), settingsLayer).pipe(
+              Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+            );
+          })(),
+        ),
+        Effect.scoped,
+      ),
+  );
+});

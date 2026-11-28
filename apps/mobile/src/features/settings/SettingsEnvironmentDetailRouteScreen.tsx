@@ -1,3 +1,5 @@
+import { fetchRemoteSessionState } from "@t3tools/client-runtime/authorization";
+import { AVAILABLE_CONNECTION_STATE } from "@t3tools/client-runtime/connection";
 import { errorDisplayMessage } from "@t3tools/client-runtime/errors";
 import { serverUpdateFailureText } from "@t3tools/client-runtime/state/server";
 import { T, useGT, useMessages, Var } from "gt-react-native";
@@ -12,22 +14,36 @@ import {
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
 import { managedUpdatesDenial } from "@t3tools/client-runtime/contract-labels";
 import { sessionPermissionsUnavailableMessage } from "@t3tools/shared/authScopeOptions";
+import * as Effect from "effect/Effect";
 import { AsyncResult } from "effect/reactivity";
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { View } from "react-native";
+import * as Dialog from "../../components/ui/Dialog";
+import { environmentCatalog } from "../../connection/catalog";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
+import * as Runtime from "../../lib/runtime";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { m } from "../../i18n/messages";
 
 import { AppText as Text } from "../../components/ui/AppText";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { ScreenScrollView } from "../../components/ui/ScreenScrollView";
+import { authEnvironment } from "../../state/auth";
 import { environmentPresentations } from "../../state/presentation";
 import { serverEnvironment } from "../../state/server";
-import { environmentSession, useEnvironmentScope, readEnvironmentScope } from "../../state/session";
+import {
+  environmentSession,
+  useEnvironmentScope,
+  usePreparedConnection,
+  readEnvironmentScope,
+} from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useRemoteConnections } from "../../state/use-remote-environment-registry";
 import { ConnectionEnvironmentRow } from "../connection/ConnectionEnvironmentRow";
+import {
+  canSignOutEnvironment,
+  resolveAuthBlockedBearerTarget,
+} from "../connection/EnvironmentLoginScreen.logic";
 import { EnvironmentRoutesSection } from "./EnvironmentRoutesSection";
 import { OutdatedServerUpdateSection } from "./OutdatedServerUpdateSection";
 import { ListActionRow as SettingsActionRow } from "../../components/ui/ListActionRow";
@@ -65,13 +81,21 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
   const config = useAtomValue(serverEnvironment.configValueAtom(environmentId));
   const session = useAtomValue(environmentSession.sessionStateValueAtom(environmentId));
   const sessionResult = useAtomValue(environmentSession.sessionStateAtom(environmentId));
+  const prepared = usePreparedConnection(environmentId);
+  const presentation = useAtomValue(environmentPresentations.presentationAtom(environmentId));
+  const connectionState = AsyncResult.getOrElse(
+    useAtomValue(environmentCatalog.stateAtom(environmentId)),
+    () => AVAILABLE_CONNECTION_STATE,
+  );
   const updateState = useAtomValue(serverEnvironment.updateStateAtom(environmentId));
-  const outdated =
-    useAtomValue(environmentPresentations.presentationAtom(environmentId))?.entry
-      .serverUpdateRequired === true;
+  const outdated = presentation?.entry.serverUpdateRequired === true;
   const updateProvider = useAtomCommand(serverEnvironment.updateProvider);
   const refreshProviders = useAtomCommand(serverEnvironment.refreshProviders);
+  const signOutCurrentSession = useAtomCommand(authEnvironment.signOutCurrentSession, {
+    reportFailure: false,
+  });
   const [connectionExpanded, setConnectionExpanded] = useState(false);
+  const [probedMultiUserHost, setProbedMultiUserHost] = useState<string | null>(null);
   const [pending, setPending] = useState<string | null>(null);
   const pendingRef = useRef(false);
   const [error, setError] = useState<string | null>(null);
@@ -81,7 +105,39 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
   });
   const release = releaseCheckValue(releaseCheck);
 
+  const authBlocked =
+    presentation === null
+      ? null
+      : resolveAuthBlockedBearerTarget({ entry: presentation.entry, state: connectionState });
+  const multiUserLoginHost =
+    authBlocked !== null && probedMultiUserHost === authBlocked.httpBaseUrl
+      ? authBlocked.httpBaseUrl
+      : null;
+
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- probes /api/auth/session once when credentials are rejected to show the multi-user login action
+  useEffect(() => {
+    if (authBlocked === null) return;
+    let cancelled = false;
+    void Runtime.runtime
+      .runPromise(
+        fetchRemoteSessionState({ httpBaseUrl: authBlocked.httpBaseUrl }).pipe(
+          Effect.map((state) =>
+            state.auth.authMode === "multi-user" ? authBlocked.httpBaseUrl : null,
+          ),
+          Effect.orElseSucceed(() => null),
+        ),
+      )
+      .then((host) => {
+        if (!cancelled) setProbedMultiUserHost(host);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authBlocked]);
+
   const connected = environment?.isEnabled === true && environment.connectionState === "connected";
+  const showSignOut =
+    connected && canSignOutEnvironment({ session, capabilities: config?.environment.capabilities });
   const allowed =
     !AsyncResult.isFailure(sessionResult) && canMaintainEnvironment(session, connected);
   const running = updateState.status === "running";
@@ -141,6 +197,36 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
     });
   }
 
+  function requestSignOut() {
+    if (pending !== null || !showSignOut) return;
+    const label = environment?.environmentLabel ?? gt("Environment");
+    Dialog.alert(
+      gt("Sign out?"),
+      gt("End your session on {environment}? You will need a new login code to sign back in.", {
+        environment: label,
+      }),
+      [
+        { text: gt("Cancel"), style: "cancel" },
+        {
+          text: gt("Sign out"),
+          style: "destructive",
+          onPress: () => {
+            void run("sign-out", async () => {
+              const result = await signOutCurrentSession({ environmentId, input: null });
+              if (AsyncResult.isFailure(result)) throw squashAtomCommandFailure(result);
+              const host = prepared._tag === "Some" ? prepared.value.httpBaseUrl : undefined;
+              navigation.navigate("EnvironmentLogin", {
+                ...(host === undefined ? {} : { host }),
+                environmentId,
+                label,
+              });
+            });
+          },
+        },
+      ],
+    );
+  }
+
   return (
     <SettingsScreen title={environment?.environmentLabel ?? gt("Environment")}>
       <ScreenScrollView
@@ -165,7 +251,46 @@ function EnvironmentDetail({ environmentId }: { readonly environmentId: Environm
                 onSetEnabled={connections.onSetEnvironmentEnabled}
                 onUpdate={connections.onUpdateEnvironment}
               />
+              {multiUserLoginHost !== null ? (
+                <SettingsActionRow
+                  icon="person.crop.circle"
+                  label={gt("Sign in with code")}
+                  onPress={() =>
+                    navigation.navigate("EnvironmentLogin", {
+                      host: multiUserLoginHost,
+                      environmentId,
+                      label: environment.environmentLabel,
+                    })
+                  }
+                />
+              ) : null}
             </SettingsSection>
+            {showSignOut ? (
+              <SettingsSection title={gt("Session")}>
+                {session?.principal ? (
+                  <View className="gap-0.5 px-4 py-3">
+                    <Text className="text-base font-t3-medium text-foreground">
+                      {session.principal.displayName}
+                    </Text>
+                    {session.role ? (
+                      <Text className="text-sm text-foreground-muted">
+                        <T>
+                          Role: <Var>{session.role}</Var>
+                        </T>
+                      </Text>
+                    ) : null}
+                  </View>
+                ) : null}
+                <SettingsActionRow
+                  icon="arrow.right.circle"
+                  label={pending === "sign-out" ? gt("Signing out…") : gt("Sign out")}
+                  tone="danger"
+                  disabled={pending !== null}
+                  loading={pending === "sign-out"}
+                  onPress={requestSignOut}
+                />
+              </SettingsSection>
+            ) : null}
             <EnvironmentRoutesSection
               environmentId={environmentId}
               connected={connected}

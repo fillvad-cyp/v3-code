@@ -1,11 +1,6 @@
 import { msg } from "gt-i18n";
 import { translatableDetail } from "../errors/translatable.ts";
-import {
-  type ServerConfig,
-  type ServerConfigStreamEvent,
-  WsSubscribeServerConfigRpc,
-  WS_METHODS,
-} from "@t3tools/contracts";
+import { type ServerConfig, type ServerConfigStreamEvent, WS_METHODS } from "@t3tools/contracts";
 import {
   joinSocketFrameParts,
   SOCKET_FRAME_PARTS_QUERY_PARAM,
@@ -26,7 +21,6 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import type * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
-import type * as Rpc from "effect/rpc/Rpc";
 import * as RpcClient from "effect/rpc/RpcClient";
 import * as RpcClientError from "effect/rpc/RpcClientError";
 import * as RpcSerialization from "effect/rpc/RpcSerialization";
@@ -88,9 +82,9 @@ type InitialConfigError = Effect.Error<
   ReturnType<WsRpcProtocolClient[typeof WS_METHODS.serverGetConfig]>
 >;
 type ProbeError = Effect.Error<ReturnType<WsRpcProtocolClient[typeof WS_METHODS.serverProbe]>>;
-type ServerConfigSubscriptionError =
-  | Rpc.ErrorExit<typeof WsSubscribeServerConfigRpc>
-  | RpcClientError.RpcClientError;
+type ServerConfigSubscriptionError = Stream.Error<
+  ReturnType<WsRpcProtocolClient[typeof WS_METHODS.subscribeServerConfig]>
+>;
 type ServerConfigSubscription = Stream.Stream<
   ServerConfigStreamEvent,
   ServerConfigSubscriptionError
@@ -148,6 +142,7 @@ function mapSessionRpcError(
     case "ConnectionTransientError":
       return error;
     case "EnvironmentAuthorizationError":
+    case "project_forbidden":
       return new ConnectionBlockedError({
         reason: "permission",
         detail: error.message,

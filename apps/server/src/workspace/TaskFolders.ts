@@ -33,6 +33,7 @@ import type * as PlatformError from "effect/PlatformError";
 import * as Schema from "effect/Schema";
 
 import * as ServerConfig from "../config.ts";
+import * as ProjectIsolation from "../isolation/ProjectIsolation.ts";
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
@@ -258,6 +259,7 @@ const make = Effect.gen(function* () {
   const config = yield* ServerConfig.ServerConfig;
   const settings = yield* ServerSettings.ServerSettingsService;
   const projects = yield* ProjectStore.ProjectStoreV2;
+  const projectIsolation = yield* Effect.serviceOption(ProjectIsolation.ProjectIsolation);
   const git = yield* GitWorkflowService.GitWorkflowService;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const store = yield* TaskFolderStore.TaskFolderStore;
@@ -687,11 +689,15 @@ const make = Effect.gen(function* () {
       if (Buffer.byteLength(prefix + character) > 23) break;
       prefix += character;
     }
-    const base = path.join(
-      parent,
-      path.basename(taskPlan.anchor) || "workspace",
-      `${prefix}-${Hex.encode(hash).slice(0, 16)}`,
-    );
+    const isolation = Option.isSome(projectIsolation)
+      ? yield* projectIsolation.value
+          .resolveForProject(taskPlan.projectId)
+          .pipe(Effect.orElseSucceed(() => Option.none()))
+      : Option.none();
+    const bucketName = Option.isSome(isolation)
+      ? taskPlan.projectId
+      : path.basename(taskPlan.anchor) || "workspace";
+    const base = path.join(parent, bucketName, `${prefix}-${Hex.encode(hash).slice(0, 16)}`);
     const allocateFailed = fail("create", "Could not create the worktree folder");
     yield* fileSystem
       .makeDirectory(path.dirname(base), { recursive: true })
@@ -707,7 +713,12 @@ const make = Effect.gen(function* () {
         ),
         Effect.mapError(allocateFailed),
       );
-      if (claimed) return root;
+      if (claimed) {
+        if (Option.isSome(isolation) && Option.isSome(projectIsolation)) {
+          yield* projectIsolation.value.ensureWorktreeOwnership(taskPlan.projectId, root);
+        }
+        return root;
+      }
     }
   });
 

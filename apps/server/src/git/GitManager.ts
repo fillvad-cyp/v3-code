@@ -965,17 +965,22 @@ export const make = Effect.gen(function* () {
   const createWorktree: GitManager["Service"]["createWorktree"] = Effect.fn(
     "GitManager.createWorktree",
   )(function* (input, options) {
+    const projectCtx = yield* projectSettingsFor(input).pipe(
+      Effect.orElseSucceed(() => ({ settings: { worktreeSubmodules: null }, projectId: null })),
+    );
     const submodules =
       options?.submodules !== undefined
         ? options.submodules
-        : yield* projectSettingsFor(input).pipe(
-            Effect.map(({ settings }) => settings.worktreeSubmodules),
-            Effect.orElseSucceed(() => null),
-          );
+        : projectCtx.settings.worktreeSubmodules;
     const result = yield* gitCore.createWorktree(input, {
       ...(yield* readWorktreeCreationSettings),
       ...options,
       submodules,
+      ...(options?.projectId !== undefined
+        ? {}
+        : projectCtx.projectId !== null
+          ? { projectId: projectCtx.projectId }
+          : {}),
     });
     if (input.newRefName && input.baseRefName) {
       yield* shareBranchBase(input.cwd, input.newRefName);

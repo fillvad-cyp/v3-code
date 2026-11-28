@@ -57,7 +57,11 @@ import * as ThreadManagementService from "../src/orchestration-v2/ThreadManageme
 import * as ProjectStore from "../src/orchestration-v2/ProjectStore.ts";
 import * as ProjectService from "../src/project/ProjectService.ts";
 import * as ProjectEnrichmentService from "../src/project/ProjectEnrichmentService.ts";
+import * as ProjectQuotaService from "../src/project/ProjectQuotaService.ts";
 import * as OrchestrationHttp from "../src/orchestration-v2/http.ts";
+import * as ProjectAccess from "../src/access/ProjectAccess.ts";
+import * as Principals from "../src/persistence/Principals.ts";
+import * as Memberships from "../src/persistence/Memberships.ts";
 import * as ServerHttp from "../src/http.ts";
 import { subscribeOrchestrationV2Thread, subscribeOrchestrationV2Shell } from "../src/ws.ts";
 import {
@@ -203,8 +207,19 @@ const layerServices = layerManagement.pipe(
     }),
   ),
   Layer.provideMerge(ProjectStore.layer),
+  Layer.provideMerge(
+    ProjectAccess.layer.pipe(
+      Layer.provide(Layer.mergeAll(Principals.layer, Memberships.layer, ProjectStore.layer)),
+    ),
+  ),
   Layer.provideMerge(Layer.mock(ProjectService.ProjectService)({})),
   Layer.provideMerge(layerEnrichment),
+  Layer.provideMerge(
+    Layer.mock(ProjectQuotaService.ProjectQuotaService)({
+      getWarningsForProjects: () => Effect.succeed(new Map()),
+      subscribeChanges: PubSub.unbounded<never>().pipe(Effect.flatMap(PubSub.subscribe)),
+    }),
+  ),
   Layer.provideMerge(layerPersistence),
 );
 class TransferApi extends HttpApi.make("environment").add(

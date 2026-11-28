@@ -1,6 +1,6 @@
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { EnvironmentId } from "@t3tools/contracts";
+import { EnvironmentId, PrincipalId, ProjectId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
@@ -18,6 +18,7 @@ import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
+import * as SessionPrincipals from "../persistence/SessionPrincipals.ts";
 import * as SessionStore from "./SessionStore.ts";
 import * as ServerSecretStore from "./ServerSecretStore.ts";
 import { base64UrlDecodeUtf8, base64UrlEncode } from "./utils.ts";
@@ -678,6 +679,64 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("SessionStore.lay
         expect(revokedClientWebSocket.sessionId).toBe(client.sessionId);
         expect(revokedClientWebSocket.revokedAt.epochMilliseconds).toBeGreaterThanOrEqual(0);
       }
+    }).pipe(Effect.provide(layerSessionStore())),
+  );
+
+  it.effect("persists, verifies, and cleans up principal bindings across session lifecycles", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionStore.SessionStore;
+      const sessionPrincipals = yield* SessionPrincipals.SessionPrincipalRepository;
+      const ownerId = PrincipalId.make("owner");
+      const projectId = ProjectId.make("web");
+
+      const legacy = yield* sessions.issue({ subject: "legacy" });
+      const verifiedLegacy = yield* sessions.verify(legacy.token);
+      expect(verifiedLegacy.principalId).toBeUndefined();
+      expect(verifiedLegacy.binding).toBeUndefined();
+
+      const envIssued = yield* sessions.issue({ subject: "owner", principalId: ownerId });
+      const verifiedEnv = yield* sessions.verify(envIssued.token);
+      expect(verifiedEnv.principalId).toBe(ownerId);
+      expect(verifiedEnv.binding).toEqual({ _tag: "environment" });
+
+      const principalIssued = yield* sessions.issue({
+        subject: "member",
+        principalId: ownerId,
+        binding: { _tag: "principal" },
+      });
+      const verifiedPrincipal = yield* sessions.verify(principalIssued.token);
+      expect(verifiedPrincipal.principalId).toBe(ownerId);
+      expect(verifiedPrincipal.binding).toEqual({ _tag: "principal" });
+
+      const projectsBinding = {
+        _tag: "projects" as const,
+        projects: [{ projectId, role: "developer" as const }],
+      };
+      const scopedIssued = yield* sessions.issue({
+        subject: "scoped",
+        principalId: ownerId,
+        binding: projectsBinding,
+        proofKeyThumbprint: "scoped-key",
+      });
+      const verifiedScoped = yield* sessions.verify(scopedIssued.token);
+      expect(verifiedScoped.principalId).toBe(ownerId);
+      expect(verifiedScoped.binding).toEqual(projectsBinding);
+
+      const wsTicket = yield* sessions.issueWebSocketToken(scopedIssued.sessionId);
+      const verifiedWs = yield* sessions.verifyWebSocketToken(wsTicket.token);
+      expect(verifiedWs.principalId).toBe(ownerId);
+      expect(verifiedWs.binding).toEqual(projectsBinding);
+
+      yield* sessions.revoke(principalIssued.sessionId);
+      expect(Option.isNone(yield* sessionPrincipals.get(principalIssued.sessionId))).toBe(true);
+
+      yield* sessions.revokeByProofKey("scoped-key");
+      expect(Option.isNone(yield* sessionPrincipals.get(scopedIssued.sessionId))).toBe(true);
+
+      const kept = yield* sessions.issue({ subject: "kept", principalId: ownerId });
+      yield* sessions.revokeAllExcept(kept.sessionId);
+      expect(Option.isNone(yield* sessionPrincipals.get(envIssued.sessionId))).toBe(true);
+      expect(Option.isSome(yield* sessionPrincipals.get(kept.sessionId))).toBe(true);
     }).pipe(Effect.provide(layerSessionStore())),
   );
 });

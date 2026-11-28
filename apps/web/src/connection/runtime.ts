@@ -10,6 +10,7 @@ import * as Layer from "effect/Layer";
 import { Atom } from "effect/reactivity";
 
 import { isGuestPage } from "../guestPage";
+import { isPopoutWindowRuntime } from "../lib/threadPopout";
 
 import * as Runtime from "../lib/runtime";
 import * as BackgroundActivityReporter from "../lib/backgroundActivityReporter";
@@ -32,26 +33,36 @@ type ConnectionLayerSource =
   | typeof BackgroundActivityReporter.layerObserver
   | typeof BackgroundActivityReporter.layer;
 
-const layerProvidedClientConnection = layerSnapshotLoader.pipe(
-  Layer.provideMerge(
-    Connection.layerWithOptions({
-      environmentThemes: true,
-      usageLimitSources: true,
-      usageLimitsCommand: true,
-    }),
-  ),
-  Layer.provideMerge(
-    Layer.mergeAll(
-      Runtime.layer,
-      layerProvidedConnectionPlatform,
-      BackgroundActivityReporter.layerObserver,
+function makeConnectionLayer(options: {
+  readonly environmentThemes: boolean;
+  readonly usageLimitSources: boolean;
+  readonly usageLimitsCommand: boolean;
+}) {
+  const layerProvidedClientConnection = layerSnapshotLoader.pipe(
+    Layer.provideMerge(Connection.layerWithOptions(options)),
+    Layer.provideMerge(
+      Layer.mergeAll(
+        Runtime.layer,
+        layerProvidedConnectionPlatform,
+        BackgroundActivityReporter.layerObserver,
+      ),
     ),
-  ),
-);
+  );
+  return BackgroundActivityReporter.layer.pipe(Layer.provideMerge(layerProvidedClientConnection));
+}
 
-const layerConnection = BackgroundActivityReporter.layer.pipe(
-  Layer.provideMerge(layerProvidedClientConnection),
-);
+const layerConnection = makeConnectionLayer({
+  environmentThemes: true,
+  usageLimitSources: true,
+  usageLimitsCommand: true,
+});
+
+// Popouts reuse persisted connection credentials and streams without subscribing to theme or usage feeds.
+const layerPopoutConnection = makeConnectionLayer({
+  environmentThemes: false,
+  usageLimitSources: false,
+  usageLimitsCommand: false,
+});
 
 /**
  * A guest has no session here. Building the connection would open the page origin's environment
@@ -62,7 +73,7 @@ const layerForPage = Layer.unwrap(
   Effect.suspend((): Effect.Effect<typeof layerConnection> =>
     isGuestPage()
       ? Effect.die(new Error("The guest page has no environment connection."))
-      : Effect.succeed(layerConnection),
+      : Effect.succeed(isPopoutWindowRuntime() ? layerPopoutConnection : layerConnection),
   ),
 );
 

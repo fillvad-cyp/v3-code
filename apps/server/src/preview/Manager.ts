@@ -1,4 +1,5 @@
 import {
+  DEFAULT_MEMBER_MAX_PREVIEW_TABS,
   type PreviewCloseInput,
   type PreviewEvent,
   type PreviewError,
@@ -10,8 +11,10 @@ import {
   type PreviewResizeInput,
   type PreviewAdjustInput,
   FILL_PREVIEW_VIEWPORT,
+  type PrincipalId,
   PreviewSessionLookupError,
   type PreviewSessionSnapshot,
+  PreviewTabLimitExceededError,
 } from "@t3tools/contracts";
 import {
   isPreviewUrlNormalizationError,
@@ -29,6 +32,8 @@ import * as Stream from "effect/Stream";
 import * as SynchronizedRef from "effect/SynchronizedRef";
 import { PreviewControlRequiredError } from "@t3tools/contracts";
 
+const PREVIEW_TAB_LIMIT_RETRY_AFTER_SECONDS = 60;
+
 export class PreviewManager extends Context.Service<
   PreviewManager,
   {
@@ -37,6 +42,8 @@ export class PreviewManager extends Context.Service<
         readonly automationOwner?: string;
         /** Runs before the `opened` event publishes, so subscribers find state keyed by the tab. */
         readonly beforePublish?: (snapshot: PreviewSessionSnapshot) => void;
+        readonly principalId?: PrincipalId;
+        readonly maxPreviewTabs?: number;
       },
     ) => Effect.Effect<PreviewSessionSnapshot, PreviewError>;
     readonly reportStatus: (
@@ -74,6 +81,7 @@ interface PreviewSessionState {
   readonly threadId: string;
   readonly tabId: string;
   readonly snapshot: PreviewSessionSnapshot;
+  readonly ownerPrincipalId?: PrincipalId;
 }
 
 interface ManagerState {
@@ -213,14 +221,41 @@ export const make = Effect.gen(function* PreviewManagerMake() {
         ...(input.reveal === undefined ? {} : { reveal: input.reveal }),
         updatedAt,
       };
-      yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
+      type OpenOutcome =
+        | { readonly kind: "limit"; readonly error: PreviewTabLimitExceededError }
+        | { readonly kind: "ok"; readonly snapshot: PreviewSessionSnapshot };
+      const outcome = yield* SynchronizedRef.modifyEffect(stateRef, (state) =>
         Effect.gen(function* () {
+          if (input.principalId !== undefined) {
+            const limit = input.maxPreviewTabs ?? DEFAULT_MEMBER_MAX_PREVIEW_TABS;
+            let activeCount = 0;
+            for (const existing of state.sessions.values()) {
+              if (existing.ownerPrincipalId === input.principalId) {
+                activeCount += 1;
+              }
+            }
+            if (activeCount >= limit) {
+              return [
+                {
+                  kind: "limit",
+                  error: new PreviewTabLimitExceededError({
+                    status: 429,
+                    limit,
+                    activeCount,
+                    retryAfterSeconds: PREVIEW_TAB_LIMIT_RETRY_AFTER_SECONDS,
+                  }),
+                } as OpenOutcome,
+                state,
+              ] as readonly [OpenOutcome, ManagerState];
+            }
+          }
           const revision = state.revision + 1;
           const sessions = new Map(state.sessions);
           sessions.set(compositeKey(input.threadId, tabId), {
             threadId: input.threadId,
             tabId,
             snapshot,
+            ...(input.principalId === undefined ? {} : { ownerPrincipalId: input.principalId }),
           });
           input.beforePublish?.(snapshot);
           yield* PubSub.publish(eventsPubSub, {
@@ -232,10 +267,16 @@ export const make = Effect.gen(function* PreviewManagerMake() {
             revision,
             snapshot,
           });
-          return [snapshot, { sessions, revision }] as const;
+          return [{ kind: "ok", snapshot } as OpenOutcome, { sessions, revision }] as readonly [
+            OpenOutcome,
+            ManagerState,
+          ];
         }),
       );
-      return snapshot;
+      if (outcome.kind === "limit") {
+        return yield* outcome.error;
+      }
+      return outcome.snapshot;
     },
   );
 

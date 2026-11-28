@@ -118,7 +118,27 @@ export async function installEnvironmentHttpTest(scenario: EnvironmentHttpTestSc
             .handle("revokeClient", () => unexpectedEndpoint("auth.revokeClient"))
             .handle("revokeOtherClients", () => unexpectedEndpoint("auth.revokeOtherClients"))
             .handle("approveConnectDevice", () => unexpectedEndpoint("auth.approveConnectDevice"))
-            .handle("revokeConnectDevice", () => unexpectedEndpoint("auth.revokeConnectDevice")),
+            .handle("revokeConnectDevice", () => unexpectedEndpoint("auth.revokeConnectDevice"))
+            .handle("acceptInvitation", () => unexpectedEndpoint("auth.acceptInvitation"))
+            .handle("loginInvitation", () => unexpectedEndpoint("auth.loginInvitation"))
+            .handle("invitePage", () => unexpectedEndpoint("auth.invitePage"))
+            .handle("createInvitation", () => unexpectedEndpoint("auth.createInvitation"))
+            .handle("listInvitations", () => unexpectedEndpoint("auth.listInvitations"))
+            .handle("revokeInvitation", () => unexpectedEndpoint("auth.revokeInvitation"))
+            .handle("listMembers", () => unexpectedEndpoint("auth.listMembers"))
+            .handle("updateMember", () => unexpectedEndpoint("auth.updateMember"))
+            .handle("removeMember", () => unexpectedEndpoint("auth.removeMember"))
+            .handle("issueMemberLoginCode", () => unexpectedEndpoint("auth.issueMemberLoginCode"))
+            .handle("setOwnPassword", () => unexpectedEndpoint("auth.setOwnPassword"))
+            .handle("setMemberPassword", () => unexpectedEndpoint("auth.setMemberPassword"))
+            .handle("loginPassword", () => unexpectedEndpoint("auth.loginPassword"))
+            .handle("issueRecoveryCode", () => unexpectedEndpoint("auth.issueRecoveryCode"))
+            .handle("confirmRecovery", () => unexpectedEndpoint("auth.confirmRecovery"))
+            .handle("transferOwnership", () => unexpectedEndpoint("auth.transferOwnership"))
+            .handle("listAuditEvents", () => unexpectedEndpoint("auth.listAuditEvents"))
+            .handle("listApiTokens", () => unexpectedEndpoint("auth.listApiTokens"))
+            .handle("createApiToken", () => unexpectedEndpoint("auth.createApiToken"))
+            .handle("revokeApiToken", () => unexpectedEndpoint("auth.revokeApiToken")),
         ),
       ]),
       Effect.provideService(EnvironmentAuthenticatedAuth, authenticatedAuth),

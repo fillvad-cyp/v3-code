@@ -35,6 +35,8 @@ const layerFor = (project?: {
                 scripts: [],
                 pinnedAt: null,
                 archivedAt: null,
+                ownerId: null,
+                visibility: "shared" as const,
                 createdAt: "2026-06-21T00:00:00.000Z",
                 updatedAt: "2026-06-21T00:00:00.000Z",
                 deletedAt: null,

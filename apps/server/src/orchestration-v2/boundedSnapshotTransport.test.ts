@@ -45,6 +45,10 @@ import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
+import * as ProjectQuotaService from "../project/ProjectQuotaService.ts";
+import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as Principals from "../persistence/Principals.ts";
+import * as Memberships from "../persistence/Memberships.ts";
 import { subscribeOrchestrationV2Thread } from "../ws.ts";
 import * as OrchestrationHttp from "./http.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
@@ -400,6 +404,12 @@ const TestLayer = Layer.mergeAll(
   Layer.mock(OrchestrationEventStore.OrchestrationEventStore)({}),
   Layer.mock(ProjectStore.ProjectStoreV2)({}),
   Layer.mock(ProjectEnrichmentService.ProjectEnrichmentService)({}),
+  Layer.mock(ProjectQuotaService.ProjectQuotaService)({
+    getWarningsForProjects: () => Effect.succeed(new Map()),
+  }),
+  ProjectAccess.layer.pipe(
+    Layer.provide(Layer.mergeAll(Principals.layer, Memberships.layer, ProjectStore.layer)),
+  ),
 ).pipe(Layer.provideMerge(store));
 
 const withHttp = <A>(use: (get: (path: string) => Promise<Response>) => Promise<A>) =>

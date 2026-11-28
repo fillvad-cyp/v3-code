@@ -7,8 +7,12 @@ import {
   type AuthClientSession,
   type AuthEnvironmentScope,
   AuthWebSocketTicketUse,
+  NonNegativeInt,
+  PositiveInt,
+  PrincipalId,
   RuntimeMode,
   type ServerAuthSessionMethod,
+  type SessionBinding,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import * as SecureRandom from "effect/crypto/SecureRandom";
@@ -25,6 +29,8 @@ import * as Option from "effect/Option";
 import * as ServerConfig from "../config.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as AuthSessions from "../persistence/AuthSessions.ts";
+import * as SessionPrincipals from "../persistence/SessionPrincipals.ts";
+import * as PrincipalLimitsService from "../identity/PrincipalLimitsService.ts";
 import type {
   ServerAuthInternalError,
   ServerAuthInvalidCredentialError,
@@ -65,6 +71,8 @@ export interface VerifiedSession {
   readonly runtimeModeCeiling?: RuntimeMode;
   /** An MCP client that is another T3 Code environment's peer link. */
   readonly peerLink?: true;
+  readonly principalId?: PrincipalId;
+  readonly binding?: SessionBinding;
 }
 
 export interface VerifiedWebSocketTicket extends VerifiedSession {
@@ -379,6 +387,22 @@ export class ProofKeySessionsError extends Schema.TaggedError<ProofKeySessionsEr
   }
 }
 
+export class SessionLimitExceededError extends Schema.TaggedError<SessionLimitExceededError>()(
+  "SessionLimitExceededError",
+  {
+    status: Schema.Literal(429),
+    principalId: PrincipalId,
+    limit: NonNegativeInt,
+    activeCount: NonNegativeInt,
+    retryAfterSeconds: PositiveInt,
+  },
+) {
+  override get message(): string {
+    return `Active session limit (${this.limit}) reached for principal ${this.principalId}. Revoke an existing session and retry after ${this.retryAfterSeconds}s.`;
+  }
+}
+export const isSessionLimitExceededError = Schema.is(SessionLimitExceededError);
+
 export const SessionCredentialInternalError = Schema.Union([
   SessionClaimsEncodingError,
   SessionCredentialIssueError,
@@ -416,7 +440,9 @@ export class SessionStore extends Context.Service<
       readonly replaceSessionId?: AuthSessionId;
       /** Keeps the session alive this long past each renewal; `ttl` then bounds only the token. */
       readonly renewalWindow?: Duration.Duration;
-    }) => Effect.Effect<IssuedSession, SessionCredentialInternalError>;
+      readonly principalId?: PrincipalId;
+      readonly binding?: SessionBinding;
+    }) => Effect.Effect<IssuedSession, SessionCredentialInternalError | SessionLimitExceededError>;
     /** Trades a renewable token, even an expired one, for a fresh token on the same session. */
     readonly renew: (
       token: string,
@@ -555,12 +581,27 @@ function toAuthClientSession(input: Omit<AuthClientSession, "current">): AuthCli
   };
 }
 
+function toVerifiedPrincipalFields(
+  record: Option.Option<SessionPrincipals.SessionPrincipalRecord>,
+): Pick<VerifiedSession, "principalId" | "binding"> {
+  if (Option.isNone(record)) return {};
+  const { principalId, bindingKind, binding } = record.value;
+  return {
+    principalId,
+    binding:
+      binding ??
+      (bindingKind === "projects" ? { _tag: "projects", projects: [] } : { _tag: bindingKind }),
+  };
+}
+
 const make = Effect.gen(function* () {
   const random = yield* SecureRandom.SecureRandom;
   const serverConfig = yield* ServerConfig.ServerConfig;
   const serverEnvironment = yield* ServerEnvironment.ServerEnvironmentIdentity;
   const secretStore = yield* ServerSecretStore.ServerSecretStore;
   const authSessions = yield* AuthSessions.AuthSessionRepository;
+  const sessionPrincipals = yield* SessionPrincipals.SessionPrincipalRepository;
+  const principalLimits = yield* PrincipalLimitsService.PrincipalLimitsService;
   const signer = yield* PayloadSigner.fromSecret(
     yield* secretStore.getOrCreateRandom(SIGNING_SECRET_NAME, 32),
   );
@@ -732,6 +773,51 @@ const make = Effect.gen(function* () {
           .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ cause }))),
       );
       const issuedAt = yield* DateTime.now;
+      const subject = input?.subject ?? "browser";
+      const method = input?.method ?? "browser-session-cookie";
+      if (input?.principalId !== undefined) {
+        const limits = yield* principalLimits
+          .resolveForPrincipal(input.principalId)
+          .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })));
+        if (limits !== null) {
+          const active = yield* sessionPrincipals
+            .countActiveForPrincipal({
+              principalId: input.principalId,
+              now: issuedAt,
+              ...(input.replaceSessionId !== undefined
+                ? { excludeSessionId: input.replaceSessionId, excludeMethod: method }
+                : input.replaceActiveForSubjectAndMethod
+                  ? { excludeSubject: subject, excludeMethod: method }
+                  : {}),
+            })
+            .pipe(
+              Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })),
+            );
+          if (active.activeCount >= limits.maxSessions) {
+            const untilExpirySeconds =
+              active.earliestExpiresAt === null
+                ? PrincipalLimitsService.DEFAULT_LIMIT_RETRY_AFTER_SECONDS
+                : Math.ceil(
+                    (active.earliestExpiresAt.epochMilliseconds - issuedAt.epochMilliseconds) /
+                      1_000,
+                  );
+            const retryAfterSeconds = Math.max(
+              1,
+              Math.min(
+                PrincipalLimitsService.DEFAULT_LIMIT_RETRY_AFTER_SECONDS,
+                untilExpirySeconds,
+              ),
+            );
+            return yield* new SessionLimitExceededError({
+              status: 429,
+              principalId: input.principalId,
+              limit: limits.maxSessions,
+              activeCount: active.activeCount,
+              retryAfterSeconds,
+            });
+          }
+        }
+      }
       const expiresAt = DateTime.add(issuedAt, {
         milliseconds: Duration.toMillis(input?.ttl ?? DEFAULT_SESSION_TTL),
       });
@@ -742,9 +828,9 @@ const make = Effect.gen(function* () {
         v: 1,
         kind: "session",
         sid: sessionId,
-        sub: input?.subject ?? "browser",
+        sub: subject,
         scopes: input?.scopes ?? AuthStandardClientScopes,
-        method: input?.method ?? "browser-session-cookie",
+        method,
         ...(input?.proofKeyThumbprint ? { jkt: input.proofKeyThumbprint } : {}),
         ...(input?.runtimeModeCeiling ? { rtc: input.runtimeModeCeiling } : {}),
         ...(input?.peerLink === true ? { plk: 1 as const } : {}),
@@ -783,8 +869,22 @@ const make = Effect.gen(function* () {
             })
           : authSessions.create(sessionRecord).pipe(Effect.as([] as ReadonlyArray<AuthSessionId>))
       ).pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })));
+      if (input?.principalId !== undefined) {
+        const bindingKind = input.binding === undefined ? "environment" : input.binding._tag;
+        yield* sessionPrincipals
+          .put({
+            sessionId,
+            principalId: input.principalId,
+            bindingKind,
+            ...(input.binding === undefined ? {} : { binding: input.binding }),
+          })
+          .pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })));
+      }
       if (claims.jkt) latestSessionByProofKey.set(claims.jkt, sessionId);
       if (replacedSessionIds.length > 0) {
+        yield* Effect.forEach(replacedSessionIds, (id) => sessionPrincipals.remove(id), {
+          discard: true,
+        }).pipe(Effect.mapError((cause) => new SessionCredentialIssueError({ sessionId, cause })));
         yield* Ref.update(connectedSessionsRef, (current) => {
           const next = new Map(current);
           for (const replacedSessionId of replacedSessionIds) {
@@ -851,6 +951,14 @@ const make = Effect.gen(function* () {
             observedAt,
           });
         }
+        const principal = yield* sessionPrincipals
+          .get(row.value.sessionId)
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new SessionCredentialVerificationError({ sessionId: devAuth.sessionId, cause }),
+            ),
+          );
         return {
           sessionId: row.value.sessionId,
           token,
@@ -859,6 +967,7 @@ const make = Effect.gen(function* () {
           expiresAt: row.value.expiresAt,
           subject: row.value.subject,
           scopes: row.value.scopes,
+          ...toVerifiedPrincipalFields(principal),
         } satisfies VerifiedSession;
       }
       const [encodedPayload, signature] = token.split(".");
@@ -920,6 +1029,14 @@ const make = Effect.gen(function* () {
         });
       }
 
+      const principal = yield* sessionPrincipals
+        .get(claims.sid)
+        .pipe(
+          Effect.mapError(
+            (cause) => new SessionCredentialVerificationError({ sessionId: claims.sid, cause }),
+          ),
+        );
+
       return {
         sessionId: claims.sid,
         token,
@@ -931,6 +1048,7 @@ const make = Effect.gen(function* () {
         ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
         ...(claims.rtc ? { runtimeModeCeiling: claims.rtc } : {}),
         ...(claims.plk === 1 ? { peerLink: true as const } : {}),
+        ...toVerifiedPrincipalFields(principal),
       } satisfies VerifiedSession;
     },
   );
@@ -1142,6 +1260,14 @@ const make = Effect.gen(function* () {
       });
     }
 
+    const principal = yield* sessionPrincipals
+      .get(claims.sid)
+      .pipe(
+        Effect.mapError(
+          (cause) => new WebSocketTokenVerificationError({ sessionId: claims.sid, cause }),
+        ),
+      );
+
     return {
       sessionId: row.value.sessionId,
       token,
@@ -1152,6 +1278,7 @@ const make = Effect.gen(function* () {
       scopes: row.value.scopes,
       ...(claims.aud ? { audience: claims.aud } : {}),
       ...(claims.jkt ? { proofKeyThumbprint: claims.jkt } : {}),
+      ...toVerifiedPrincipalFields(principal),
     } satisfies VerifiedWebSocketTicket;
   });
 
@@ -1191,6 +1318,9 @@ const make = Effect.gen(function* () {
         })
         .pipe(Effect.mapError((cause) => new SessionRevocationError({ sessionId, cause })));
       if (revoked) {
+        yield* sessionPrincipals
+          .remove(sessionId)
+          .pipe(Effect.mapError((cause) => new SessionRevocationError({ sessionId, cause })));
         yield* Ref.update(connectedSessionsRef, (current) => {
           const next = new Map(current);
           next.delete(sessionId);
@@ -1214,6 +1344,13 @@ const make = Effect.gen(function* () {
     const revokedSessionIds = yield* authSessions
       .revokeByProofKey({ proofKeyThumbprint, revokedAt })
       .pipe(Effect.mapError((cause) => new ProofKeySessionsError({ operation: "revoke", cause })));
+    if (revokedSessionIds.length > 0) {
+      yield* Effect.forEach(revokedSessionIds, (id) => sessionPrincipals.remove(id), {
+        discard: true,
+      }).pipe(
+        Effect.mapError((cause) => new ProofKeySessionsError({ operation: "revoke", cause })),
+      );
+    }
     yield* Ref.update(connectedSessionsRef, (current) => {
       const next = new Map(current);
       for (const revokedSessionId of revokedSessionIds) next.delete(revokedSessionId);
@@ -1238,6 +1375,13 @@ const make = Effect.gen(function* () {
         ),
       );
     if (revokedSessionIds.length > 0) {
+      yield* Effect.forEach(revokedSessionIds, (id) => sessionPrincipals.remove(id), {
+        discard: true,
+      }).pipe(
+        Effect.mapError(
+          (cause) => new OtherSessionsRevocationError({ currentSessionId: sessionId, cause }),
+        ),
+      );
       yield* Ref.update(connectedSessionsRef, (current) => {
         const next = new Map(current);
         for (const revokedSessionId of revokedSessionIds) {
@@ -1361,4 +1505,8 @@ const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(SessionStore, make).pipe(Layer.provideMerge(AuthSessions.layer));
+export const layer = Layer.effect(SessionStore, make).pipe(
+  Layer.provideMerge(AuthSessions.layer),
+  Layer.provideMerge(SessionPrincipals.layer),
+  Layer.provideMerge(PrincipalLimitsService.layer),
+);

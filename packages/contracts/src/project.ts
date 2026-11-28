@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
 import * as Struct from "effect/Struct";
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
+import { ProjectIsolationLevel } from "./membership.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import {
   CommandId,
@@ -192,6 +193,8 @@ export const Project = Schema.Struct({
   scripts: Schema.Array(ProjectScript),
   // Absent from older servers; that means a single-folder project.
   trackedFolders: Schema.optional(ProjectTrackedFolders),
+  // Absent from older servers; defaults to L0 (logical isolation only).
+  isolationLevel: Schema.optional(ProjectIsolationLevel),
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   archivedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   createdAt: IsoDateTime,
@@ -234,6 +237,11 @@ export const ProjectUpdatePayload = Schema.Struct({
   archived: Schema.optional(
     Schema.Boolean.annotate({
       description: "Threads and files are kept.",
+    }),
+  ),
+  isolationLevel: Schema.optional(
+    ProjectIsolationLevel.annotate({
+      description: "OS isolation level for the project (0 = L0 logical, 1 = L1 OS service user).",
     }),
   ),
 });

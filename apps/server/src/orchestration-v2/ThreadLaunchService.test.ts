@@ -53,6 +53,7 @@ import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as ProjectQuotaService from "../project/ProjectQuotaService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
@@ -290,6 +291,17 @@ function makeHarness(options: HarnessOptions = {}) {
         layerReceipts,
         layerOrchestrator,
         IdAllocator.layer,
+        ProjectQuotaService.layer.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              layerDatabase,
+              NodeServices.layer,
+              ServerConfig.layerTest(process.cwd(), { prefix: "t3-launch-quota-test-" }).pipe(
+                Layer.provide(NodeServices.layer),
+              ),
+            ),
+          ),
+        ),
         options.getLaunchSettings === undefined
           ? Layer.empty
           : Layer.mock(ServerSettings.ServerSettingsService)({
@@ -316,6 +328,8 @@ function makeHarness(options: HarnessOptions = {}) {
               trackedFolders: [],
               pinnedAt: null,
               archivedAt: null,
+              ownerId: null,
+              visibility: "shared" as const,
               createdAt: project.createdAt,
               updatedAt: project.updatedAt,
               deletedAt: project.deletedAt,

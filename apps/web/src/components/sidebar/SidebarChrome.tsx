@@ -1,8 +1,14 @@
-import { ArrowLeftIcon, ArrowRightIcon, ChartNoAxesColumnIcon, SettingsIcon } from "lucide-react";
+import {
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  ChartNoAxesColumnIcon,
+  LogOutIcon,
+  SettingsIcon,
+} from "lucide-react";
 import type { ReactNode } from "react";
 import { T, useGT } from "gt-react";
-import { memo } from "react";
-import { Link, useLocation, useNavigate } from "@tanstack/react-router";
+import { memo, useState } from "react";
+import { Link, useLocation, useNavigate, useRouter } from "@tanstack/react-router";
 
 import { useAtomValue } from "@effect/atom-react";
 import { useEnvironmentIdentificationMode } from "../../hooks/useSettings";
@@ -14,7 +20,14 @@ import {
 } from "../../navigationHistory";
 import { primaryServerKeybindingsAtom } from "../../state/server";
 import { cn } from "../../lib/utils";
-import { useIssuesSupported, usePullRequestsSupported } from "../../state/environments";
+import {
+  useIssuesSupported,
+  usePrimaryEnvironment,
+  usePullRequestsSupported,
+} from "../../state/environments";
+import { useEnvironmentSessionState } from "../../state/session";
+import { signOutPrimaryEnvironment } from "../../environments/primary";
+import { stackedThreadToast, toastManager } from "../ui/toast";
 import { T3Wordmark } from "../T3Wordmark";
 import {
   resolveEnvironmentIdentificationPillLabel,
@@ -39,6 +52,7 @@ import { IssueGlyph } from "../issue/issuePresentation";
 import { isSidebarUtilityPage, useNavigateToMainApp } from "./mainAppLocation";
 import { SidebarThreadUndoNotice } from "./SidebarThreadUndoNotice";
 import { PullRequestGlyph } from "~/components/pullRequest/pullRequestIcons";
+import { supportsMembersCapability } from "~/components/settings/MembersSettings.logic";
 import { observeResize } from "~/lib/observeResize";
 
 export const SidebarChromeHeader = memo(function SidebarChromeHeader({
@@ -224,6 +238,7 @@ function SidebarUtilityItem({
 }
 
 const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
+  const router = useRouter();
   const navigate = useNavigate();
   const navigateToMainApp = useNavigateToMainApp();
   const gt = useGT();
@@ -233,10 +248,42 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
   });
   const pullRequestsSupported = usePullRequestsSupported();
   const issuesSupported = useIssuesSupported();
+  const primaryEnvironment = usePrimaryEnvironment();
+  const primarySession = useEnvironmentSessionState(primaryEnvironment?.environmentId ?? null);
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  const primaryMembersSupported = supportsMembersCapability(
+    primaryEnvironment?.serverConfig?.environment.capabilities,
+  );
+  const showSignOut =
+    primarySession.data?.authenticated === true &&
+    (primaryMembersSupported || primarySession.data.principal !== undefined);
   const closeMobileSidebar = () => {
     if (isMobile) {
       setOpenMobile(false);
     }
+  };
+  const handleSignOutClick = async () => {
+    if (isSigningOut) return;
+    setIsSigningOut(true);
+    closeMobileSidebar();
+    const error = await signOutPrimaryEnvironment().then(
+      () => null,
+      (cause) => (cause instanceof Error ? cause.message : String(cause)),
+    );
+    if (error !== null) {
+      setIsSigningOut(false);
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: gt("Could not sign out"),
+          description: error,
+        }),
+      );
+      return;
+    }
+    router.history.replace("/login");
+    router.history.flush();
+    window.location.reload();
   };
   const handlePullRequestsClick = () => {
     closeMobileSidebar();
@@ -303,6 +350,13 @@ const SidebarUtilityMenu = memo(function SidebarUtilityMenu() {
             label={gt("Usage")}
             onClick={handleUsageClick}
           />
+          {showSignOut ? (
+            <SidebarUtilityItem
+              icon={<LogOutIcon />}
+              label={gt("Sign out")}
+              onClick={() => void handleSignOutClick()}
+            />
+          ) : null}
         </>
       )}
       <SidebarThreadUndoNotice />

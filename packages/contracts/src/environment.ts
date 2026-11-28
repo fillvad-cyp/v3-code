@@ -227,6 +227,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   issueLinkedThreads: Schema.optionalKey(Schema.Boolean),
   /** Keeps more than one account per standalone issue tracker; older servers keep one. */
   issueTrackerAccounts: Schema.optionalKey(Schema.Boolean),
+  /** Serves the member and invitation methods; absent on single-owner servers. */
+  members: Schema.optionalKey(Schema.Boolean),
+  audit: Schema.optionalKey(Schema.Boolean),
+  projectSecrets: Schema.optionalKey(Schema.Boolean),
+  crm: Schema.optionalKey(Schema.Boolean),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;
 
@@ -238,6 +243,8 @@ export const ExecutionEnvironmentDescriptor = Schema.Struct({
   orchestrationProtocolVersion: Schema.optionalKey(Schema.Int),
   /** Highest migration this server's database holds; absent on older servers. */
   databaseMigration: Schema.optionalKey(Schema.Int),
+  /** `multi-user` when the owner enabled member logins; absent on single-owner servers. */
+  authMode: Schema.optionalKey(Schema.Literals(["single-owner", "multi-user"])),
   capabilities: ExecutionEnvironmentCapabilities,
 });
 export type ExecutionEnvironmentDescriptor = typeof ExecutionEnvironmentDescriptor.Type;

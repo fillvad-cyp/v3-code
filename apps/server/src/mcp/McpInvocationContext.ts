@@ -1,15 +1,23 @@
 import {
   type AgentFeedbackMode,
+  type AuthEnvironmentScope,
   type AuthMcpClientAccess,
   type EnvironmentId,
   McpCapabilityUnavailableError,
   OrchestratorMcpFailure,
   PreviewAutomationUnavailableError,
+  type PrincipalId,
+  type ProjectCapability,
+  type ProjectId,
   type ProviderInstanceId,
   type ProviderInteractionMode,
   type OrchestrationV2LinkedSender,
   type RuntimeMode,
+  type SessionBinding,
   type ThreadId,
+  boundProjectIds,
+  boundProjectRole,
+  roleHasCapability,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
 import type * as DateTime from "effect/DateTime";
@@ -40,6 +48,12 @@ export interface McpClientCaller {
   readonly sessionId: string;
   readonly label: string;
   readonly access: AuthMcpClientAccess;
+  /** Effective scopes minted for this MCP client (role scopes intersected with any ceiling). */
+  readonly scopes?: ReadonlyArray<AuthEnvironmentScope> | undefined;
+  /** Approving principal id when bound in `session_principals`. */
+  readonly principalId?: PrincipalId | undefined;
+  /** Project or environment binding; absent behaves as environment-wide. */
+  readonly binding?: SessionBinding | undefined;
   /**
    * Another T3 Code environment's peer link. What it starts here carries its
    * session as `linkOrigin`, and it changes only that work (`linkOrigin.ts`).
@@ -315,3 +329,23 @@ export const requireThreadScope = (scope: McpInvocationScope, operation: string)
   scope.thread === undefined
     ? Effect.fail(threadCallerRequired(operation))
     : Effect.succeed(scope as McpThreadInvocationScope);
+
+/** True when an outside MCP client is bound to a specific list of projects. */
+export const isProjectScopedClient = (scope: Pick<McpInvocationScope, "client">): boolean =>
+  scope.client?.binding?._tag === "projects";
+
+/** Project ids a project-scoped MCP client may reach, or `undefined` when unrestricted. */
+export const clientAllowedProjectIds = (
+  scope: Pick<McpInvocationScope, "client">,
+): ReadonlySet<string> | undefined => boundProjectIds(scope.client?.binding);
+
+/** Whether the caller holds `capability` on `projectId` (always true for unrestricted callers). */
+export const clientHasProjectCapability = (
+  scope: Pick<McpInvocationScope, "client">,
+  projectId: ProjectId | string,
+  capability: ProjectCapability,
+): boolean => {
+  if (scope.client?.binding?._tag !== "projects") return true;
+  const role = boundProjectRole(scope.client.binding, projectId);
+  return role !== undefined && roleHasCapability(role, capability);
+};

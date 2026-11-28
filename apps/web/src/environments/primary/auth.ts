@@ -1,9 +1,19 @@
+import {
+  confirmRemoteRecovery,
+  loginRemoteInvitationCode,
+  loginRemotePassword,
+  revokeRemoteCurrentSession,
+} from "@t3tools/client-runtime/authorization";
 import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
+import { layerRemoteHttpClient } from "@t3tools/client-runtime/rpc";
 import type {
   AuthBrowserSessionResult,
   AuthClientMetadata,
   AuthConnectDeviceRequest,
   AuthEnvironmentScope,
+  AuthInvitationSessionResult,
+  PasswordLoginInput,
+  RecoveryConfirmResult,
   ServerAuthSessionMethod,
   AuthSessionId,
   AuthSessionState,
@@ -20,7 +30,13 @@ import {
 } from "@t3tools/shared/remote";
 
 import { PrimaryEnvironmentHttpClient } from "./httpClient";
+import { resolvePrimaryEnvironmentHttpUrl } from "./target";
 import { runPrimaryHttp } from "../../lib/runtime";
+import {
+  clearPersistedPopoutAuthSession,
+  markPersistedPopoutAuthSession,
+  notifyPopoutSignOut,
+} from "../../lib/threadPopout";
 import { msg } from "gt-react";
 import { m } from "../../i18n/messages";
 
@@ -355,9 +371,85 @@ export async function submitServerAuthCredential(credential: string): Promise<vo
   await exchangeBootstrapCredential(trimmedCredential);
   await waitForAuthenticatedSessionAfterBootstrap();
   resolvedAuthenticatedGateState = { status: "authenticated" };
+  markPersistedPopoutAuthSession();
   bootstrapPromise = null;
   explicitPairingRequested = false;
   stripPairingTokenFromUrl();
+}
+
+const primaryCookieFetch: typeof fetch = (input, init) =>
+  globalThis.fetch(input, { ...init, credentials: "include" });
+
+export async function submitMemberLoginCode(code: string): Promise<AuthInvitationSessionResult> {
+  const trimmedCode = code.trim();
+  if (!trimmedCode) {
+    throw new Error(m(msg("Enter a login code to continue.")));
+  }
+
+  resolvedAuthenticatedGateState = null;
+  const result = await Effect.runPromise(
+    loginRemoteInvitationCode({
+      httpBaseUrl: resolvePrimaryEnvironmentHttpUrl("/"),
+      code: trimmedCode,
+    }).pipe(Effect.provide(layerRemoteHttpClient(primaryCookieFetch))),
+  );
+  await waitForAuthenticatedSessionAfterBootstrap();
+  resolvedAuthenticatedGateState = { status: "authenticated" };
+  markPersistedPopoutAuthSession();
+  bootstrapPromise = null;
+  explicitPairingRequested = false;
+  return result;
+}
+
+export async function submitMemberPasswordLogin(
+  credentials: PasswordLoginInput,
+): Promise<AuthInvitationSessionResult> {
+  resolvedAuthenticatedGateState = null;
+  const result = await Effect.runPromise(
+    loginRemotePassword({
+      httpBaseUrl: resolvePrimaryEnvironmentHttpUrl("/"),
+      credentials,
+    }).pipe(Effect.provide(layerRemoteHttpClient(primaryCookieFetch))),
+  );
+  await waitForAuthenticatedSessionAfterBootstrap();
+  resolvedAuthenticatedGateState = { status: "authenticated" };
+  markPersistedPopoutAuthSession();
+  bootstrapPromise = null;
+  explicitPairingRequested = false;
+  return result;
+}
+
+export async function submitPasswordRecoveryConfirm(input: {
+  readonly code: string;
+  readonly password: string;
+  readonly host?: string;
+}): Promise<RecoveryConfirmResult> {
+  const httpBaseUrl = input.host ? input.host : resolvePrimaryEnvironmentHttpUrl("/");
+  const result = await Effect.runPromise(
+    confirmRemoteRecovery({
+      httpBaseUrl,
+      code: input.code,
+      password: input.password,
+    }).pipe(Effect.provide(layerRemoteHttpClient(primaryCookieFetch))),
+  );
+  if (!input.host) {
+    resolvedAuthenticatedGateState = null;
+    bootstrapPromise = null;
+    explicitPairingRequested = false;
+  }
+  return result;
+}
+
+export async function signOutPrimaryEnvironment(): Promise<void> {
+  await Effect.runPromise(
+    revokeRemoteCurrentSession({
+      httpBaseUrl: resolvePrimaryEnvironmentHttpUrl("/"),
+    }).pipe(Effect.provide(layerRemoteHttpClient(primaryCookieFetch))),
+  );
+  resolvedAuthenticatedGateState = null;
+  bootstrapPromise = null;
+  explicitPairingRequested = false;
+  notifyPopoutSignOut();
 }
 
 export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGateState> {
@@ -397,8 +489,13 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
   bootstrapPromise = nextPromise;
   return nextPromise
     .then((result) => {
-      if (bootstrapPromise === nextPromise && result.status === "authenticated") {
-        resolvedAuthenticatedGateState = result;
+      if (bootstrapPromise === nextPromise) {
+        if (result.status === "authenticated") {
+          resolvedAuthenticatedGateState = result;
+          markPersistedPopoutAuthSession();
+        } else {
+          clearPersistedPopoutAuthSession();
+        }
       }
       return result;
     })
@@ -409,8 +506,12 @@ export async function resolveInitialServerAuthGateState(): Promise<ServerAuthGat
     });
 }
 
-export function __resetServerAuthBootstrapForTests() {
+export function invalidatePrimaryAuthGateCache() {
   bootstrapPromise = null;
   resolvedAuthenticatedGateState = null;
   explicitPairingRequested = false;
+}
+
+export function __resetServerAuthBootstrapForTests() {
+  invalidatePrimaryAuthGateCache();
 }

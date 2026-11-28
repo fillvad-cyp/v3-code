@@ -13,6 +13,7 @@ import {
   AuthAccessTokenResult,
   AuthBrowserSessionRequest,
   AuthBrowserSessionResult,
+  AuthInvitationSessionResult,
   AuthCreatePairingCredentialInput,
   AuthMcpApprovalDecisionRequest,
   AuthMcpApprovalDetails,
@@ -48,11 +49,69 @@ import {
   ORCHESTRATION_PROTOCOL_VERSION_TEXT,
 } from "./environment.ts";
 import {
+  ApiTokenId,
+  CrmClientId,
+  CrmContactId,
+  CrmNoteId,
   DpopFailureReason,
   AuthSessionId,
+  InvitationId,
+  PrincipalId,
+  ProjectId,
   ThreadId,
   TrimmedNonEmptyString,
 } from "./baseSchemas.ts";
+import { ListAuditEventsQuery, ListAuditEventsResult } from "./audit.ts";
+import {
+  CrmClient,
+  CrmClientCreateInput,
+  CrmClientDeleteResult,
+  CrmClientDetail,
+  CrmClientInviteResult,
+  CrmClientThread,
+  CrmClientThreadLinkInput,
+  CrmClientThreadUnlinkResult,
+  CrmClientUpdateInput,
+  CrmContact,
+  CrmContactCreateInput,
+  CrmContactDeleteResult,
+  CrmContactUpdateInput,
+  CrmNote,
+  CrmNoteCreateInput,
+  CrmNoteDeleteResult,
+  CrmNoteUpdateInput,
+  CrmPortalView,
+} from "./crm.ts";
+import {
+  ApiTokenCreateInput,
+  ApiTokenCreateResult,
+  ApiTokenListItem,
+  ApiTokenRevokeResult,
+  Invitation,
+  InvitationAcceptInput,
+  InvitationCreateInput,
+  InvitationCreateResult,
+  InvitationLoginInput,
+  InvitationRevokeResult,
+  MemberLoginCodeResult,
+  MemberRemoveResult,
+  MemberUpdateInput,
+  MemberWithMemberships,
+  OwnerTransferInput,
+  OwnerTransferResult,
+  PasswordLoginInput,
+  PasswordSetInput,
+  PasswordSetResult,
+  ProjectSecret,
+  ProjectSecretDeleteResult,
+  ProjectSecretSetInput,
+  ProjectUsageResult,
+  RecoveryConfirmInput,
+  RecoveryConfirmResult,
+  RecoveryIssueInput,
+  RecoveryIssueResult,
+  type SessionBinding,
+} from "./membership.ts";
 import {
   CloudSpeechApiKey,
   CloudSpeechError,
@@ -273,7 +332,14 @@ export class EnvironmentInternalError extends Schema.TaggedError<EnvironmentInte
   }
 }
 
-export const EnvironmentResourceNotFoundReason = Schema.Literals(["thread_not_found"]);
+export const EnvironmentResourceNotFoundReason = Schema.Literals([
+  "thread_not_found",
+  // A resource of another principal, answered as absent so its id does not leak.
+  "resource_not_found",
+  "member_not_found",
+  "membership_not_found",
+  "principal_not_found",
+]);
 export type EnvironmentResourceNotFoundReason = typeof EnvironmentResourceNotFoundReason.Type;
 
 export class EnvironmentResourceNotFoundError extends Schema.TaggedError<EnvironmentResourceNotFoundError>()(
@@ -370,6 +436,24 @@ export class EnvironmentHttpConflictError extends Schema.TaggedError<Environment
   }
 }
 
+export class EnvironmentHttpTooManyRequestsError extends Schema.TaggedError<EnvironmentHttpTooManyRequestsError>()(
+  "EnvironmentHttpTooManyRequestsError",
+  {
+    message: Schema.String,
+    retryAfterSeconds: Schema.optionalKey(Schema.Int),
+  },
+  { httpApiStatus: 429 },
+) {
+  [HttpServerRespondable.symbol]() {
+    return HttpServerResponse.schemaJson(EnvironmentHttpTooManyRequestsError)(this, {
+      status: 429,
+      ...(this.retryAfterSeconds === undefined
+        ? {}
+        : { headers: { "Retry-After": String(this.retryAfterSeconds) } }),
+    });
+  }
+}
+
 export class EnvironmentCloudEndpointUnavailableError extends Schema.TaggedError<EnvironmentCloudEndpointUnavailableError>()(
   "EnvironmentCloudEndpointUnavailableError",
   {
@@ -405,26 +489,112 @@ const EnvironmentPairingCredentialErrors = [
   ...EnvironmentScopedOperationErrors,
 ] as const;
 const EnvironmentSessionRevokeErrors = [
+  EnvironmentRequestInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentOperationForbiddenError,
   EnvironmentInternalError,
 ] as const;
+const EnvironmentInvitationAcceptErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpConflictError,
+  EnvironmentHttpTooManyRequestsError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentInvitationManageErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentHttpTooManyRequestsError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentInvitationListErrors = [
+  EnvironmentHttpForbiddenError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentMemberManageErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentMemberLoginCodeErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentHttpTooManyRequestsError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentPasswordSetErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentPasswordLoginErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpUnauthorizedError,
+  EnvironmentHttpTooManyRequestsError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentRecoveryConfirmErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpConflictError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentOwnerTransferErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentHttpConflictError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentAuditListErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentApiTokenCreateErrors = [
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentHttpTooManyRequestsError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentApiTokenManageErrors = [
+  EnvironmentHttpForbiddenError,
+  EnvironmentInternalError,
+] as const;
 const EnvironmentProjectSnapshotErrors = [
+  EnvironmentAuthInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentInternalError,
 ] as const;
 const EnvironmentOrchestrationSnapshotErrors = [
+  EnvironmentAuthInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentInternalError,
 ] as const;
 const EnvironmentOrchestrationThreadSnapshotErrors = [
+  EnvironmentAuthInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentResourceNotFoundError,
   EnvironmentInternalError,
 ] as const;
 const EnvironmentProjectMutationErrors = [
+  EnvironmentAuthInvalidError,
+  EnvironmentHttpForbiddenError,
   EnvironmentRequestInvalidError,
   EnvironmentScopeRequiredError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentProjectUsageErrors = [
+  EnvironmentAuthInvalidError,
+  EnvironmentScopeRequiredError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentResourceNotFoundError,
   EnvironmentInternalError,
 ] as const;
 
@@ -435,6 +605,10 @@ export interface EnvironmentSessionPrincipalShape {
   readonly scopes: ReadonlySet<AuthEnvironmentScope>;
   readonly proofKeyThumbprint?: string;
   readonly expiresAt?: DateTime.DateTime;
+  /** Absent on a single-owner server; otherwise the principal the session was issued for. */
+  readonly principalId?: PrincipalId;
+  /** Absent means `environment`; only a principal or projects binding narrows a session. */
+  readonly binding?: SessionBinding;
 }
 
 export class EnvironmentAuthenticatedPrincipal extends Context.Service<
@@ -676,6 +850,161 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       success: AuthOtherClientSessionsRevokeResult,
       error: EnvironmentScopedOperationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("acceptInvitation", "/api/auth/invitations/accept", {
+      payload: InvitationAcceptInput,
+      success: AuthInvitationSessionResult,
+      error: EnvironmentInvitationAcceptErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("loginInvitation", "/api/auth/invitations/login", {
+      payload: InvitationLoginInput,
+      success: AuthInvitationSessionResult,
+      error: EnvironmentInvitationAcceptErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.get("invitePage", "/invite/:code", {
+      params: Schema.Struct({ code: Schema.String }),
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("createInvitation", "/api/auth/invitations", {
+      headers: OptionalBearerHeaders,
+      payload: InvitationCreateInput,
+      success: InvitationCreateResult,
+      error: EnvironmentInvitationManageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listInvitations", "/api/auth/invitations", {
+      headers: OptionalBearerHeaders,
+      query: Schema.Struct({ projectId: Schema.optionalKey(ProjectId) }),
+      success: Schema.Array(Invitation),
+      error: EnvironmentInvitationListErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("revokeInvitation", "/api/auth/invitations/:id", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: InvitationId }),
+      success: InvitationRevokeResult,
+      error: EnvironmentInvitationListErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listMembers", "/api/auth/members", {
+      headers: OptionalBearerHeaders,
+      success: Schema.Array(MemberWithMemberships),
+      error: EnvironmentInvitationListErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.patch("updateMember", "/api/auth/members/:principalId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ principalId: PrincipalId }),
+      payload: MemberUpdateInput,
+      success: MemberWithMemberships,
+      error: EnvironmentMemberManageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("removeMember", "/api/auth/members/:principalId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ principalId: PrincipalId }),
+      query: Schema.Struct({ projectId: Schema.optionalKey(ProjectId) }),
+      success: MemberRemoveResult,
+      error: EnvironmentMemberManageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("issueMemberLoginCode", "/api/auth/members/:principalId/login-code", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ principalId: PrincipalId }),
+      success: MemberLoginCodeResult,
+      error: EnvironmentMemberLoginCodeErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("setOwnPassword", "/api/auth/password/set", {
+      headers: OptionalBearerHeaders,
+      payload: PasswordSetInput,
+      success: PasswordSetResult,
+      error: EnvironmentPasswordSetErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("setMemberPassword", "/api/auth/members/:principalId/password", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ principalId: PrincipalId }),
+      payload: PasswordSetInput,
+      success: PasswordSetResult,
+      error: EnvironmentPasswordSetErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("loginPassword", "/api/auth/login", {
+      payload: PasswordLoginInput,
+      success: AuthInvitationSessionResult,
+      error: EnvironmentPasswordLoginErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("issueRecoveryCode", "/api/auth/recovery", {
+      headers: OptionalBearerHeaders,
+      payload: RecoveryIssueInput,
+      success: RecoveryIssueResult,
+      error: EnvironmentMemberLoginCodeErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("confirmRecovery", "/api/auth/recovery/confirm", {
+      payload: RecoveryConfirmInput,
+      success: RecoveryConfirmResult,
+      error: EnvironmentRecoveryConfirmErrors,
+    }),
+  )
+  .add(
+    HttpApiEndpoint.post("transferOwnership", "/api/auth/owner/transfer", {
+      headers: OptionalBearerHeaders,
+      payload: OwnerTransferInput,
+      success: OwnerTransferResult,
+      error: EnvironmentOwnerTransferErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listAuditEvents", "/api/audit", {
+      headers: OptionalBearerHeaders,
+      query: ListAuditEventsQuery,
+      success: ListAuditEventsResult,
+      error: EnvironmentAuditListErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listApiTokens", "/api/tokens", {
+      headers: OptionalBearerHeaders,
+      query: Schema.Struct({ principalId: Schema.optionalKey(PrincipalId) }),
+      success: Schema.Array(ApiTokenListItem),
+      error: EnvironmentApiTokenManageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("createApiToken", "/api/tokens", {
+      headers: OptionalBearerHeaders,
+      payload: ApiTokenCreateInput,
+      success: ApiTokenCreateResult,
+      error: EnvironmentApiTokenCreateErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("revokeApiToken", "/api/tokens/:id", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ApiTokenId }),
+      success: ApiTokenRevokeResult,
+      error: EnvironmentApiTokenManageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
 class EnvironmentMcpOAuthHttpApi extends HttpApiGroup.make("mcpOAuth")
@@ -764,6 +1093,7 @@ export const EnvironmentOrchestrationThreadHistoryQuery = Schema.Struct({
 });
 
 const EnvironmentOrchestrationThreadHistoryErrors = [
+  EnvironmentAuthInvalidError,
   EnvironmentRequestInvalidError,
   EnvironmentScopeRequiredError,
   EnvironmentResourceNotFoundError,
@@ -814,6 +1144,15 @@ class EnvironmentOrchestrationHttpApi extends HttpApiGroup.make("orchestration")
     }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
+const EnvironmentProjectSecretsErrors = [
+  EnvironmentAuthInvalidError,
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentScopeRequiredError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentInternalError,
+] as const;
+
 class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
   .add(
     HttpApiEndpoint.get("snapshot", "/api/projects", {
@@ -829,6 +1168,245 @@ class EnvironmentProjectsHttpApi extends HttpApiGroup.make("projects")
       success: Project,
       error: EnvironmentProjectMutationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("usage", "/api/projects/:id/usage", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId }),
+      success: ProjectUsageResult,
+      error: EnvironmentProjectUsageErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listSecrets", "/api/projects/:id/secrets", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId }),
+      success: Schema.Array(ProjectSecret),
+      error: EnvironmentProjectSecretsErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.put("setSecret", "/api/projects/:id/secrets/:name", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, name: Schema.String }),
+      payload: ProjectSecretSetInput,
+      success: ProjectSecret,
+      error: EnvironmentProjectSecretsErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("deleteSecret", "/api/projects/:id/secrets/:name", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, name: Schema.String }),
+      success: ProjectSecretDeleteResult,
+      error: EnvironmentProjectSecretsErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  ) {}
+
+const EnvironmentCrmErrors = [
+  EnvironmentAuthInvalidError,
+  EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
+  EnvironmentHttpConflictError,
+  EnvironmentHttpTooManyRequestsError,
+  EnvironmentScopeRequiredError,
+  EnvironmentResourceNotFoundError,
+  EnvironmentInternalError,
+] as const;
+
+class EnvironmentCrmHttpApi extends HttpApiGroup.make("crm")
+  .add(
+    HttpApiEndpoint.get("listClients", "/api/projects/:id/crm/clients", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId }),
+      success: Schema.Array(CrmClient),
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("createClient", "/api/projects/:id/crm/clients", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId }),
+      payload: CrmClientCreateInput,
+      success: CrmClient,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("getClient", "/api/projects/:id/crm/clients/:clientId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      success: CrmClientDetail,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.patch("updateClient", "/api/projects/:id/crm/clients/:clientId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      payload: CrmClientUpdateInput,
+      success: CrmClient,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("deleteClient", "/api/projects/:id/crm/clients/:clientId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      query: Schema.Struct({ purge: Schema.optionalKey(Schema.String) }),
+      success: CrmClientDeleteResult,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listContacts", "/api/projects/:id/crm/clients/:clientId/contacts", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      success: Schema.Array(CrmContact),
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("createContact", "/api/projects/:id/crm/clients/:clientId/contacts", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      payload: CrmContactCreateInput,
+      success: CrmContact,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.patch(
+      "updateContact",
+      "/api/projects/:id/crm/clients/:clientId/contacts/:contactId",
+      {
+        headers: OptionalBearerHeaders,
+        params: Schema.Struct({
+          id: ProjectId,
+          clientId: CrmClientId,
+          contactId: CrmContactId,
+        }),
+        payload: CrmContactUpdateInput,
+        success: CrmContact,
+        error: EnvironmentCrmErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete(
+      "deleteContact",
+      "/api/projects/:id/crm/clients/:clientId/contacts/:contactId",
+      {
+        headers: OptionalBearerHeaders,
+        params: Schema.Struct({
+          id: ProjectId,
+          clientId: CrmClientId,
+          contactId: CrmContactId,
+        }),
+        success: CrmContactDeleteResult,
+        error: EnvironmentCrmErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listNotes", "/api/projects/:id/crm/clients/:clientId/notes", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      success: Schema.Array(CrmNote),
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("createNote", "/api/projects/:id/crm/clients/:clientId/notes", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      payload: CrmNoteCreateInput,
+      success: CrmNote,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.patch("updateNote", "/api/projects/:id/crm/clients/:clientId/notes/:noteId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({
+        id: ProjectId,
+        clientId: CrmClientId,
+        noteId: CrmNoteId,
+      }),
+      payload: CrmNoteUpdateInput,
+      success: CrmNote,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete("deleteNote", "/api/projects/:id/crm/clients/:clientId/notes/:noteId", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({
+        id: ProjectId,
+        clientId: CrmClientId,
+        noteId: CrmNoteId,
+      }),
+      success: CrmNoteDeleteResult,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("listClientThreads", "/api/projects/:id/crm/clients/:clientId/threads", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      success: Schema.Array(CrmClientThread),
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("linkClientThread", "/api/projects/:id/crm/clients/:clientId/threads", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      payload: CrmClientThreadLinkInput,
+      success: CrmClientThread,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.delete(
+      "unlinkClientThread",
+      "/api/projects/:id/crm/clients/:clientId/threads/:threadId",
+      {
+        headers: OptionalBearerHeaders,
+        params: Schema.Struct({
+          id: ProjectId,
+          clientId: CrmClientId,
+          threadId: ThreadId,
+        }),
+        success: CrmClientThreadUnlinkResult,
+        error: EnvironmentCrmErrors,
+      },
+    ).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.post("inviteClient", "/api/projects/:id/crm/clients/:clientId/invite", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId, clientId: CrmClientId }),
+      success: CrmClientInviteResult,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("exportCrm", "/api/projects/:id/crm/export", {
+      headers: OptionalBearerHeaders,
+      params: Schema.Struct({ id: ProjectId }),
+      query: Schema.Struct({ clientId: Schema.optionalKey(CrmClientId) }),
+      success: Schema.String.pipe(HttpApiSchema.asText({ contentType: "application/x-ndjson" })),
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("getPortal", "/api/crm/portal", {
+      headers: OptionalBearerHeaders,
+      query: Schema.Struct({ clientId: Schema.optionalKey(CrmClientId) }),
+      success: CrmPortalView,
+      error: EnvironmentCrmErrors,
+    }).middleware(EnvironmentAuthenticatedAuth),
   ) {}
 
 class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").add(
@@ -840,6 +1418,7 @@ class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").a
       PullRequestUnavailableError,
       PullRequestOperationError,
       EnvironmentAuthInvalidError,
+      EnvironmentHttpForbiddenError,
       EnvironmentScopeRequiredError,
       EnvironmentInternalError,
     ],
@@ -1107,6 +1686,7 @@ export class EnvironmentHttpApi extends HttpApi.make("environment")
   .add(EnvironmentOrchestrationHttpApi)
   .add(EnvironmentPullRequestsHttpApi)
   .add(EnvironmentProjectsHttpApi)
+  .add(EnvironmentCrmHttpApi)
   .add(EnvironmentVoiceHttpApi)
   .add(EnvironmentConnectHttpApi)
   .add(EnvironmentWebhooksHttpApi)

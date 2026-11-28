@@ -525,10 +525,9 @@ export interface OrchestratorV2Shape {
     OrchestratorV2Error
   >;
   readonly countThreads: () => Effect.Effect<number, OrchestratorV2Error>;
-  readonly listActiveShellIndex: () => Effect.Effect<
-    ReadonlyArray<ActiveShellIndexEntry>,
-    OrchestratorV2Error
-  >;
+  readonly listActiveShellIndex: (options?: {
+    readonly projectIds?: ReadonlyArray<ProjectId>;
+  }) => Effect.Effect<ReadonlyArray<ActiveShellIndexEntry>, OrchestratorV2Error>;
   readonly listActiveThreads: (
     projectId?: ProjectId,
   ) => Effect.Effect<ReadonlyArray<ActiveThreadListEntry>, OrchestratorV2Error>;
@@ -550,9 +549,11 @@ export interface OrchestratorV2Shape {
   /** Titles of the given threads that exist, archived ones included. */
   readonly getThreadLinkMetadata: (
     threadIds: ReadonlyArray<ThreadId>,
+    options?: { readonly projectIds?: ReadonlyArray<ProjectId> },
   ) => Effect.Effect<Record<ThreadId, OrchestrationV2ThreadLinkMetadata>, OrchestratorV2Error>;
   readonly getThreadTitles: (
     threadIds: ReadonlyArray<ThreadId>,
+    options?: { readonly projectIds?: ReadonlyArray<ProjectId> },
   ) => Effect.Effect<Record<ThreadId, string>, OrchestratorV2Error>;
   readonly getThreadEventSequence: (
     threadId: ThreadId,
@@ -17558,8 +17559,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     countThreads: Effect.fn("OrchestratorV2.countThreads")(function () {
       return projectionStore.countThreads().pipe(Effect.mapError(shellProjectionError));
     }),
-    listActiveShellIndex: Effect.fn("OrchestratorV2.listActiveShellIndex")(function () {
-      return projectionStore.listActiveShellIndex().pipe(Effect.mapError(shellProjectionError));
+    listActiveShellIndex: Effect.fn("OrchestratorV2.listActiveShellIndex")(function (options) {
+      return projectionStore
+        .listActiveShellIndex(options)
+        .pipe(Effect.mapError(shellProjectionError));
     }),
     listActiveThreads: Effect.fn("OrchestratorV2.listActiveThreads")(function (projectId) {
       return projectionStore
@@ -17589,13 +17592,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         .findGuestShareThreadId(shareId)
         .pipe(Effect.mapError(shellProjectionError));
     }),
-    getThreadLinkMetadata: Effect.fn("OrchestratorV2.getThreadLinkMetadata")(function (threadIds) {
+    getThreadLinkMetadata: Effect.fn("OrchestratorV2.getThreadLinkMetadata")(
+      function (threadIds, options) {
+        return projectionStore
+          .getThreadLinkMetadata(threadIds, options)
+          .pipe(Effect.mapError(shellProjectionError));
+      },
+    ),
+    getThreadTitles: Effect.fn("OrchestratorV2.getThreadTitles")(function (threadIds, options) {
       return projectionStore
-        .getThreadLinkMetadata(threadIds)
+        .getThreadTitles(threadIds, options)
         .pipe(Effect.mapError(shellProjectionError));
-    }),
-    getThreadTitles: Effect.fn("OrchestratorV2.getThreadTitles")(function (threadIds) {
-      return projectionStore.getThreadTitles(threadIds).pipe(Effect.mapError(shellProjectionError));
     }),
     getThreadEventSequence: Effect.fn("OrchestratorV2.getThreadEventSequence")(function (threadId) {
       return eventSink

@@ -41,7 +41,13 @@ import { resolveRuntimeMode } from "../../delegatedTaskModes.ts";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as OrchestrationMcp from "../../OrchestratorMcpService.ts";
-import { newCommandId, readCaller, resolveProjectId, unavailable } from "../../threadAccess.ts";
+import {
+  assertClientProjectAccess,
+  newCommandId,
+  readCaller,
+  resolveProjectId,
+  unavailable,
+} from "../../threadAccess.ts";
 import { ProjectToolkit } from "./tools.ts";
 
 const isAboveCeilingError = Schema.is(OrchestratorRuntimeModeAboveCeilingError);
@@ -265,6 +271,11 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
             message:
               "scratch:true picks its own project and folder; omit projectId and workspaceStrategy.",
           });
+        if (input.scratch === true && McpInvocationContext.isProjectScopedClient(scope))
+          return yield* new OrchestratorMcpFailure({
+            code: "capability_denied",
+            message: "This MCP client is scoped to specific projects and cannot use scratch.",
+          });
         const projectId =
           input.scratch === true
             ? (yield* ManagedProjectFolders.ManagedProjectFolders.pipe(
@@ -278,6 +289,7 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
                 ),
               )).projectId
             : yield* resolveProjectId(context, input.projectId);
+        yield* assertClientProjectAccess(scope, projectId, "project:thread.operate");
         // A retry of an accepted launch replays it: it keeps the model it started
         // with and skips the checks only a new launch needs, which the project
         // may no longer pass, such as a base branch deleted since.
@@ -516,17 +528,21 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
   ),
   t3_project_list: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
       const projects = yield* access;
+      const projectIds = McpInvocationContext.clientAllowedProjectIds(scope);
       // Identities are resolved: linked environments find this side's project by repository.
       const page = yield* projects
-        .listPage({ cursor: input.cursor ?? 0, limit: input.limit ?? 20 })
+        .listPage({ cursor: input.cursor ?? 0, limit: input.limit ?? 20, projectIds })
         .pipe(Effect.mapError(unavailable));
       return { ...page, projects: page.projects.map(yield* withSavedProjectSettings) };
     }),
   ),
   t3_project_read: McpToolAccess.reads((input) =>
     Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
       const projects = yield* access;
+      yield* assertClientProjectAccess(scope, input.projectId, "project:read");
       const result = yield* projects.getById(input.projectId).pipe(Effect.mapError(unavailable));
       if (Option.isNone(result))
         return yield* new OrchestratorMcpFailure({
@@ -592,14 +608,18 @@ export const layer = McpToolAccess.toLayer(ProjectToolkit, {
     // registered workspace is still refused.
     { linkedCallers: "allowed" },
   ),
-  t3_project_update: McpToolAccess.writesEnvironment((input) =>
-    Effect.gen(function* () {
-      const projects = yield* Project.ProjectService;
-      const updated = yield* projects
-        .update({ ...input, commandId: yield* newCommandId() })
-        .pipe(Effect.mapError(projectFailure));
-      return (yield* withSavedProjectSettings)(updated);
-    }),
+  t3_project_update: McpToolAccess.writesEnvironment(
+    (input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        yield* assertClientProjectAccess(scope, input.projectId, "project:settings");
+        const projects = yield* Project.ProjectService;
+        const updated = yield* projects
+          .update({ ...input, commandId: yield* newCommandId() })
+          .pipe(Effect.mapError(projectFailure));
+        return (yield* withSavedProjectSettings)(updated);
+      }),
+    { projectScoped: "allowed" },
   ),
   t3_project_delete: McpToolAccess.writesEnvironment((input) =>
     Effect.gen(function* () {

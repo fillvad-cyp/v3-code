@@ -5,6 +5,17 @@ credentials belong to a separate trust boundary, described in [T3 Connect](./06_
 token is never an environment login. See [SECURITY.md](../../SECURITY.md) for the overall threat
 model.
 
+Scopes authorize methods environment-wide. When multi-user mode is enabled (`settings.multiUser`,
+advertised as `authMode: "multi-user"` on `/api/environment` and `/api/auth/session`), per-principal
+identity, project roles, and `environment`/`principal`/`projects` session bindings (stored in
+`session_principals`) narrow access on top of those scopes—see [Multi-user](./18_multi-user.md).
+Member onboarding and repeat sign-in use one-time codes via `/invite/:code`,
+`/api/auth/invitations/accept`, `/api/auth/invitations/login`, `/api/auth/invitations`,
+`/api/auth/members`, and `/api/auth/members/:principalId/login-code`. Existing sessions without a
+narrowing binding behave as `environment`; live WebSocket connections close with `4401` on session
+revocation or principal suspension/removal and `4403` when project access is lost (role and ceiling
+changes apply on the next RPC and re-filter streams via `access_revision`).
+
 ## Scoped sessions and delegation
 
 - **Narrowing only.** Pairing delegates a set of scopes. Exchanging a bootstrap credential can

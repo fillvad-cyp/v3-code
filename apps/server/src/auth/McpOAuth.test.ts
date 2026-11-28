@@ -6,9 +6,16 @@ import {
   type AuthCreatePairingCredentialInput,
   type EnvironmentCloudLinkStateResult,
   EnvironmentHttpApi,
+  EventId,
   MCP_PEER_LINK_SOFTWARE_ID,
+  PrincipalId,
+  ProjectId,
+  ROLE_SCOPES,
+  ceilingScopes,
   mcpClientScopes,
 } from "@t3tools/contracts";
+import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/connectAuth";
+import { encodeOAuthScope } from "@t3tools/shared/oauthScope";
 import { expect, it } from "@effect/vitest";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -23,11 +30,26 @@ import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as Schema from "effect/Schema";
 
+import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as CloudLink from "../cloud/CloudLink.ts";
 import * as ServerConfig from "../config.ts";
 import { makeDpopKey } from "./dpop.testkit.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import * as ServerHttp from "../http.ts";
+import * as AuditService from "../identity/AuditService.ts";
+import * as InvitationService from "../identity/InvitationService.ts";
+import * as ApiTokenService from "../identity/ApiTokenService.ts";
+import * as MembershipService from "../identity/MembershipService.ts";
+import * as Passwords from "../identity/Passwords.ts";
+import * as ApiTokens from "../persistence/ApiTokens.ts";
+import * as AuditEvents from "../persistence/AuditEvents.ts";
+import * as Invitations from "../persistence/Invitations.ts";
+import * as MemberLimits from "../persistence/MemberLimits.ts";
+import * as Memberships from "../persistence/Memberships.ts";
+import * as Principals from "../persistence/Principals.ts";
+import * as RecoveryCodes from "../persistence/RecoveryCodes.ts";
+import * as SessionPrincipals from "../persistence/SessionPrincipals.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as Sqlite from "../persistence/Sqlite.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
@@ -44,10 +66,45 @@ class AuthTestApi extends HttpApi.make("environment")
 const layerConfig = ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-oauth-test-" });
 const layerEnvironmentAuth = EnvironmentAuth.layer.pipe(
   Layer.provide(ManagedPolicy.layerTest()),
-  Layer.provide(Sqlite.layerMemory),
+  Layer.provideMerge(Sqlite.layerMemory),
   Layer.provideMerge(ServerSecretStore.layer),
   Layer.provideMerge(ServerEnvironment.layerIdentity),
   Layer.provide(layerConfig),
+);
+const layerIdentityRepositories = Layer.mergeAll(
+  Principals.layer,
+  Memberships.layer,
+  Invitations.layer,
+  AuditEvents.layer,
+  ApiTokens.layer,
+  MemberLimits.layer,
+  RecoveryCodes.layer,
+  SessionPrincipals.layer,
+);
+const layerAccess = ProjectAccess.layer.pipe(
+  Layer.provide(layerIdentityRepositories),
+  Layer.provide(ProjectStore.layer),
+);
+const layerMembership = MembershipService.layer.pipe(
+  Layer.provide(layerAccess),
+  Layer.provide(layerIdentityRepositories),
+);
+const layerIdentity = Layer.mergeAll(
+  InvitationService.layer.pipe(
+    Layer.provide(layerMembership),
+    Layer.provide(layerAccess),
+    Layer.provide(layerIdentityRepositories),
+  ),
+  Passwords.layer.pipe(Layer.provide(layerIdentityRepositories)),
+  AuditService.layer.pipe(
+    Layer.provide(layerAccess),
+    Layer.provide(layerIdentityRepositories),
+    Layer.provide(ServerSettings.layerTest()),
+  ),
+  ApiTokenService.layer.pipe(Layer.provide(layerAccess), Layer.provide(layerIdentityRepositories)),
+  layerMembership,
+  layerAccess,
+  layerIdentityRepositories,
 );
 const notLinked: EnvironmentCloudLinkStateResult = {
   linked: false,
@@ -57,12 +114,23 @@ const notLinked: EnvironmentCloudLinkStateResult = {
   publishAgentActivity: false,
 };
 const makeLayerRoutes = (
-  capture: (auth: EnvironmentAuth.EnvironmentAuth["Service"]) => void,
+  capture: (services: {
+    readonly auth: EnvironmentAuth.EnvironmentAuth["Service"];
+    readonly projects: ProjectStore.ProjectStoreV2["Service"];
+    readonly principals: Principals.PrincipalRepository["Service"];
+    readonly memberships: Memberships.MembershipRepository["Service"];
+  }) => void,
   linkState: EnvironmentCloudLinkStateResult,
 ) =>
   Layer.mergeAll(
     Layer.effectDiscard(
-      EnvironmentAuth.EnvironmentAuth.pipe(Effect.tap((auth) => Effect.sync(() => capture(auth)))),
+      Effect.gen(function* () {
+        const auth = yield* EnvironmentAuth.EnvironmentAuth;
+        const projects = yield* ProjectStore.ProjectStoreV2;
+        const principals = yield* Principals.PrincipalRepository;
+        const memberships = yield* Memberships.MembershipRepository;
+        capture({ auth, projects, principals, memberships });
+      }),
     ),
     HttpApiBuilder.layer(AuthTestApi).pipe(
       Layer.provide(AuthHttp.layer),
@@ -76,9 +144,13 @@ const makeLayerRoutes = (
         ),
       ),
       Layer.provide(AuthHttp.layerAuthenticatedAuth),
+      Layer.provide(layerIdentity),
+      Layer.provide(ProjectStore.layer),
       Layer.provide(ServerHttp.layerApiBodyLimit),
     ),
   ).pipe(
+    Layer.provideMerge(layerIdentity),
+    Layer.provideMerge(ProjectStore.layer),
     Layer.provideMerge(layerEnvironmentAuth),
     Layer.provide(layerConfig),
     Layer.provideMerge(
@@ -109,16 +181,27 @@ const form = (body: Record<string, string>) => ({
 
 type Handler = (request: Request) => Effect.Effect<Response>;
 
+type CapturedServices = {
+  readonly auth: EnvironmentAuth.EnvironmentAuth["Service"];
+  readonly projects: ProjectStore.ProjectStoreV2["Service"];
+  readonly principals: Principals.PrincipalRepository["Service"];
+  readonly memberships: Memberships.MembershipRepository["Service"];
+};
+
 const withRoutes = <A, E>(
-  use: (handler: Handler, auth: EnvironmentAuth.EnvironmentAuth["Service"]) => Effect.Effect<A, E>,
+  use: (
+    handler: Handler,
+    auth: EnvironmentAuth.EnvironmentAuth["Service"],
+    services: CapturedServices,
+  ) => Effect.Effect<A, E>,
   linkState = notLinked,
 ) =>
   Effect.gen(function* () {
     const random = yield* SecureRandom.SecureRandom;
     const context = Context.make(SecureRandom.SecureRandom, random);
-    let routerAuth: EnvironmentAuth.EnvironmentAuth["Service"] | undefined;
-    const layerRoutes = makeLayerRoutes((auth) => {
-      routerAuth = auth;
+    let routerServices: CapturedServices | undefined;
+    const layerRoutes = makeLayerRoutes((services) => {
+      routerServices = services;
     }, linkState);
     return yield* Effect.acquireUseRelease(
       Effect.sync(() => HttpRouter.toWebHandler(layerRoutes, { disableLogger: true })),
@@ -126,7 +209,7 @@ const withRoutes = <A, E>(
         Effect.gen(function* () {
           const handler: Handler = (request) => Effect.promise(() => web.handler(request, context));
           yield* handler(at("/.well-known/oauth-authorization-server"));
-          return yield* use(handler, routerAuth!);
+          return yield* use(handler, routerServices!.auth, routerServices!);
         }),
       (web) => Effect.promise(() => web.dispose()),
     );
@@ -154,7 +237,7 @@ const postJson = (path: string, body: unknown, credential?: string | Record<stri
 const decide = (
   handler: Handler,
   authorization: Record<string, string>,
-  decision: Record<string, string>,
+  decision: Record<string, unknown>,
   cookie?: string | Record<string, string>,
 ) =>
   handler(postJson("/oauth/mcp/decision", { authorization, decision }, cookie)).pipe(
@@ -395,7 +478,7 @@ it.live("signs in with a pairing code and issues a token only /mcp accepts", () 
         access_token: string;
         scope: string;
       };
-      expect(token.scope).toBe("orchestration:read orchestration:operate");
+      expect(token.scope).toBe(encodeOAuthScope(mcpClientScopes("auto")));
 
       expect((yield* exchange(verifier)).status).toBe(400);
 
@@ -642,12 +725,14 @@ it.live(
           );
         expect(stillValid).toBe(true);
 
-        const readOnly = yield* auth.issuePairingCredential({ scopes: ["orchestration:read"] });
+        const readOnly = yield* auth.issuePairingCredential({
+          scopes: [...mcpClientScopes("read-only")],
+        });
         const readOnlyResponse = yield* approveWith(readOnly.credential);
         expect(readOnlyResponse.status).toBe(400);
         expect(readOnlyResponse.message).toContain("cannot grant this access");
         const operator = yield* auth.issuePairingCredential({
-          scopes: ["orchestration:read", "orchestration:operate"],
+          scopes: [...mcpClientScopes("approval-required")],
         });
         const operatorFull = yield* decide(handler, params, {
           _tag: "pairing-code",
@@ -675,13 +760,14 @@ it.live(
             }),
           ),
         ).pipe(Effect.flatMap(json<{ access_token: string; scope: string }>));
-        expect(readOnlyToken.scope).toBe("orchestration:read");
+        expect(readOnlyToken.scope).toBe(encodeOAuthScope(ROLE_SCOPES.viewer));
         const readOnlyClient = yield* auth.authenticateMcpClient(
           HttpServerRequest.fromWeb(
             at("/mcp", { headers: { authorization: `Bearer ${readOnlyToken.access_token}` } }),
           ),
         );
         expect(readOnlyClient.access).toBe("read-only");
+        expect(readOnlyClient.scopes).toEqual(ROLE_SCOPES.viewer);
       }),
     ),
 );
@@ -818,7 +904,9 @@ it.effect(
 
       const onTunnel = yield* handoff("box.example.ts.net");
       const hosted = new URL(onTunnel.location);
-      expect(`${hosted.origin}${hosted.pathname}`).toBe("https://app.t3.codes/approve-agent");
+      expect(hosted.origin).toBe(DEFAULT_HOSTED_APP_URL);
+      expect(hosted.hostname).toBe("127.0.0.1");
+      expect(`${hosted.origin}${hosted.pathname}`).toBe(`${DEFAULT_HOSTED_APP_URL}/approve-agent`);
       expect(hosted.searchParams.get("environment")).toEqual(expect.any(String));
       hosted.searchParams.delete("environment");
       expect(hosted.searchParams.toString()).toBe(onTunnel.query);
@@ -881,7 +969,7 @@ it.live("one-click approves only access the browser session holds the scopes for
       expect(forged.status).toBe(400);
       expect(forged.message).toContain("Enter a pairing code instead");
 
-      const reader = yield* browserCookie(["access:write", "orchestration:read"]);
+      const reader = yield* browserCookie(["access:write", ...mcpClientScopes("read-only")]);
       const readerDetails = yield* details(reader);
       expect(readerDetails.csrfToken).toEqual(expect.any(String));
       expect(readerDetails.oneClickAccess).toEqual(["read-only"]);
@@ -970,3 +1058,277 @@ it("matches loopback redirects on everything but the port, and https redirects e
   expect(matches("https://bot.example/cb", "https://bot.example/cb?x=1")).toBe(false);
   expect(matches("https://bot.example/cb", "https://evil.example/cb")).toBe(false);
 });
+
+it.live(
+  "stores project binding and ceiling on owner approval, restricts member approvals to administered projects and ceiling, and keeps peer links owner-only",
+  () =>
+    withRoutes((handler, auth, services) =>
+      Effect.gen(function* () {
+        const now = "2026-11-26T00:00:00.000Z";
+        const projectA = ProjectId.make("project:alpha");
+        const projectB = ProjectId.make("project:beta");
+        const seedProject = (projectId: ProjectId, title: string, seq: number) =>
+          services.projects.apply({
+            type: "project.created",
+            eventId: EventId.make(`evt-${seq}`),
+            sequence: seq,
+            aggregateKind: "project",
+            aggregateId: projectId,
+            occurredAt: now,
+            commandId: null,
+            causationEventId: null,
+            correlationId: null,
+            metadata: {},
+            payload: {
+              projectId,
+              title,
+              workspaceRoot: `/workspace/${projectId}`,
+              defaultModelSelection: null,
+              scripts: [],
+              createdAt: now,
+              updatedAt: now,
+            },
+          });
+        yield* seedProject(projectA, "Alpha", 1);
+        yield* seedProject(projectB, "Beta", 2);
+
+        const clientId = yield* registeredClientId(handler);
+        const params = authorizeParams(clientId);
+        const ownerBearer = `Bearer ${(yield* auth.issueSession({ scopes: [...AuthStandardClientScopes] })).token}`;
+
+        // Owner sees all projects and all ceilings.
+        const ownerDetails = yield* handler(
+          postJson("/oauth/mcp/approval", params, ownerBearer),
+        ).pipe(
+          Effect.flatMap(
+            json<{
+              csrfToken?: string;
+              approverIsOwner?: boolean;
+              availableProjects?: ReadonlyArray<{ id: string; title: string }>;
+              availableCeilings?: ReadonlyArray<string>;
+            }>,
+          ),
+        );
+        expect(ownerDetails.approverIsOwner).toBe(true);
+        expect(ownerDetails.availableProjects?.map((p) => p.id)).toEqual([projectA, projectB]);
+        expect(ownerDetails.availableCeilings).toEqual(["staff", "restricted", "client"]);
+
+        // Owner approves scoped to projectA with restricted ceiling.
+        const ownerScoped = yield* decide(
+          handler,
+          params,
+          {
+            _tag: "browser-session",
+            access: "auto",
+            csrfToken: ownerDetails.csrfToken!,
+            projectIds: [projectA],
+            ceiling: "restricted",
+          },
+          ownerBearer,
+        );
+        expect(ownerScoped.status).toBe(200);
+        const ownerToken = yield* handler(
+          at(
+            "/oauth/mcp/token",
+            form({
+              grant_type: "authorization_code",
+              code: new URL(ownerScoped.redirectTo!).searchParams.get("code")!,
+              redirect_uri: params.redirect_uri,
+              client_id: clientId,
+              code_verifier: verifier,
+              resource: `${ORIGIN}/mcp`,
+            }),
+          ),
+        ).pipe(Effect.flatMap(json<{ access_token: string; scope: string }>));
+        const expectedRestrictedAuto = mcpClientScopes("auto", "restricted");
+        expect(ownerToken.scope).toBe(encodeOAuthScope(expectedRestrictedAuto));
+        const scopedClient = yield* auth.authenticateMcpClient(
+          HttpServerRequest.fromWeb(
+            at("/mcp", { headers: { authorization: `Bearer ${ownerToken.access_token}` } }),
+          ),
+        );
+        expect(scopedClient.binding).toEqual({
+          _tag: "projects",
+          projects: [{ projectId: projectA, role: "developer" }],
+        });
+        expect(scopedClient.scopes).toEqual(expectedRestrictedAuto);
+
+        // Create a member who administers projectA (with restricted ceiling + access:write) and is developer on projectB.
+        const memberId = PrincipalId.make("member:admin-a");
+        yield* services.principals.create({
+          id: memberId,
+          kind: "member",
+          displayName: "Admin A",
+          email: null,
+          status: "active",
+          ceiling: [...ceilingScopes("restricted"), "access:write"],
+          createdAt: now,
+        });
+        yield* services.memberships.upsert({
+          projectId: projectA,
+          principalId: memberId,
+          role: "admin",
+          state: "active",
+          invitedBy: PrincipalId.make("owner"),
+          expiresAt: null,
+          updatedAt: now,
+        });
+        yield* services.memberships.upsert({
+          projectId: projectB,
+          principalId: memberId,
+          role: "developer",
+          state: "active",
+          invitedBy: PrincipalId.make("owner"),
+          expiresAt: null,
+          updatedAt: now,
+        });
+
+        const memberSession = yield* auth.issuePrincipalSession({
+          principalId: memberId,
+          method: "bearer-access-token",
+          scopes: [...ROLE_SCOPES.admin],
+          binding: { _tag: "principal" },
+          client: { deviceType: "desktop" },
+        });
+        const memberBearer = `Bearer ${memberSession.token}`;
+
+        // Member approval details only list projectA (administered) and ceilings within member's ceiling.
+        const memberDetails = yield* handler(
+          postJson("/oauth/mcp/approval", params, memberBearer),
+        ).pipe(
+          Effect.flatMap(
+            json<{
+              csrfToken?: string;
+              approverIsOwner?: boolean;
+              availableProjects?: ReadonlyArray<{ id: string; title: string }>;
+              availableCeilings?: ReadonlyArray<string>;
+            }>,
+          ),
+        );
+        expect(memberDetails.approverIsOwner).toBe(false);
+        expect(memberDetails.availableProjects?.map((p) => p.id)).toEqual([projectA]);
+        expect(memberDetails.availableCeilings).toEqual(["restricted", "client"]);
+
+        // Member cannot approve empty projects, a foreign/non-administered project, or a higher ceiling.
+        expect(
+          (yield* decide(
+            handler,
+            params,
+            {
+              _tag: "browser-session",
+              access: "approval-required",
+              csrfToken: memberDetails.csrfToken!,
+              projectIds: [],
+            },
+            memberBearer,
+          )).status,
+        ).toBe(400);
+        expect(
+          (yield* decide(
+            handler,
+            params,
+            {
+              _tag: "browser-session",
+              access: "approval-required",
+              csrfToken: memberDetails.csrfToken!,
+              projectIds: [projectB],
+            },
+            memberBearer,
+          )).status,
+        ).toBe(400);
+        expect(
+          (yield* decide(
+            handler,
+            params,
+            {
+              _tag: "browser-session",
+              access: "approval-required",
+              csrfToken: memberDetails.csrfToken!,
+              projectIds: [projectA],
+              ceiling: "staff",
+            },
+            memberBearer,
+          )).status,
+        ).toBe(400);
+
+        // Member succeeds for projectA within their ceiling.
+        const memberApproved = yield* decide(
+          handler,
+          params,
+          {
+            _tag: "browser-session",
+            access: "approval-required",
+            csrfToken: memberDetails.csrfToken!,
+            projectIds: [projectA],
+            ceiling: "restricted",
+          },
+          memberBearer,
+        );
+        expect(memberApproved.status).toBe(200);
+        const memberMcpToken = yield* handler(
+          at(
+            "/oauth/mcp/token",
+            form({
+              grant_type: "authorization_code",
+              code: new URL(memberApproved.redirectTo!).searchParams.get("code")!,
+              redirect_uri: params.redirect_uri,
+              client_id: clientId,
+              code_verifier: verifier,
+              resource: `${ORIGIN}/mcp`,
+            }),
+          ),
+        ).pipe(Effect.flatMap(json<{ access_token: string; scope: string }>));
+        const memberMcpClient = yield* auth.authenticateMcpClient(
+          HttpServerRequest.fromWeb(
+            at("/mcp", { headers: { authorization: `Bearer ${memberMcpToken.access_token}` } }),
+          ),
+        );
+        expect(memberMcpClient.principalId).toBe(memberId);
+        expect(memberMcpClient.binding).toEqual({
+          _tag: "projects",
+          projects: [{ projectId: projectA, role: "operator" }],
+        });
+        expect(memberMcpClient.scopes).toEqual(mcpClientScopes("approval-required", "restricted"));
+
+        // Peer links remain owner-only and environment-bound.
+        const peer = yield* handler(
+          at("/oauth/mcp/register", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: encodeJson({
+              client_name: "Peer Studio",
+              software_id: MCP_PEER_LINK_SOFTWARE_ID,
+              redirect_uris: [REDIRECT],
+            }),
+          }),
+        ).pipe(Effect.flatMap(json<{ client_id: string }>));
+        const peerParams = authorizeParams(peer.client_id);
+
+        // Member cannot approve a peer link.
+        const memberPeerDetails = yield* handler(
+          postJson("/oauth/mcp/approval", peerParams, memberBearer),
+        ).pipe(Effect.flatMap(json<{ csrfToken?: string; isPeerLink?: boolean }>));
+        expect(memberPeerDetails.isPeerLink).toBe(true);
+        expect(memberPeerDetails.csrfToken).toBeUndefined();
+
+        // Owner cannot project-scope a peer link.
+        const ownerPeerDetails = yield* handler(
+          postJson("/oauth/mcp/approval", peerParams, ownerBearer),
+        ).pipe(Effect.flatMap(json<{ csrfToken?: string; isPeerLink?: boolean }>));
+        expect(ownerPeerDetails.isPeerLink).toBe(true);
+        expect(
+          (yield* decide(
+            handler,
+            peerParams,
+            {
+              _tag: "browser-session",
+              access: "auto",
+              csrfToken: ownerPeerDetails.csrfToken!,
+              projectIds: [projectA],
+            },
+            ownerBearer,
+          )).status,
+        ).toBe(400);
+      }),
+    ),
+);

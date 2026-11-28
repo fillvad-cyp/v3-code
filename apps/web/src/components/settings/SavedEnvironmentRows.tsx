@@ -18,11 +18,16 @@ import {
 import {
   connectionRoutes,
   hasSavedBearerRoute,
+  isHostCredentialRefusal,
   connectionErrorText,
   connectionStatusText,
   environmentMcpUrl,
 } from "@t3tools/client-runtime/connection";
+import { fetchRemoteSessionState } from "@t3tools/client-runtime/authorization";
+import { layerRemoteHttpClient } from "@t3tools/client-runtime/rpc";
+import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
+import { useNavigate } from "@tanstack/react-router";
 import { msg, T, useGT, useMessages } from "gt-react";
 import { m, type MessageResolver } from "../../i18n/messages";
 
@@ -134,9 +139,11 @@ export function SavedBackendListRow({
 }: SavedBackendListRowProps) {
   const messages = useMessages();
   const gt = useGT();
+  const navigate = useNavigate();
   const [routesOpen, setRoutesOpen] = useState(initialRoutesOpen);
   const [permissionsOpen, setPermissionsOpen] = useState(false);
   const [diagnosisOpen, setDiagnosisOpen] = useState(false);
+  const [probedMultiUserHost, setProbedMultiUserHost] = useState<string | null>(null);
   const environmentId = environment.environmentId;
   const unsupported = environment.connection.phase === "unsupported";
   const blocked = unsupported && !hasSavedBearerRoute(environment.entry);
@@ -219,6 +226,47 @@ export function SavedBackendListRow({
     state: connectionState,
     relayOnly,
   } = useConnectionDiagnosis(environment);
+  const authBlockedHost = (() => {
+    if (
+      connectionState.phase !== "blocked" ||
+      connectionState.lastFailure === null ||
+      !isHostCredentialRefusal(connectionState.lastFailure)
+    ) {
+      return null;
+    }
+    const bearerRoute = connectionRoutes(environment.entry).find(
+      (route) =>
+        Option.isSome(route.profile) && route.profile.value._tag === "BearerConnectionProfile",
+    );
+    return bearerRoute !== undefined &&
+      Option.isSome(bearerRoute.profile) &&
+      bearerRoute.profile.value._tag === "BearerConnectionProfile"
+      ? bearerRoute.profile.value.httpBaseUrl
+      : null;
+  })();
+  const multiUserLoginHost =
+    authBlockedHost !== null && probedMultiUserHost === authBlockedHost ? authBlockedHost : null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- probes /api/auth/session once when a remote environment rejects credentials to detect authMode "multi-user"
+  useEffect(() => {
+    if (authBlockedHost === null) {
+      return;
+    }
+    let cancelled = false;
+    void Effect.runPromise(
+      fetchRemoteSessionState({ httpBaseUrl: authBlockedHost }).pipe(
+        Effect.provide(layerRemoteHttpClient(globalThis.fetch)),
+        Effect.map((state) => (state.auth.authMode === "multi-user" ? authBlockedHost : null)),
+        Effect.orElseSucceed(() => null),
+      ),
+    ).then((host) => {
+      if (!cancelled) {
+        setProbedMultiUserHost(host);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [authBlockedHost]);
   const diagnosis = resumingServerUpdate ? null : currentDiagnosis;
   const prepared = usePreparedConnection(environmentId);
   const connectedTarget = isConnected && prepared._tag === "Some" ? prepared.value.target : null;
@@ -395,6 +443,24 @@ export function SavedBackendListRow({
           targetVersion={APP_VERSION}
           label={serverUpdateState.status === "failed" ? gt("Retry update") : gt("Update")}
         />
+      ) : null}
+      {multiUserLoginHost !== null ? (
+        <Button
+          size="xs"
+          variant="outline"
+          onClick={() =>
+            void navigate({
+              to: "/login",
+              search: {
+                host: multiUserLoginHost,
+                environmentId,
+                label: environment.label,
+              },
+            })
+          }
+        >
+          <T>Sign in</T>
+        </Button>
       ) : null}
       {showUpdateAction ? (
         <ServerUpdateAction

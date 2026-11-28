@@ -31,7 +31,11 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
-import { formatThreadLink, hostedThreadLink } from "@t3tools/shared/threadLinks";
+import {
+  formatThreadLink,
+  hostedThreadLink,
+  THREAD_LINK_PROTOCOL,
+} from "@t3tools/shared/threadLinks";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
@@ -5149,8 +5153,10 @@ describe("OrchestratorMcpService thread lookup", () => {
       const sent = yield* Ref.make(0);
       yield* Effect.gen(function* () {
         const mcp = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const rawLink = `${THREAD_LINK_PROTOCOL}://v2/${ref.environmentId}/${ref.threadId}`;
+        assert.isTrue(rawLink.startsWith("v3-thread://v2/"));
         for (const link of [
-          `t3-thread://v2/${ref.environmentId}/${ref.threadId}`,
+          rawLink,
           formatThreadLink(ref, "Delegated task"),
           hostedThreadLink(ref),
         ]) {

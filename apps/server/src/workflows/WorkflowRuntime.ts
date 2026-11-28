@@ -652,6 +652,9 @@ export const make = Effect.fn("WorkflowRuntime.make")(function* <E, R>(
       Stream.map(([snapshot, at]) => ({ ...snapshot, definition: at })),
     ),
     counts: followed((live) => live.counts).pipe(Stream.map(([counts]) => counts)),
+    runProjectIds: Effect.fn("Workflows.runProjectIds")(function* (runId) {
+      return yield* (yield* current).runProjectIds(runId);
+    }),
     sweep: Effect.flatMap(current, (live) => live.sweep),
   });
 
@@ -910,6 +913,9 @@ export const gate = Effect.fn("WorkflowRuntime.gate")(function* <E, R>(
     }),
     watch: followed((service) => service.watch),
     counts: followed((service) => service.counts),
+    runProjectIds: Effect.fn("Workflows.runProjectIds")(function* (runId) {
+      return yield* (yield* current).runProjectIds(runId);
+    }),
     sweep: Effect.flatMap(current, (service) => service.sweep),
   });
 

@@ -3,8 +3,22 @@ import {
   AUTH_SCOPE_OPTIONS,
   sessionPermissionsUnavailableMessage,
 } from "@t3tools/shared/authScopeOptions";
-import { T, useGT, useMessages } from "gt-react";
-import { useEnvironmentSessionState } from "~/state/session";
+import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { thrownErrorMessage } from "@t3tools/client-runtime/errors";
+import { useNavigate, useRouter } from "@tanstack/react-router";
+import { T, useGT, useMessages, Var } from "gt-react";
+import { useState } from "react";
+import { signOutPrimaryEnvironment } from "~/environments/primary";
+import { notifyPopoutSignOut } from "~/lib/threadPopout";
+import { m } from "~/i18n/messages";
+import { authEnvironment } from "~/state/auth";
+import { useEnvironment, usePrimaryEnvironment } from "~/state/environments";
+import { useEnvironmentSessionState, usePreparedConnection } from "~/state/session";
+import { useAtomCommand } from "~/state/use-atom-command";
+import { Button } from "../ui/button";
+import { stackedThreadToast, toastManager } from "../ui/toast";
+import { supportsMembersCapability } from "./MembersSettings.logic";
+import { SetPasswordDialog } from "./SetPasswordDialog";
 
 export function SessionPermissions({
   environmentId,
@@ -17,9 +31,142 @@ export function SessionPermissions({
 }) {
   const gt = useGT();
   const messages = useMessages();
+  const router = useRouter();
+  const navigate = useNavigate();
+  const primaryEnvironment = usePrimaryEnvironment();
+  const environment = useEnvironment(environmentId);
   const session = useEnvironmentSessionState(environmentId);
+  const prepared = usePreparedConnection(environmentId);
+  const signOutCurrentSession = useAtomCommand(authEnvironment.signOutCurrentSession, {
+    reportFailure: false,
+  });
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  const [passwordDialogOpen, setPasswordDialogOpen] = useState(false);
+
+  const isPrimary = primaryEnvironment?.environmentId === environmentId;
+  const membersSupported = supportsMembersCapability(
+    environment?.serverConfig?.environment.capabilities,
+  );
+  const showSignOut =
+    session.data?.authenticated === true &&
+    (membersSupported || session.data.principal !== undefined);
+  const showPasswordAction =
+    session.data?.authenticated === true &&
+    session.data.principal !== undefined &&
+    session.data.principal.status === "active";
+
+  const handleSignOut = async () => {
+    if (isSigningOut) return;
+    setIsSigningOut(true);
+    if (isPrimary) {
+      const error = await signOutPrimaryEnvironment().then(
+        () => null,
+        (cause) => (cause instanceof Error ? cause.message : String(cause)),
+      );
+      if (error !== null) {
+        setIsSigningOut(false);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: gt("Could not sign out"),
+            description: error,
+          }),
+        );
+        return;
+      }
+      router.history.replace("/login");
+      router.history.flush();
+      window.location.reload();
+      return;
+    }
+
+    const result = await signOutCurrentSession({ environmentId, input: null });
+    setIsSigningOut(false);
+    if (result._tag === "Failure") {
+      const failure = squashAtomCommandFailure(result);
+      const message =
+        failure instanceof Error
+          ? (thrownErrorMessage(failure, m) ?? failure.message)
+          : gt("Could not sign out.");
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: gt("Could not sign out"),
+          description: message,
+        }),
+      );
+      return;
+    }
+    notifyPopoutSignOut({ environmentId });
+    const host = prepared._tag === "Some" ? prepared.value.httpBaseUrl : undefined;
+    const label = prepared._tag === "Some" ? prepared.value.label : undefined;
+    void navigate({
+      to: "/login",
+      search: {
+        ...(host ? { host } : {}),
+        environmentId,
+        ...(label ? { label } : {}),
+      },
+    });
+  };
+
   return connected && !session.hasError && !session.isPending && session.data?.authenticated ? (
     <div className="space-y-3 py-3 text-xs">
+      {session.data.principal || showSignOut ? (
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          {session.data.principal ? (
+            <p className="text-foreground">
+              {session.data.role ? (
+                <T>
+                  Signed in as{" "}
+                  <span className="font-medium">
+                    <Var>{session.data.principal.displayName}</Var>
+                  </span>{" "}
+                  (<Var>{session.data.role}</Var>)
+                </T>
+              ) : (
+                <T>
+                  Signed in as{" "}
+                  <span className="font-medium">
+                    <Var>{session.data.principal.displayName}</Var>
+                  </span>
+                </T>
+              )}
+            </p>
+          ) : (
+            <span />
+          )}
+          {showPasswordAction || showSignOut ? (
+            <div className="flex flex-wrap items-center gap-1.5">
+              {showPasswordAction ? (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  type="button"
+                  onClick={() => setPasswordDialogOpen(true)}
+                >
+                  <T>Password</T>
+                </Button>
+              ) : null}
+              {showSignOut ? (
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={isSigningOut}
+                  onClick={() => void handleSignOut()}
+                >
+                  {isSigningOut ? gt("Signing out…") : gt("Sign out")}
+                </Button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      <SetPasswordDialog
+        open={passwordDialogOpen}
+        onOpenChange={setPasswordDialogOpen}
+        environmentId={environmentId}
+      />
       <p className="text-muted-foreground">
         {routeContext ? (
           <T>

@@ -2,6 +2,7 @@ import {
   AuthOrchestrationReadScope,
   EnvironmentHttpApi,
   type OrchestrationProjectShell,
+  ProjectId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Result from "effect/Result";
@@ -14,15 +15,19 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import {
   annotateEnvironmentRequest,
+  failEnvironmentAuthInvalid,
   failEnvironmentInternal,
   failEnvironmentInvalidRequest,
   failEnvironmentNotFound,
   requireEnvironmentScope,
 } from "../auth/http.ts";
+import * as ProjectAccess from "../access/ProjectAccess.ts";
+import * as ResourceResolver from "../access/ResourceResolver.ts";
 import * as ServerEnvironment from "../environment/ServerEnvironment.ts";
 import { traceLocalHandlerWork } from "../cloud/traceRelayRequest.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import * as ProjectEnrichmentService from "../project/ProjectEnrichmentService.ts";
+import * as ProjectQuotaService from "../project/ProjectQuotaService.ts";
 import {
   buildBoundedThreadProjection,
   decodeThreadHistoryCursor,
@@ -34,6 +39,7 @@ import {
 import * as ThreadManagementService from "./ThreadManagementService.ts";
 import * as ProjectStore from "./ProjectStore.ts";
 import {
+  filterShellSnapshot,
   loadShellUnlessResumable,
   loadSubscriberShellSnapshot,
   projectIdentitiesDigest,
@@ -66,51 +72,100 @@ export const layer = HttpApiBuilder.group(
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
     const projectStore = yield* ProjectStore.ProjectStoreV2;
     const projectEnrichment = yield* ProjectEnrichmentService.ProjectEnrichmentService;
+    const projectQuotas = yield* ProjectQuotaService.ProjectQuotaService;
+    const projectAccess = yield* ProjectAccess.ProjectAccess;
+    const resourceResolverOption = yield* Effect.serviceOption(ResourceResolver.ResourceResolver);
+
+    const resolveExternalThreadIds = (
+      actor: ProjectAccess.AccessActor,
+    ): Effect.Effect<ReadonlySet<string> | undefined> => {
+      if (
+        actor.isOwner ||
+        actor.principalKind !== "external" ||
+        actor.principalId === undefined ||
+        resourceResolverOption._tag === "None"
+      ) {
+        return Effect.undefined;
+      }
+      return resourceResolverOption.value.resolveExternalPrincipalThreadIds(actor.principalId);
+    };
 
     const enrichProjectShells = Effect.fn("http.orchestration.enrichProjectShells")(
       (projects: ReadonlyArray<OrchestrationProjectShell>) =>
-        Effect.forEach(
-          projects,
-          (project) =>
-            // Use available enrichment only; git probes can take a minute and exceed shell-snapshot budgets.
-            projectEnrichment.getAvailable(project.workspaceRoot).pipe(
-              Effect.map((enrichment) => ({
-                ...project,
-                repositoryIdentity: enrichment.repositoryIdentity,
-              })),
-            ),
-          { concurrency: 16 },
-        ),
+        Effect.gen(function* () {
+          const warningsByProject = yield* projectQuotas
+            .getWarningsForProjects(projects.map((project) => project.id))
+            .pipe(Effect.orElseSucceed(() => new Map()));
+          return yield* Effect.forEach(
+            projects,
+            (project) =>
+              // Use available enrichment only; git probes can take a minute and exceed shell-snapshot budgets.
+              projectEnrichment.getAvailable(project.workspaceRoot).pipe(
+                Effect.map((enrichment) => {
+                  const quotaWarnings = warningsByProject.get(project.id);
+                  return {
+                    ...project,
+                    repositoryIdentity: enrichment.repositoryIdentity,
+                    ...(quotaWarnings !== undefined && quotaWarnings.length > 0
+                      ? { quotaWarnings }
+                      : {}),
+                  };
+                }),
+              ),
+            { concurrency: 16 },
+          );
+        }),
     );
 
     const loadShellSnapshot = Effect.fn("http.orchestration.loadShellSnapshot")(
       function* (options: {
         readonly omitIdleSubagents: boolean;
         readonly omitOlderSettled: boolean;
+        readonly allowedProjectIds?: ReadonlySet<string> | undefined;
+        readonly allowedThreadIds?: ReadonlySet<string> | undefined;
       }) {
+        const projectIds =
+          options.allowedProjectIds === undefined
+            ? undefined
+            : Array.from(options.allowedProjectIds, (id) => ProjectId.make(id));
         const { snapshot } = yield* loadSubscriberShellSnapshot({
           sql,
-          listShellIndex: threadManagement.listActiveShellIndex(),
+          listShellIndex: threadManagement.listActiveShellIndex(
+            projectIds === undefined ? undefined : { projectIds },
+          ),
           readThreads: (threadIds) =>
             threadManagement.readShellSnapshot({
               location: "active",
+              ...(projectIds === undefined ? {} : { projectIds }),
               ...(threadIds === undefined ? {} : { threadIds }),
             }),
-          listProjects: projectStore.listShells(),
+          listProjects: projectStore.listShells(
+            projectIds === undefined ? undefined : { projectIds },
+          ),
           latestSequence: applicationEvents.latestApplicationSequence,
           options,
+          allowedProjectIds: options.allowedProjectIds,
         });
-        const projects = yield* enrichProjectShells(snapshot.projects);
-        return { ...snapshot, projects, projectIdentities: projectIdentitiesDigest(projects) };
+        const narrowed = filterShellSnapshot(
+          snapshot,
+          options.allowedProjectIds,
+          options.allowedThreadIds,
+        );
+        const projects = yield* enrichProjectShells(narrowed.projects);
+        return { ...narrowed, projects, projectIdentities: projectIdentitiesDigest(projects) };
       },
     );
 
     // A client that holds rows names their cursor; a small answer tells it to keep them.
-    const answerShellSnapshot = Effect.fn("http.orchestration.answerShellSnapshot")((query: {
-      readonly omitIdleSubagents?: string;
-      readonly omitOlderSettled?: string;
-      readonly resumeFrom?: string;
-    }) => {
+    const answerShellSnapshot = Effect.fn("http.orchestration.answerShellSnapshot")((
+      query: {
+        readonly omitIdleSubagents?: string;
+        readonly omitOlderSettled?: string;
+        readonly resumeFrom?: string;
+      },
+      allowedProjectIds: ReadonlySet<string> | undefined,
+      allowedThreadIds: ReadonlySet<string> | undefined,
+    ) => {
       const resumeFrom = query.resumeFrom === undefined ? Number.NaN : Number(query.resumeFrom);
       return loadShellUnlessResumable({
         events: applicationEvents,
@@ -118,6 +173,8 @@ export const layer = HttpApiBuilder.group(
         loadSnapshot: loadShellSnapshot({
           omitIdleSubagents: query.omitIdleSubagents === "1",
           omitOlderSettled: query.omitOlderSettled === "1",
+          allowedProjectIds,
+          allowedThreadIds,
         }),
       });
     });
@@ -184,13 +241,70 @@ export const layer = HttpApiBuilder.group(
       },
     );
 
+    const resolveHttpActor = (
+      failureReason:
+        | "orchestration_snapshot_failed"
+        | "orchestration_thread_snapshot_failed"
+        | "orchestration_thread_bounded_snapshot_failed"
+        | "orchestration_thread_history_failed",
+    ) =>
+      requireEnvironmentScope(AuthOrchestrationReadScope).pipe(
+        Effect.flatMap((session) =>
+          projectAccess
+            .resolve({
+              sessionId: session.sessionId,
+              subject: session.subject,
+              scopes: Array.from(session.scopes),
+              principalId: session.principalId,
+              binding: session.binding,
+            })
+            .pipe(
+              Effect.catchTags({
+                AccessResolveError: (error) =>
+                  error.reason === "repository_error"
+                    ? failEnvironmentInternal(failureReason, error)
+                    : failEnvironmentAuthInvalid("invalid_credential"),
+              }),
+            ),
+        ),
+      );
+
+    const assertThreadReadAccess = Effect.fn("http.orchestration.assertThreadReadAccess")(
+      function* (
+        threadId: Parameters<typeof threadManagement.getThreadShell>[0],
+        failureReason:
+          | "orchestration_thread_snapshot_failed"
+          | "orchestration_thread_bounded_snapshot_failed"
+          | "orchestration_thread_history_failed",
+      ) {
+        const actor = yield* resolveHttpActor(failureReason);
+        const accessibleIds = projectAccess.accessibleProjectIds(actor);
+        if (accessibleIds === undefined) return;
+        const shell = yield* threadManagement
+          .getThreadShell(threadId)
+          .pipe(Effect.catch((error) => failEnvironmentInternal(failureReason, error)));
+        if (shell === null || !projectAccess.can(actor, shell.projectId, "project:read")) {
+          return yield* failEnvironmentNotFound("thread_not_found");
+        }
+        const allowedThreadIds = yield* resolveExternalThreadIds(actor);
+        if (allowedThreadIds !== undefined && !allowedThreadIds.has(threadId)) {
+          return yield* failEnvironmentNotFound("thread_not_found");
+        }
+      },
+    );
+
     return handlers
       .handle(
         "shellSnapshot",
         Effect.fn("environment.orchestration.shellSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
-          return yield* answerShellSnapshot(args.query).pipe(
+          const actor = yield* resolveHttpActor("orchestration_snapshot_failed");
+          const allowedThreadIds = yield* resolveExternalThreadIds(actor);
+          return yield* answerShellSnapshot(
+            args.query,
+            projectAccess.accessibleProjectIds(actor),
+            allowedThreadIds,
+          ).pipe(
             traceLocalHandlerWork,
             Effect.catch((cause) =>
               failEnvironmentInternal("orchestration_snapshot_failed", cause),
@@ -202,7 +316,10 @@ export const layer = HttpApiBuilder.group(
         "threadSnapshot",
         Effect.fn("environment.orchestration.threadSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          yield* assertThreadReadAccess(
+            args.params.threadId,
+            "orchestration_thread_snapshot_failed",
+          );
           const body = yield* loadThreadSnapshot(
             args.params.threadId,
             "orchestration_thread_snapshot_failed",
@@ -227,7 +344,10 @@ export const layer = HttpApiBuilder.group(
         "threadTranscript",
         Effect.fn("environment.orchestration.threadTranscript")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          yield* assertThreadReadAccess(
+            args.params.threadId,
+            "orchestration_thread_snapshot_failed",
+          );
           return yield* threadManagement.getThreadTranscript(args.params.threadId).pipe(
             Effect.provideService(ServerEnvironment.ServerEnvironmentIdentity, environment),
             traceLocalHandlerWork,
@@ -252,7 +372,10 @@ export const layer = HttpApiBuilder.group(
         "threadBoundedSnapshot",
         Effect.fn("environment.orchestration.threadBoundedSnapshot")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          yield* assertThreadReadAccess(
+            args.params.threadId,
+            "orchestration_thread_bounded_snapshot_failed",
+          );
           const snapshot = yield* loadThreadSnapshotWindow(
             args.params.threadId,
             undefined,
@@ -278,7 +401,10 @@ export const layer = HttpApiBuilder.group(
         "threadHistoryPage",
         Effect.fn("environment.orchestration.threadHistoryPage")(function* (args) {
           yield* annotateEnvironmentRequest(args.endpoint.name);
-          yield* requireEnvironmentScope(AuthOrchestrationReadScope);
+          yield* assertThreadReadAccess(
+            args.params.threadId,
+            "orchestration_thread_history_failed",
+          );
           const decoded = Result.try(() => decodeThreadHistoryCursor(args.query.cursor));
           if (Result.isFailure(decoded)) {
             const cause = decoded.failure;

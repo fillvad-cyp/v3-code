@@ -25,6 +25,7 @@ import {
   KeyRoundIcon,
   MicIcon,
   PaletteIcon,
+  ScrollTextIcon,
   SearchIcon,
   ServerIcon,
   Settings2Icon,
@@ -110,6 +111,10 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/worktrees": FolderTreeIcon,
   "/settings/connections": ServerIcon,
   "/settings/access": ShieldCheckIcon,
+  "/settings/api-tokens": KeyRoundIcon,
+  "/settings/audit": ScrollTextIcon,
+  "/settings/roles": ShieldCheckIcon,
+  "/settings/my-access": KeyRoundIcon,
   "/settings/secrets": KeyRoundIcon,
   "/settings/maintenance": WrenchIcon,
   "/settings/labs": FlaskConicalIcon,
@@ -121,6 +126,10 @@ const SETTINGS_SECTION_ICONS: Readonly<
 const SETTINGS_DETAIL_PAGE_PARENTS: Readonly<Record<string, SettingsPath>> = {
   "/settings/diagnostics": "/settings/maintenance",
   "/settings/open-source-licenses": "/settings/about",
+  "/settings/audit": "/settings/access",
+  "/settings/api-tokens": "/settings/access",
+  "/settings/roles": "/settings/access",
+  "/settings/my-access": "/settings/access",
 };
 
 // Attached only to the highlighted result, so it runs whenever the highlight lands on a row.

@@ -17,6 +17,7 @@ import * as ProviderInstallationGate from "../provider/ProviderInstallationGate.
 import * as AgentSessionImporter from "../project/AgentSessionImporter.ts";
 import * as AgentSessionScanner from "../project/AgentSessionScanner.ts";
 import * as ProjectService from "../project/ProjectService.ts";
+import * as ProjectQuotaService from "../project/ProjectQuotaService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ScratchThreadPromotion from "../project/ScratchThreadPromotion.ts";
@@ -315,6 +316,7 @@ const layerThreadLaunchProvided = ThreadLaunchService.layer.pipe(
       layerCommandReceiptStoreProvided,
       layerEventSink,
       IdAllocator.layer,
+      ProjectQuotaService.layer,
     ).pipe(Layer.provideMerge(layerProjectService)),
   ),
 );
@@ -439,6 +441,7 @@ export const layerProduction = Layer.mergeAll(
   layer,
   layerManagedProjectFoldersProvided,
   layerThreadLaunchProvided,
+  ProjectQuotaService.layer,
   layerScheduledTaskProvided,
   layerWorkflowsProvided,
   layerScratchThreadPromotionProvided,

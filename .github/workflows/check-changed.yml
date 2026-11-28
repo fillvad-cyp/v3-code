@@ -1,0 +1,37 @@
+name: check-changed
+
+# Fork CI: this repo has no workflows of its own, so a PR gets only the fast,
+# change-scoped checks. The vendored `.github/scripts/ci-changes.cjs` decides
+# affected packages; the full suites stay out of reach on purpose.
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Fetch the base branch
+        run: git fetch --no-tags origin "main:refs/remotes/origin/main"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.14.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 26
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: check:changed
+        run: node_modules/.bin/vp run check:changed origin/main --timeout 5400 --concurrency 2

@@ -2,6 +2,7 @@ import * as Schema from "effect/Schema";
 
 import { IsoDateTime, ProjectId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { RepositoryIdentity, ThreadEnvMode } from "./environment.ts";
+import { ProjectQuotaWarning } from "./membership.ts";
 import { ModelSelection } from "./modelSelection.ts";
 import { ProjectScript, ProjectTrackedFolders, ReceivedProjectIcon } from "./project.ts";
 
@@ -25,6 +26,8 @@ export const OrchestrationProjectShell = Schema.Struct({
   // Pinned projects lead project pickers; archived ones leave them. Optional so older servers decode.
   pinnedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   archivedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  // Attached when project usage crosses the 80% soft warning or 100% quota threshold.
+  quotaWarnings: Schema.optionalKey(Schema.Array(ProjectQuotaWarning)),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });
