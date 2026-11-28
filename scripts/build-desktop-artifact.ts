@@ -2805,9 +2805,15 @@ export function resolveDesktopRuntimeDependencies(
   );
 }
 
-/** V3 Code: never emit GitHub auto-update publish feeds (`app-update.yml`). */
-export const resolveGitHubPublishConfig = (_updateChannel: "latest" | "nightly") =>
-  Effect.undefined;
+export const resolveGitHubPublishConfig = (updateChannel: "latest" | "nightly") =>
+  Effect.succeed({
+    provider: "github" as const,
+    owner: "fillvad-cyp",
+    repo: "v3-code",
+    ...(updateChannel === "nightly"
+      ? { releaseType: "prerelease" as const, channel: "nightly" as const }
+      : {}),
+  });
 
 export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
   return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
@@ -2903,10 +2909,19 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     ],
   };
   const updateChannel = resolveDesktopUpdateChannel(version);
-  // V3 Code: never generate app-update.yml or upstream auto-update feeds.
-  buildConfig.publish = null;
-  void mockUpdates;
-  void mockUpdateServerPort;
+  // Preview builds omit update feeds; release and nightly builds emit GitHub Releases update metadata (`app-update.yml`, `latest*.yml`).
+  if (isDesktopPreviewVersion(version)) {
+    buildConfig.publish = null;
+  } else if (mockUpdates) {
+    buildConfig.publish = [
+      {
+        provider: "generic",
+        url: resolveMockUpdateServerUrl(mockUpdateServerPort),
+      },
+    ];
+  } else {
+    buildConfig.publish = [yield* resolveGitHubPublishConfig(updateChannel)];
+  }
 
   if (platform === "mac") {
     const path = yield* Path.Path;
