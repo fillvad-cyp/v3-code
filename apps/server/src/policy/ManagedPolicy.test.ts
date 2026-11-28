@@ -429,6 +429,25 @@ it.layer(NodeServices.layer)("ManagedPolicy.load", (it) => {
         "Example Corp's policy does not allow the Cursor provider.",
       );
       assert.isUndefined(disallowedDriverReason(policy.summary, ProviderDriverKind.make("codex")));
+
+      // Model selections on disallowed drivers, including promptCostClassifier, are scrubbed.
+      const scrubbed = policy.providers.applyLimits({
+        ...DEFAULT_SERVER_SETTINGS,
+        promptCostClassifier: {
+          instanceId: ProviderInstanceId.make("cursor"),
+          model: "claude-sonnet-4-5",
+        },
+      });
+      assert.isNull(scrubbed.promptCostClassifier);
+      const allowedClassifier = {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-haiku-4-5",
+      };
+      const kept = policy.providers.applyLimits({
+        ...DEFAULT_SERVER_SETTINGS,
+        promptCostClassifier: allowedClassifier,
+      });
+      assert.deepEqual(kept.promptCostClassifier, allowedClassifier);
     }),
   );
 

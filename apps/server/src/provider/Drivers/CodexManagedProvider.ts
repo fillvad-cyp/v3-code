@@ -291,6 +291,8 @@ export const makeManagedCodexProvider = Effect.fn("makeManagedCodexProvider")(fu
         "generateTranscriptionPostProcessing",
         nativeGeneration.generateTranscriptionPostProcessing(value),
       ),
+    generatePromptCostAssessment: (value) =>
+      protect("generatePromptCostAssessment", nativeGeneration.generatePromptCostAssessment(value)),
   };
   return {
     instanceId,

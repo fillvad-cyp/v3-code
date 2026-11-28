@@ -99,4 +99,21 @@ describe("settingInheritanceLayers", () => {
       ["Current checkout", false],
     ]);
   });
+
+  it("formats null promptCostClassifier as Automatic", () => {
+    const layers = settingInheritanceLayers(
+      {
+        environmentId,
+        label: "Laptop",
+        projectId: null,
+        ...resolveProjectSettings(DEFAULT_SERVER_SETTINGS, projectId),
+      },
+      DEFAULT_SERVER_SETTINGS,
+      "promptCostClassifier",
+    );
+    expect(layers.map((layer) => [layer.key, layer.value, layer.effective])).toEqual([
+      ["environment", "Inherits", false],
+      ["built-in", "Automatic", true],
+    ]);
+  });
 });

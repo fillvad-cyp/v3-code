@@ -1164,6 +1164,17 @@ export const SETTINGS_SEARCH_ITEMS = [
     textGeneratorsOnly: true,
   },
   {
+    id: "prompt-cost",
+    title: msg("Prompt cost"),
+    to: "/settings/providers",
+    searchTerms: [
+      msg(
+        "prompt cost estimate predict usd price budget cheaper model recommendation classifier auto suggest off",
+      ),
+    ],
+    providerSettingsOnly: true,
+  },
+  {
     id: "provider-health-check-interval",
     title: msg("Health check interval"),
     to: "/settings/providers",

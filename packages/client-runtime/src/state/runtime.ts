@@ -2,6 +2,7 @@ import { msg } from "gt-i18n";
 import { translatableMessage } from "../errors/translatable.ts";
 import type { QueryPersistence } from "./queryPersistence.ts";
 import { createCommandPermissions } from "./commandPermissions.ts";
+export { createCommandPermissions } from "./commandPermissions.ts";
 import { followStreamInEnvironment } from "./environmentStreams.ts";
 import { reuseUnchanged } from "./serverConfigProjection.ts";
 export { runStreamInEnvironment, followStreamInEnvironment } from "./environmentStreams.ts";
@@ -826,7 +827,17 @@ export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
                           AsyncResult.value,
                         ),
                       )
-                      .pipe(pendingOnceSessionReplaced(session.value)),
+                      .pipe(
+                        Effect.provideService(RpcPermissionGuard, {
+                          authorize: (id, method, payload) =>
+                            createCommandPermissions(runtime, method).authorize(
+                              get.registry,
+                              id,
+                              payload,
+                            ),
+                        }),
+                        pendingOnceSessionReplaced(session.value),
+                      ),
                   )
                 : Effect.never;
             case "connecting":

@@ -56,7 +56,7 @@ function formatValue(
       ? resolve(msg("Last selected"))
       : key === "sidebarAutoSettleAfterDays"
         ? resolve(msg("Never"))
-        : key === "defaultModelSelection"
+        : key === "defaultModelSelection" || key === "promptCostClassifier"
           ? resolve(msg("Automatic"))
           : key === "sourceControlWriterModelSelection"
             ? resolve(msg("Text generation model"))

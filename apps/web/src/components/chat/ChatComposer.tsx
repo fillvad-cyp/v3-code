@@ -301,6 +301,7 @@ import {
 } from "./preparingComposerImages";
 import { HELD_COMPOSER_SEND_BANNER_ID } from "./ComposerHeldSendBanner";
 import { ComposerControlsBar } from "./ComposerControlsBar";
+import { ComposerPromptCostSlot } from "./ComposerPromptCostSlot";
 import { composerCommandKeyHandler } from "./composerCommandKey";
 import { promptSuggestionToAccept, usePromptSuggestion } from "./usePromptSuggestion";
 import { useFreshSessionArmed } from "./freshSessionArms";
@@ -2687,6 +2688,28 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
     : composerControlsCollapsed
       ? 0
       : expandedControlsIconOnlyBlockCount;
+  const selectedModelLabel =
+    modelOptionsByInstance.get(selectedInstanceId)?.find((option) => option.slug === selectedModel)
+      ?.name ?? selectedModel;
+  const promptCostNode = (
+    <ComposerPromptCostSlot
+      environmentId={environmentId}
+      threadId={activeThreadId}
+      prompt={prompt}
+      composerFiles={composerFiles}
+      composerImages={composerImages}
+      selectedInstanceId={selectedInstanceId}
+      selectedModel={selectedModel}
+      selectedModelLabel={selectedModelLabel}
+      lockedProvider={lockedProvider}
+      multipleModelSelections={multipleModelSelections}
+      compactFirst={props.resumeCompactionTokens !== null && !props.keepFullHistory}
+      settings={settings}
+      size={composerControlsCollapsed ? "xs" : "sm"}
+      hidden={composerMenusClosed}
+      onProviderModelSelect={onProviderModelSelect}
+    />
+  );
   const composerControls = (
     <ComposerControlsBar
       environmentId={environmentId}
@@ -2734,6 +2757,7 @@ export const ChatComposer = memo(function ChatComposer(props: ChatComposerProps)
       onModelPickerOpenChange={setIsComposerModelPickerOpen}
       modelPickerIconClassName={composerProviderState.modelPickerIconClassName}
       getModelDisabledReason={getModelDisabledReason}
+      promptCost={promptCostNode}
     />
   );
   // An open question owns the space above the composer. Only a machine problem,

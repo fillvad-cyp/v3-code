@@ -417,6 +417,9 @@ export function makeManagedProviders(
       reviewGuideModelSelection: allowedSelection(settings, settings.reviewGuideModelSelection)
         ? settings.reviewGuideModelSelection
         : null,
+      promptCostClassifier: allowedSelection(settings, settings.promptCostClassifier)
+        ? settings.promptCostClassifier
+        : null,
     };
     cache.set(settings, result);
     return result;
