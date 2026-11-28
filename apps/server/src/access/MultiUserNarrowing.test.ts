@@ -137,6 +137,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
 import * as ScratchThreadPromotion from "../project/ScratchThreadPromotion.ts";
 import * as WorktreeSetupTracker from "../project/WorktreeSetupTracker.ts";
+import * as PromptCostService from "../promptCost/PromptCostService.ts";
 import * as AcpRegistrySessions from "../provider/AcpRegistrySessions.ts";
 import * as DocumentText from "../provider/DocumentText.ts";
 import * as ProviderAuthService from "../provider/ProviderAuthService.ts";
@@ -1265,6 +1266,7 @@ describe("Multi-user cross-project narrowing", () => {
           Layer.mock(DeviceService.DeviceService)({}),
           Layer.mock(Orchestrator.OrchestratorV2)({}),
           Layer.mock(UsageService.UsageService)({}),
+          Layer.mock(PromptCostService.PromptCostService)({}),
           Layer.mock(UsageLimitSources.UsageLimitSources)({}),
           Layer.mock(WorktreeSetupTracker.WorktreeSetupTracker)({}),
           Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({}),

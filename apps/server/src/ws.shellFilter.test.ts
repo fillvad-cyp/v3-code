@@ -127,6 +127,7 @@ import * as ResourceTelemetry from "./resourceTelemetry/ResourceTelemetry.ts";
 import * as ReviewService from "./review/ReviewService.ts";
 import * as ScheduledTasks from "./scheduledTasks/ScheduledTaskService.ts";
 import * as ScratchThreadPromotion from "./project/ScratchThreadPromotion.ts";
+import * as PromptCostService from "./promptCost/PromptCostService.ts";
 import * as SecretCheck from "./secrets/SecretCheck.ts";
 import * as SecretRequests from "./secrets/SecretRequests.ts";
 import * as ServerConfig from "./config.ts";
@@ -141,6 +142,7 @@ import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as TaskFolders from "./workspace/TaskFolders.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import * as TextGenerators from "./textGeneration/TextGenerators.ts";
 import * as ThreadIssueService from "./orchestration-v2/ThreadIssueService.ts";
 import * as ThreadLaunchService from "./orchestration-v2/ThreadLaunchService.ts";
@@ -1047,6 +1049,18 @@ describe("Projects list and search filtering", () => {
           Layer.succeed(ThreadSearch.ThreadSearch, threadSearch),
           resolverLayer,
           projectPathsLayer,
+          Layer.mock(TextGeneration.TextGeneration)({}),
+          PromptCostService.layer.pipe(
+            Layer.provide(
+              Layer.mergeAll(
+                Layer.succeed(SqlClient.SqlClient, sql),
+                Layer.mock(UsageService.UsageService)({}),
+                Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+                Layer.mock(TextGeneration.TextGeneration)({}),
+                Layer.mock(ServerSettings.ServerSettingsService)({}),
+              ),
+            ),
+          ),
           Layer.mock(WorkspaceEntries.WorkspaceEntries)({
             list: (input) =>
               Effect.sync(() => {
