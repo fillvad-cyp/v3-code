@@ -7,12 +7,15 @@ import {
   ProjectId,
   ceilingScopes,
   intersectScopes,
+  roleFitsCeiling,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as TestClock from "effect/testing/TestClock";
 
 import * as ProjectAccess from "../access/ProjectAccess.ts";
@@ -480,4 +483,226 @@ it.effect("issues 15-minute single-use login codes with owner/self auth and rate
     const expired = yield* service.consume({ code: selfIssued.code }).pipe(Effect.flip);
     assert.strictEqual(expired._tag, "InvitationExpiredError");
   }).pipe(Effect.provide(makeTestLayer())),
+);
+
+it.effect(
+  "honors custom invitation TTL and returns read-only preview states without leaking projectId",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* InvitationService.InvitationService;
+      const sql = yield* SqlClient.SqlClient;
+      const nowIso = DateTime.formatIso(yield* DateTime.now);
+
+      yield* sql`
+      INSERT INTO projection_projects (
+        project_id, title, workspace_root, scripts_json, created_at, updated_at
+      )
+      VALUES (${PROJECT_A}, 'Alpha Workspace', '/tmp/alpha', '[]', ${nowIso}, ${nowIso})
+    `;
+
+      // Custom 24h TTL is honored.
+      const issued24h = yield* service.issue({
+        kind: "staff",
+        role: "developer",
+        projectId: PROJECT_A,
+        createdBy: OWNER,
+        ttl: Duration.hours(24),
+      });
+      const issuedMs = Date.parse(issued24h.invitation.createdAt);
+      const expiresMs = Date.parse(issued24h.invitation.expiresAt);
+      assert.strictEqual(expiresMs - issuedMs, 24 * 60 * 60 * 1_000);
+
+      // Valid project invitation preview exposes projectTitle, role, expiresAt, and no projectId.
+      const validPreview = yield* service.preview({ code: issued24h.code, ip: "10.0.0.1" });
+      assert.deepStrictEqual(validPreview, {
+        valid: true,
+        projectTitle: "Alpha Workspace",
+        role: "developer",
+        expiresAt: issued24h.invitation.expiresAt,
+      });
+      assert.isFalse("projectId" in validPreview);
+
+      // Environment-wide invitation preview reports projectTitle: null.
+      const envInvite = yield* service.issue({
+        kind: "staff",
+        role: "viewer",
+        projectId: null,
+        createdBy: OWNER,
+      });
+      const envPreview = yield* service.preview({ code: envInvite.code, ip: "10.0.0.1" });
+      assert.strictEqual(envPreview.valid, true);
+      assert.strictEqual(envPreview.projectTitle, null);
+      assert.strictEqual(envPreview.role, "viewer");
+
+      // Unknown and malformed codes return not_found without leaking project details.
+      const notFoundPreview = yield* service.preview({ code: "2222-3333-4444", ip: "10.0.0.1" });
+      assert.deepStrictEqual(notFoundPreview, {
+        valid: false,
+        reason: "not_found",
+        projectTitle: null,
+      });
+      const malformedPreview = yield* service.preview({ code: "bad-code", ip: "10.0.0.1" });
+      assert.deepStrictEqual(malformedPreview, {
+        valid: false,
+        reason: "not_found",
+        projectTitle: null,
+      });
+
+      // Revoked invitation returns revoked without leaking projectTitle.
+      yield* service.revoke({ id: envInvite.invitation.id, revokedBy: OWNER });
+      const revokedPreview = yield* service.preview({ code: envInvite.code, ip: "10.0.0.1" });
+      assert.deepStrictEqual(revokedPreview, {
+        valid: false,
+        reason: "revoked",
+        projectTitle: null,
+      });
+
+      // Used invitation returns used without leaking projectTitle.
+      yield* service.consume({ code: issued24h.code, displayName: "Preview User" });
+      const usedPreview = yield* service.preview({ code: issued24h.code, ip: "10.0.0.1" });
+      assert.deepStrictEqual(usedPreview, {
+        valid: false,
+        reason: "used",
+        projectTitle: null,
+      });
+
+      // Expired invitation returns expired without leaking projectTitle.
+      const expiringInvite = yield* service.issue({
+        kind: "staff",
+        role: "admin",
+        projectId: PROJECT_A,
+        createdBy: OWNER,
+        ttl: Duration.hours(1),
+      });
+      yield* TestClock.adjust(Duration.hours(2));
+      const expiredPreview = yield* service.preview({ code: expiringInvite.code, ip: "10.0.0.1" });
+      assert.deepStrictEqual(expiredPreview, {
+        valid: false,
+        reason: "expired",
+        projectTitle: null,
+      });
+
+      // Preview rate-limits excessive attempts per IP and recovers after the window elapses.
+      for (let attempt = 0; attempt < 30; attempt++) {
+        yield* service.preview({ code: "2222-3333-4444", ip: "10.0.0.99" });
+      }
+      const rateLimited = yield* service
+        .preview({ code: "2222-3333-4444", ip: "10.0.0.99" })
+        .pipe(Effect.flip);
+      assert.strictEqual(rateLimited._tag, "InvitationRateLimitedError");
+
+      yield* TestClock.adjust(Duration.minutes(16));
+      const afterWindow = yield* service.preview({ code: "2222-3333-4444", ip: "10.0.0.99" });
+      assert.strictEqual(afterWindow.reason, "not_found");
+    }).pipe(Effect.provide(makeTestLayer())),
+);
+
+it.effect(
+  "upserts membership for an existing active member, failing closed on ceiling unless owner widens it",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* InvitationService.InvitationService;
+      const principals = yield* Principals.PrincipalRepository;
+      const memberships = yield* Memberships.MembershipRepository;
+      const now = "2026-11-25T00:00:00.000Z";
+
+      // Create a member with a narrow `client` ceiling on Project A, plus a Project B admin.
+      const existingMemberId = PrincipalId.make("existing-member");
+      const adminBId = PrincipalId.make("admin-b");
+
+      yield* principals.create({
+        id: existingMemberId,
+        kind: "member",
+        displayName: "Existing Member",
+        email: null,
+        status: "active",
+        ceiling: [...ceilingScopes("client")],
+        createdAt: now,
+      });
+      yield* memberships.upsert({
+        projectId: PROJECT_A,
+        principalId: existingMemberId,
+        role: "viewer",
+        state: "active",
+        invitedBy: OWNER,
+        expiresAt: null,
+        updatedAt: now,
+      });
+      yield* principals.create({
+        id: adminBId,
+        kind: "member",
+        displayName: "Admin B",
+        email: null,
+        status: "active",
+        ceiling: [...ceilingScopes("staff")],
+        createdAt: now,
+      });
+      yield* memberships.upsert({
+        projectId: PROJECT_B,
+        principalId: adminBId,
+        role: "admin",
+        state: "active",
+        invitedBy: OWNER,
+        expiresAt: null,
+        updatedAt: now,
+      });
+
+      const beforePrincipalCount = (yield* principals.list).length;
+
+      // Project B admin invites a developer: fails closed for the client-ceiling member without burning the code.
+      const adminDevInvite = yield* service.issue({
+        kind: "staff",
+        role: "developer",
+        projectId: PROJECT_B,
+        createdBy: adminBId,
+      });
+      const ceilingFailure = yield* service
+        .consume({ code: adminDevInvite.code, existingPrincipalId: existingMemberId })
+        .pipe(Effect.flip);
+      assert.strictEqual(ceilingFailure._tag, "InvitationForbiddenError");
+      if (ceilingFailure._tag === "InvitationForbiddenError") {
+        assert.strictEqual(ceilingFailure.reason, "ceiling_exceeds_member");
+      }
+      assert.isTrue(Option.isNone(yield* memberships.get(PROJECT_B, existingMemberId)));
+      // Code remains valid because the transaction rolled back.
+      const stillValid = yield* service.preview({ code: adminDevInvite.code, ip: "10.0.0.2" });
+      assert.strictEqual(stillValid.valid, true);
+
+      // Project B admin invites a viewer (fits client ceiling): succeeds, upserts membership, bumps accessRevision.
+      const adminViewerInvite = yield* service.issue({
+        kind: "staff",
+        role: "viewer",
+        projectId: PROJECT_B,
+        createdBy: adminBId,
+      });
+      const viewerAccepted = yield* service.consume({
+        code: adminViewerInvite.code,
+        existingPrincipalId: existingMemberId,
+      });
+      assert.strictEqual(viewerAccepted.principal.id, existingMemberId);
+      assert.strictEqual(viewerAccepted.principal.accessRevision, 1);
+      assert.strictEqual((yield* principals.list).length, beforePrincipalCount);
+      assert.strictEqual(viewerAccepted.memberships.length, 2);
+
+      // Owner invites a developer for Project B: widens the member's ceiling and upgrades membership.
+      const ownerDevInvite = yield* service.issue({
+        kind: "staff",
+        role: "developer",
+        projectId: PROJECT_B,
+        createdBy: OWNER,
+      });
+      const ownerAccepted = yield* service.consume({
+        code: ownerDevInvite.code,
+        existingPrincipalId: existingMemberId,
+      });
+      assert.strictEqual(ownerAccepted.principal.id, existingMemberId);
+      assert.strictEqual(ownerAccepted.principal.accessRevision, 2);
+      assert.strictEqual((yield* principals.list).length, beforePrincipalCount);
+      assert.isTrue(roleFitsCeiling(ownerAccepted.principal.ceiling as never, "developer"));
+      const updatedMembership = Option.getOrThrow(
+        yield* memberships.get(PROJECT_B, existingMemberId),
+      );
+      assert.strictEqual(updatedMembership.role, "developer");
+      assert.strictEqual(updatedMembership.state, "active");
+    }).pipe(Effect.provide(makeTestLayer())),
 );

@@ -246,6 +246,21 @@ interface GrantCreatorAdminInput {
   readonly audit?: MembershipAuditContext;
 }
 
+interface UpsertFromInvitationInput {
+  readonly projectId: ProjectId | null;
+  readonly principalId: PrincipalId;
+  readonly role: ProjectRole;
+  readonly invitedBy: PrincipalId;
+  readonly inviterIsOwner: boolean;
+  readonly audit?: MembershipAuditContext;
+}
+
+interface UpsertFromInvitationResult {
+  readonly principal: Principal;
+  readonly memberships: ReadonlyArray<ProjectMembership>;
+  readonly ceilingWidened: boolean;
+}
+
 interface TransferOwnershipInput {
   readonly actor: ProjectAccess.AccessActor;
   readonly toPrincipalId: PrincipalId;
@@ -306,6 +321,9 @@ export class MembershipService extends Context.Service<
     readonly grantCreatorAdmin: (
       input: GrantCreatorAdminInput,
     ) => Effect.Effect<ProjectMembership, MembershipInternalError>;
+    readonly upsertFromInvitation: (
+      input: UpsertFromInvitationInput,
+    ) => Effect.Effect<UpsertFromInvitationResult, MembershipMutationError>;
     readonly transferOwnership: (
       input: TransferOwnershipInput,
     ) => Effect.Effect<OwnerTransferResult, TransferOwnershipError>;
@@ -1532,6 +1550,156 @@ const make = Effect.gen(function* () {
       );
   });
 
+  const upsertFromInvitation = Effect.fn("MembershipService.upsertFromInvitation")(function* (
+    input: UpsertFromInvitationInput,
+  ) {
+    if (input.role === "owner") {
+      return yield* new MembershipForbiddenError({ reason: "owner_role_not_assignable" });
+    }
+    const nowIso = DateTime.formatIso(yield* DateTime.now);
+    return yield* sql
+      .withTransaction(
+        Effect.gen(function* () {
+          const maybePrincipal = yield* principals
+            .get(input.principalId)
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new MembershipInternalError({ operation: "upsertFromInvitation", cause }),
+              ),
+            );
+          if (Option.isNone(maybePrincipal) || maybePrincipal.value.status === "removed") {
+            return yield* new MembershipNotFoundError({
+              resource: "principal",
+              principalId: input.principalId,
+            });
+          }
+          const targetPrincipal = maybePrincipal.value;
+          if (targetPrincipal.kind === "owner") {
+            return yield* new MembershipForbiddenError({ reason: "owner_protected" });
+          }
+          if (targetPrincipal.status !== "active") {
+            return yield* new MembershipForbiddenError({ reason: "not_authorized" });
+          }
+
+          const currentCeiling = targetPrincipal.ceiling.filter(isAuthEnvironmentScope);
+          let nextCeiling: ReadonlyArray<AuthEnvironmentScope> = currentCeiling;
+          let ceilingWidened = false;
+
+          if (!roleFitsCeiling(currentCeiling, input.role)) {
+            if (!input.inviterIsOwner) {
+              return yield* new MembershipCeilingError({
+                reason: "role_exceeds_principal_ceiling",
+                role: input.role,
+              });
+            }
+            nextCeiling = [...new Set([...currentCeiling, ...roleScopes(input.role)])].sort();
+            ceilingWidened = true;
+            yield* principals
+              .update({
+                id: input.principalId,
+                ceiling: [...nextCeiling],
+                updatedAt: nowIso,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new MembershipInternalError({ operation: "upsertFromInvitation", cause }),
+                ),
+              );
+          }
+
+          if (input.projectId !== null) {
+            const existingMembership = yield* memberships
+              .get(input.projectId, input.principalId)
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new MembershipInternalError({ operation: "upsertFromInvitation", cause }),
+                ),
+              );
+            yield* memberships
+              .upsert({
+                projectId: input.projectId,
+                principalId: input.principalId,
+                role: input.role,
+                state: "active",
+                invitedBy: input.invitedBy,
+                expiresAt: null,
+                updatedAt: nowIso,
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new MembershipInternalError({ operation: "upsertFromInvitation", cause }),
+                ),
+              );
+            yield* auditEvents
+              .append({
+                at: nowIso,
+                actorPrincipalId: input.invitedBy,
+                actorSessionId: input.audit?.sessionId ?? null,
+                action: "membership.role.changed",
+                resourceType: "membership",
+                resourceId: `${input.projectId}:${input.principalId}`,
+                projectId: input.projectId,
+                ip: input.audit?.ip ?? null,
+                userAgent: input.audit?.userAgent ?? null,
+                outcome: "allow",
+                metadata: {
+                  principalId: input.principalId,
+                  previousRole: Option.isSome(existingMembership)
+                    ? existingMembership.value.role
+                    : null,
+                  role: input.role,
+                  reason: "invitation_accepted",
+                  ...(ceilingWidened ? { ceilingWidened: true } : {}),
+                },
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) =>
+                    new MembershipInternalError({ operation: "upsertFromInvitation", cause }),
+                ),
+              );
+          }
+
+          const nextRevision = yield* principals
+            .bumpAccessRevision(input.principalId, nowIso)
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new MembershipInternalError({ operation: "upsertFromInvitation", cause }),
+              ),
+            );
+          const principalMemberships = yield* memberships
+            .listForPrincipal(input.principalId)
+            .pipe(
+              Effect.mapError(
+                (cause) =>
+                  new MembershipInternalError({ operation: "upsertFromInvitation", cause }),
+              ),
+            );
+
+          return {
+            principal: {
+              ...targetPrincipal,
+              ceiling: [...nextCeiling],
+              accessRevision: nextRevision,
+              updatedAt: nowIso,
+            },
+            memberships: principalMemberships,
+            ceilingWidened,
+          } satisfies UpsertFromInvitationResult;
+        }),
+      )
+      .pipe(
+        Effect.mapError(
+          mapTransactionError<MembershipMutationError>("upsertFromInvitation", MUTATION_ERROR_TAGS),
+        ),
+      );
+  });
+
   const transferOwnership = Effect.fn("MembershipService.transferOwnership")(function* (
     input: TransferOwnershipInput,
   ) {
@@ -1753,6 +1921,7 @@ const make = Effect.gen(function* () {
     updateMember,
     canIssueInvite,
     grantCreatorAdmin,
+    upsertFromInvitation,
     transferOwnership,
   });
 });

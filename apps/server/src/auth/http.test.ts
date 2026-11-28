@@ -19,6 +19,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
+import * as SqlClient from "effect/sql/SqlClient";
 import * as Etag from "effect/http/Etag";
 import * as HttpPlatform from "effect/http/HttpPlatform";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
@@ -79,7 +80,7 @@ const layerIdentityRepositories = Layer.mergeAll(
 );
 const makeLayerEnvironmentAuth = (settingsOverrides?: { readonly multiUser?: boolean }) =>
   EnvironmentAuth.layer.pipe(
-    Layer.provide(ServerSettings.layerTest(settingsOverrides)),
+    Layer.provideMerge(ServerSettings.layerTest(settingsOverrides)),
     Layer.provide(layerIdentityRepositories),
     Layer.provide(ManagedPolicy.layerTest()),
     Layer.provideMerge(SqlitePersistence.layerMemory),
@@ -2049,6 +2050,372 @@ it.effect(
 
             const auditRows = yield* capturedAudit!.list({ action: "owner.transferred" });
             expect(auditRows.length).toBe(1);
+          }),
+        (environment) => Effect.promise(() => environment.dispose()),
+      );
+    }).pipe(Effect.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))),
+);
+
+it.live(
+  "previews invitations publicly without leaking projectId, auto-enables multiUser, and upserts existing member sessions with wider scopes",
+  () =>
+    Effect.gen(function* () {
+      const random = yield* SecureRandom.SecureRandom;
+      let capturedSql: SqlClient.SqlClient | undefined;
+      let capturedSettings: ServerSettings.ServerSettingsService["Service"] | undefined;
+      let capturedPrincipals: Principals.PrincipalRepository["Service"] | undefined;
+      let capturedSessions: SessionStore.SessionStore["Service"] | undefined;
+      const captureLayer = Layer.effectDiscard(
+        Effect.gen(function* () {
+          capturedSql = yield* SqlClient.SqlClient;
+          capturedSettings = yield* ServerSettings.ServerSettingsService;
+          capturedPrincipals = yield* Principals.PrincipalRepository;
+          capturedSessions = yield* SessionStore.SessionStore;
+        }),
+      );
+      const testLayer = captureLayer.pipe(
+        Layer.provideMerge(makeLayerRoutes({ multiUser: false })),
+        Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
+      );
+      const requestContext = Context.make(SecureRandom.SecureRandom, random);
+
+      return yield* Effect.acquireUseRelease(
+        Effect.sync(() => HttpRouter.toWebHandler(testLayer, { disableLogger: true })),
+        (environment) =>
+          Effect.gen(function* () {
+            const devResponse = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/browser-session", { credential: DEV_TOKEN }),
+                requestContext,
+              ),
+            );
+            expect(devResponse.status).toBe(200);
+            const ownerCookie =
+              devResponse.headers
+                .getSetCookie()
+                .find((cookie) => cookie.startsWith("t3_dev_session_"))
+                ?.split(";", 1)[0] ?? "";
+
+            const projectA = ProjectId.make("proj-alpha");
+            const projectB = ProjectId.make("proj-beta");
+            const nowIso = DateTime.formatIso(yield* DateTime.now);
+            yield* capturedSql!`
+              INSERT INTO projection_projects (
+                project_id, title, workspace_root, scripts_json, created_at, updated_at
+              )
+              VALUES
+                (${projectA}, 'Alpha Repo', '/tmp/alpha', '[]', ${nowIso}, ${nowIso}),
+                (${projectB}, 'Beta Repo', '/tmp/beta', '[]', ${nowIso}, ${nowIso})
+            `;
+
+            // multiUser starts off, then auto-enables when the owner creates the first invitation.
+            expect((yield* capturedSettings!.getSettings).multiUser).toBe(false);
+
+            // Out-of-bounds expiresInHours is rejected with 400.
+            const invalidTtlResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/invitations",
+                  { kind: "staff", role: "viewer", projectId: projectA, expiresInHours: 721 },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(invalidTtlResp.status).toBe(400);
+            expect((yield* capturedSettings!.getSettings).multiUser).toBe(false);
+
+            const createViewerResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/invitations",
+                  { kind: "staff", role: "viewer", projectId: projectA, expiresInHours: 24 },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(createViewerResp.status).toBe(200);
+            const createdViewer = (yield* Effect.promise(() => createViewerResp.json())) as {
+              invitation: { id: string; createdAt: string; expiresAt: string; role: string };
+              code: string;
+              multiUserEnabled?: boolean;
+            };
+            expect(createdViewer.multiUserEnabled).toBe(true);
+            expect((yield* capturedSettings!.getSettings).multiUser).toBe(true);
+            expect(
+              Date.parse(createdViewer.invitation.expiresAt) -
+                Date.parse(createdViewer.invitation.createdAt),
+            ).toBe(24 * 60 * 60 * 1_000);
+
+            // Public GET /api/auth/invitations/preview returns projectTitle, role, expiresAt, and no projectId.
+            const previewResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(
+                  `http://127.0.0.1/api/auth/invitations/preview?code=${encodeURIComponent(createdViewer.code)}`,
+                ),
+                requestContext,
+              ),
+            );
+            expect(previewResp.status).toBe(200);
+            const previewBody = (yield* Effect.promise(() => previewResp.json())) as Record<
+              string,
+              unknown
+            >;
+            expect(previewBody).toEqual({
+              valid: true,
+              projectTitle: "Alpha Repo",
+              role: "viewer",
+              expiresAt: createdViewer.invitation.expiresAt,
+            });
+            expect(previewBody).not.toHaveProperty("projectId");
+
+            // GET /invite/:code renders projectTitle, human role, expiry, and V3 Code branding (never T3 Code).
+            const invitePageResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/invite/${encodeURIComponent(createdViewer.code)}`),
+                requestContext,
+              ),
+            );
+            expect(invitePageResp.status).toBe(200);
+            const inviteHtml = yield* Effect.promise(() => invitePageResp.text());
+            expect(inviteHtml).toContain("V3 Code");
+            expect(inviteHtml).not.toContain("T3 Code");
+            expect(inviteHtml).toContain("Alpha Repo");
+            expect(inviteHtml).toContain("Viewer");
+            expect(inviteHtml).toContain(createdViewer.invitation.expiresAt);
+
+            // Anonymous visitor accepts the viewer invitation -> receives a viewer principal cookie session.
+            const firstAcceptResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/invitations/accept", {
+                  code: createdViewer.code,
+                  displayName: "Ada Member",
+                }),
+                requestContext,
+              ),
+            );
+            expect(firstAcceptResp.status).toBe(200);
+            const firstAcceptBody = (yield* Effect.promise(() => firstAcceptResp.json())) as {
+              principal: { id: string; accessRevision: number };
+              permissions: Array<string>;
+              role: string;
+              projectId: string | null;
+            };
+            expect(firstAcceptBody.role).toBe("viewer");
+            expect(firstAcceptBody.projectId).toBe(projectA);
+            expect(firstAcceptBody.permissions).toEqual(
+              intersectScopes(roleScopes("viewer"), ceilingScopes("staff")),
+            );
+            const firstCookie = firstAcceptResp.headers
+              .getSetCookie()
+              .find((cookie) => cookie.startsWith("t3_session_"))!
+              .split(";", 1)[0]!;
+
+            // Used invite preview leaks neither projectId nor projectTitle, and HTML page shows reason without form.
+            const usedPreviewResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(
+                  `http://127.0.0.1/api/auth/invitations/preview?code=${encodeURIComponent(createdViewer.code)}`,
+                ),
+                requestContext,
+              ),
+            );
+            expect(usedPreviewResp.status).toBe(200);
+            expect(yield* Effect.promise(() => usedPreviewResp.json())).toEqual({
+              valid: false,
+              reason: "used",
+              projectTitle: null,
+            });
+            const usedPageHtml = yield* Effect.promise(() =>
+              environment
+                .handler(
+                  new Request(`http://127.0.0.1/invite/${encodeURIComponent(createdViewer.code)}`),
+                  requestContext,
+                )
+                .then((res) => res.text()),
+            );
+            expect(usedPageHtml).toContain("Invitation already used");
+            expect(usedPageHtml).not.toContain('id="invite-form"');
+            expect(usedPageHtml).not.toContain("Alpha Repo");
+
+            // Narrow Ada's ceiling to `client`, then have a Project B admin invite a developer -> 403 fail closed.
+            const adminBInviteResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/invitations",
+                  { kind: "staff", role: "admin", projectId: projectB },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            const adminBInvite = (yield* Effect.promise(() => adminBInviteResp.json())) as {
+              code: string;
+            };
+            const adminBAcceptResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson("/api/auth/invitations/accept", {
+                  code: adminBInvite.code,
+                  displayName: "Beta Admin",
+                }),
+                requestContext,
+              ),
+            );
+            const adminBCookie = adminBAcceptResp.headers
+              .getSetCookie()
+              .find((cookie) => cookie.startsWith("t3_session_"))!
+              .split(";", 1)[0]!;
+
+            const patchCeilingResp = yield* Effect.promise(() =>
+              environment.handler(
+                patchJson(
+                  `/api/auth/members/${firstAcceptBody.principal.id}`,
+                  { ceiling: "client" },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(patchCeilingResp.status).toBe(200);
+
+            const adminDevInviteResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/invitations",
+                  { kind: "staff", role: "developer", projectId: projectB },
+                  { cookie: adminBCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(adminDevInviteResp.status).toBe(200);
+            const adminDevInvite = (yield* Effect.promise(() => adminDevInviteResp.json())) as {
+              code: string;
+            };
+
+            const failClosedResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/invitations/accept",
+                  { code: adminDevInvite.code },
+                  { cookie: firstCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(failClosedResp.status).toBe(403);
+
+            // Owner invites Ada to Project B as developer while Ada sends her existing cookie -> no new principal,
+            // ceiling widened, accessRevision bumped, replacement session cookie carries developer scopes!
+            const principalCountBefore = (yield* capturedPrincipals!.list).length;
+            const ownerDevInviteResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/invitations",
+                  { kind: "staff", role: "developer", projectId: projectB },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            const ownerDevInvite = (yield* Effect.promise(() => ownerDevInviteResp.json())) as {
+              code: string;
+            };
+            const existingAcceptResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/invitations/accept",
+                  { code: ownerDevInvite.code },
+                  { cookie: firstCookie },
+                ),
+                requestContext,
+              ),
+            );
+            expect(existingAcceptResp.status).toBe(200);
+            const existingAcceptBody = (yield* Effect.promise(() => existingAcceptResp.json())) as {
+              principal: { id: string; accessRevision: number };
+              permissions: Array<string>;
+              role: string;
+              projectId: string | null;
+            };
+            expect(existingAcceptBody.principal.id).toBe(firstAcceptBody.principal.id);
+            expect(existingAcceptBody.principal.accessRevision).toBeGreaterThan(
+              firstAcceptBody.principal.accessRevision,
+            );
+            expect(existingAcceptBody.role).toBe("developer");
+            expect(existingAcceptBody.projectId).toBe(projectB);
+            expect(existingAcceptBody.permissions).toEqual(
+              expect.arrayContaining([...roleScopes("developer")]),
+            );
+            expect((yield* capturedPrincipals!.list).length).toBe(principalCountBefore);
+
+            const reissuedCookie = existingAcceptResp.headers
+              .getSetCookie()
+              .find((cookie) => cookie.startsWith("t3_session_"))!
+              .split(";", 1)[0]!;
+            const reissuedToken = reissuedCookie.slice(reissuedCookie.indexOf("=") + 1);
+            const verifiedReissued = yield* capturedSessions!.verify(reissuedToken);
+            expect(verifiedReissued.principalId).toBe(firstAcceptBody.principal.id);
+            expect(verifiedReissued.scopes).toEqual(
+              expect.arrayContaining([...roleScopes("developer")]),
+            );
+
+            // GET /api/auth/invitations and DELETE /api/auth/invitations/:id require owner or
+            // project admin of the invitation's project.
+            const projectAInviteResp = yield* Effect.promise(() =>
+              environment.handler(
+                postJson(
+                  "/api/auth/invitations",
+                  { kind: "staff", role: "viewer", projectId: projectA },
+                  { cookie: ownerCookie },
+                ),
+                requestContext,
+              ),
+            );
+            const projectAInvite = (yield* Effect.promise(() => projectAInviteResp.json())) as {
+              invitation: { id: string };
+            };
+            const devListResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/api/auth/invitations?projectId=${projectB}`, {
+                  headers: { cookie: reissuedCookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(devListResp.status).toBe(403);
+            const adminBListAResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/api/auth/invitations?projectId=${projectA}`, {
+                  headers: { cookie: adminBCookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(adminBListAResp.status).toBe(403);
+            const adminBListBResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(`http://127.0.0.1/api/auth/invitations?projectId=${projectB}`, {
+                  headers: { cookie: adminBCookie },
+                }),
+                requestContext,
+              ),
+            );
+            expect(adminBListBResp.status).toBe(200);
+            const adminBRevokeAResp = yield* Effect.promise(() =>
+              environment.handler(
+                new Request(
+                  `http://127.0.0.1/api/auth/invitations/${projectAInvite.invitation.id}`,
+                  {
+                    method: "DELETE",
+                    headers: { cookie: adminBCookie },
+                  },
+                ),
+                requestContext,
+              ),
+            );
+            expect(adminBRevokeAResp.status).toBe(403);
           }),
         (environment) => Effect.promise(() => environment.dispose()),
       );

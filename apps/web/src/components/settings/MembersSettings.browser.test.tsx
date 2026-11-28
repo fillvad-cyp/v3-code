@@ -11,13 +11,16 @@ import {
   ceilingScopes,
   type AuthAccessStreamEvent,
   type AuthSessionState,
+  type Invitation,
   type InvitationCreateInput,
   type InvitationCreateResult,
+  type InvitationRevokeResult,
   type MemberLoginCodeResult,
   type MemberRemoveResult,
   type MemberWithMemberships,
   type Principal,
   type ProjectMembership,
+  type ServerDirectEndpoint,
 } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import { AsyncResult, Atom } from "effect/reactivity";
@@ -29,6 +32,7 @@ import "~/index.css";
 
 type SessionResult = AsyncResult.AsyncResult<AuthSessionState, Error>;
 type MembersResult = AsyncResult.AsyncResult<ReadonlyArray<MemberWithMemberships>, Error>;
+type InvitationsResult = AsyncResult.AsyncResult<ReadonlyArray<Invitation>, Error>;
 type AccessChangesResult = AsyncResult.AsyncResult<AuthAccessStreamEvent, Error>;
 
 const envId = EnvironmentId.make("env-1");
@@ -39,12 +43,16 @@ const state = vi.hoisted(() => ({
   environmentId: null as EnvironmentId | null,
   sessionAtom: null as Atom.Writable<SessionResult> | null,
   membersAtom: null as Atom.Writable<MembersResult> | null,
+  invitationsAtom: null as Atom.Writable<InvitationsResult> | null,
   accessChangesAtom: null as Atom.Writable<AccessChangesResult> | null,
   canReadMembersAtom: null as Atom.Writable<boolean> | null,
   canWriteMembersAtom: null as Atom.Writable<boolean> | null,
   canUpdateSettingsAtom: null as Atom.Writable<boolean> | null,
   multiUserSetting: false,
   membersCapability: true,
+  crmCapability: false,
+  httpBaseUrl: "https://hub.example.com",
+  directEndpoints: [] as Array<ServerDirectEndpoint>,
   projects: [] as Array<{
     readonly id: ProjectId;
     readonly environmentId: EnvironmentId;
@@ -70,6 +78,13 @@ const state = vi.hoisted(() => ({
         environmentId: EnvironmentId;
         input: InvitationCreateInput;
       }) => Promise<AsyncResult.Success<InvitationCreateResult> | AsyncResult.Failure<never, Error>>
+    >(),
+  revokeInvitation:
+    vi.fn<
+      (request: {
+        environmentId: EnvironmentId;
+        input: { id: InvitationId };
+      }) => Promise<AsyncResult.Success<InvitationRevokeResult> | AsyncResult.Failure<never, Error>>
     >(),
   issueMemberLoginCode:
     vi.fn<
@@ -110,7 +125,7 @@ vi.mock(import("../../state/session"), async (original) => {
     usePreparedConnection: (() =>
       OptionModule.some({
         environmentId: state.environmentId!,
-        httpBaseUrl: "https://hub.example.com",
+        httpBaseUrl: state.httpBaseUrl,
         label: "Hub",
       })) as never,
   };
@@ -128,6 +143,9 @@ vi.mock(import("../../state/auth"), async (original) => {
       listMembers: Object.assign(() => state.membersAtom!, {
         permissionAtom: () => state.canReadMembersAtom!,
       }),
+      listInvitations: Object.assign(() => state.invitationsAtom!, {
+        permissionAtom: () => state.canWriteMembersAtom!,
+      }),
       updateMember: {
         ...actual.authEnvironment.updateMember,
         label: "updateMember",
@@ -141,6 +159,11 @@ vi.mock(import("../../state/auth"), async (original) => {
       createInvitation: {
         ...actual.authEnvironment.createInvitation,
         label: "createInvitation",
+        permissionAtom: () => state.canWriteMembersAtom!,
+      },
+      revokeInvitation: {
+        ...actual.authEnvironment.revokeInvitation,
+        label: "revokeInvitation",
         permissionAtom: () => state.canWriteMembersAtom!,
       },
       issueMemberLoginCode: {
@@ -177,6 +200,8 @@ vi.mock(import("../../state/use-atom-command"), async (original) => ({
         return state.removeMember;
       case "createInvitation":
         return state.createInvitation;
+      case "revokeInvitation":
+        return state.revokeInvitation;
       case "issueMemberLoginCode":
         return state.issueMemberLoginCode;
       case "updateSettings":
@@ -201,9 +226,13 @@ vi.mock(import("../../state/environments"), async (original) => {
       serverConfig: {
         keybindings: defaultResolvedKeybindings,
         settings: { ...defaultServerSettings, multiUser: state.multiUserSetting },
+        directEndpoints: state.directEndpoints,
         environment: {
           platform: { machine: "server" },
-          capabilities: state.membersCapability ? { members: true } : {},
+          capabilities: {
+            ...(state.membersCapability ? { members: true } : {}),
+            ...(state.crmCapability ? { crm: true } : {}),
+          },
         },
       },
     })) as never,
@@ -337,11 +366,15 @@ function setup(
   options: {
     session?: AuthSessionState;
     members?: ReadonlyArray<MemberWithMemberships>;
+    invitations?: ReadonlyArray<Invitation>;
     canReadMembers?: boolean;
     canWriteMembers?: boolean;
     canUpdateSettings?: boolean;
     multiUserSetting?: boolean;
     membersCapability?: boolean;
+    crmCapability?: boolean;
+    httpBaseUrl?: string;
+    directEndpoints?: Array<ServerDirectEndpoint>;
   } = {},
 ) {
   vi.clearAllMocks();
@@ -351,6 +384,9 @@ function setup(
   ).pipe(Atom.keepAlive);
   state.membersAtom = Atom.make<MembersResult>(
     AsyncResult.success(options.members ?? sampleMembers()),
+  ).pipe(Atom.keepAlive);
+  state.invitationsAtom = Atom.make<InvitationsResult>(
+    AsyncResult.success(options.invitations ?? []),
   ).pipe(Atom.keepAlive);
   state.accessChangesAtom = Atom.make<AccessChangesResult>(
     AsyncResult.success<AuthAccessStreamEvent>({
@@ -365,6 +401,9 @@ function setup(
   state.canUpdateSettingsAtom = Atom.make(options.canUpdateSettings ?? true).pipe(Atom.keepAlive);
   state.multiUserSetting = options.multiUserSetting ?? false;
   state.membersCapability = options.membersCapability ?? true;
+  state.crmCapability = options.crmCapability ?? false;
+  state.httpBaseUrl = options.httpBaseUrl ?? "https://hub.example.com";
+  state.directEndpoints = options.directEndpoints ?? [];
   state.projects = [
     { id: projectA, environmentId: envId, title: "kotcrm" },
     { id: projectB, environmentId: envId, title: "billing" },
@@ -392,6 +431,7 @@ function setup(
       },
     }),
   );
+  state.revokeInvitation.mockResolvedValue(AsyncResult.success({ revoked: true }));
   state.issueMemberLoginCode.mockResolvedValue(
     AsyncResult.success({
       code: "LOG1-CODE-9876",
@@ -468,6 +508,45 @@ describe("ProjectMembersCard", () => {
     // Developer can still issue a login code only for themselves.
     expect(page.getByRole("button", { name: "Login code" }).elements()).toHaveLength(1);
   });
+
+  it("shows pending project invitations and lets managers revoke them", async () => {
+    const pendingInviteId = InvitationId.make("inv-proj-1");
+    setup({
+      invitations: [
+        {
+          id: pendingInviteId,
+          email: null,
+          kind: "staff",
+          role: "viewer",
+          projectId: projectA,
+          principalId: null,
+          ceiling: [...ceilingScopes("staff")],
+          createdBy: ownerPrincipal.id,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          expiresAt: "2099-01-08T00:00:00.000Z",
+          acceptedAt: null,
+          revokedAt: null,
+        },
+      ],
+    });
+
+    await using _screen = await render(
+      <RegistryContext.Provider value={appAtomRegistry}>
+        <ProjectMembersCard environmentId={envId} projectId={projectA} projectTitle="kotcrm" />
+      </RegistryContext.Provider>,
+    );
+
+    await expect.element(page.getByText("Pending invitations")).toBeVisible();
+    await expect.element(page.getByText("Pending", { exact: true })).toBeVisible();
+    await userEvent.click(page.getByRole("button", { name: "Revoke pending invitation" }));
+
+    await vi.waitFor(() =>
+      expect(state.revokeInvitation).toHaveBeenCalledWith({
+        environmentId: envId,
+        input: { id: pendingInviteId },
+      }),
+    );
+  });
 });
 
 describe("MemberInviteDialog", () => {
@@ -489,19 +568,20 @@ describe("MemberInviteDialog", () => {
     );
 
     expect(page.getByLabelText(/email/i).query()).toBeNull();
-    await userEvent.click(page.getByRole("combobox", { name: "Invitation role" }));
-    await expect.element(page.getByRole("option", { name: "Viewer" })).toBeVisible();
-    await expect.element(page.getByRole("option", { name: "Operator" })).toBeVisible();
-    expect(page.getByRole("option", { name: "Admin" }).query()).toBeNull();
-    expect(page.getByRole("option", { name: "Owner" }).query()).toBeNull();
-    await userEvent.click(page.getByRole("option", { name: "Operator" }));
+    await expect.element(page.getByRole("radio", { name: /Viewer/ })).toBeVisible();
+    expect(page.getByRole("radio", { name: /Admin/ }).query()).toBeNull();
+    expect(page.getByRole("radio", { name: /Owner/ }).query()).toBeNull();
+
+    await userEvent.click(page.getByRole("button", { name: "More roles" }));
+    await expect.element(page.getByRole("radio", { name: /Operator/ })).toBeVisible();
+    await userEvent.click(page.getByRole("radio", { name: /Operator/ }));
 
     await userEvent.click(page.getByRole("button", { name: "Create invitation" }));
 
     await vi.waitFor(() =>
       expect(state.createInvitation).toHaveBeenCalledWith({
         environmentId: envId,
-        input: { kind: "staff", role: "operator", projectId: projectA },
+        input: { kind: "staff", role: "operator", projectId: projectA, expiresInHours: 168 },
       }),
     );
     await expect.element(page.getByText("INV1-CODE-2345")).toBeVisible();
@@ -535,8 +615,78 @@ describe("MemberInviteDialog", () => {
     expect(state.createInvitation).not.toHaveBeenCalled();
   });
 
-  it("shows all assignable roles (never owner) when owner invites", async () => {
-    setup();
+  it("defaults to the first project, shows role descriptions, gates Manager on CRM, sends selected expiry, and warns on loopback-only links", async () => {
+    setup({
+      crmCapability: false,
+      httpBaseUrl: "http://127.0.0.1:3773",
+      directEndpoints: [],
+    });
+
+    await using _screen = await render(
+      <RegistryContext.Provider value={appAtomRegistry}>
+        <MemberInviteDialog
+          environmentId={envId}
+          open
+          onOpenChange={vi.fn()}
+          isOwner
+          grantableRoles={ASSIGNABLE_PROJECT_ROLES}
+          projects={[
+            { id: projectA, label: "kotcrm" },
+            { id: projectB, label: "billing" },
+          ]}
+        />
+      </RegistryContext.Provider>,
+    );
+
+    // Concrete first project is selected by default; environment-wide is at the bottom as advanced.
+    const projectCombobox = page.getByRole("combobox", { name: "Invitation project" });
+    await expect.element(projectCombobox).toHaveTextContent("kotcrm");
+    await userEvent.click(projectCombobox);
+    const projectOptions = page.getByRole("option").elements();
+    expect(projectOptions.at(-1)?.textContent).toContain(
+      "Environment-wide (advanced: no project assigned)",
+    );
+    await userEvent.click(page.getByRole("option", { name: "billing" }));
+
+    // Primary roles with descriptions; Developer selected by default; never Owner.
+    await expect.element(page.getByText("Read-only access")).toBeVisible();
+    await expect.element(page.getByText("Code, terminal, and agents")).toBeVisible();
+    await expect.element(page.getByText("Members and project settings")).toBeVisible();
+    await expect
+      .element(page.getByRole("radio", { name: /Developer/ }))
+      .toHaveAttribute("aria-checked", "true");
+    expect(page.getByRole("radio", { name: /Owner/ }).query()).toBeNull();
+
+    // More roles disclosure hides Operator until opened, and hides Manager when CRM is off.
+    expect(page.getByRole("radio", { name: /Operator/ }).query()).toBeNull();
+    await userEvent.click(page.getByRole("button", { name: "More roles" }));
+    await expect.element(page.getByRole("radio", { name: /Operator/ })).toBeVisible();
+    expect(page.getByRole("radio", { name: /Manager/ }).query()).toBeNull();
+
+    // Expires in defaults to 7 days and supports 24 hours / 30 days.
+    const expiryCombobox = page.getByRole("combobox", { name: "Invitation expiration" });
+    await expect.element(expiryCombobox).toHaveTextContent("7 days");
+    await userEvent.click(expiryCombobox);
+    await userEvent.click(page.getByRole("option", { name: "24 hours" }));
+
+    await userEvent.click(page.getByRole("button", { name: "Create invitation" }));
+
+    await vi.waitFor(() =>
+      expect(state.createInvitation).toHaveBeenCalledWith({
+        environmentId: envId,
+        input: { kind: "staff", role: "developer", projectId: projectB, expiresInHours: 24 },
+      }),
+    );
+
+    // Loopback-only address shows warning alongside copyable link.
+    await expect
+      .element(page.getByText("http://127.0.0.1:3773/invite/INV1-CODE-2345"))
+      .toBeVisible();
+    await expect.element(page.getByText(/Only a local address \(127\.0\.0\.1\)/)).toBeVisible();
+  });
+
+  it("shows Manager under More roles when CRM capability is enabled", async () => {
+    setup({ crmCapability: true });
 
     await using _screen = await render(
       <RegistryContext.Provider value={appAtomRegistry}>
@@ -551,10 +701,8 @@ describe("MemberInviteDialog", () => {
       </RegistryContext.Provider>,
     );
 
-    await userEvent.click(page.getByRole("combobox", { name: "Invitation role" }));
-    await expect.element(page.getByRole("option", { name: "Admin" })).toBeVisible();
-    await expect.element(page.getByRole("option", { name: "Developer" })).toBeVisible();
-    expect(page.getByRole("option", { name: "Owner" }).query()).toBeNull();
+    await userEvent.click(page.getByRole("button", { name: "More roles" }));
+    await expect.element(page.getByRole("radio", { name: /Manager/ })).toBeVisible();
   });
 });
 
@@ -699,5 +847,48 @@ describe("MembersSettings (environment-level)", () => {
     } finally {
       refreshSpy.mockRestore();
     }
+  });
+
+  it("renders Share project (invite link) pending invitations list and revokes an invitation", async () => {
+    const pendingId = InvitationId.make("inv-pending-1");
+    setup({
+      session: ownerSession("multi-user"),
+      multiUserSetting: true,
+      membersCapability: true,
+      invitations: [
+        {
+          id: pendingId,
+          email: null,
+          kind: "staff",
+          role: "developer",
+          projectId: projectA,
+          principalId: null,
+          ceiling: [...ceilingScopes("staff")],
+          createdBy: ownerPrincipal.id,
+          createdAt: "2026-01-01T00:00:00.000Z",
+          expiresAt: "2099-01-08T00:00:00.000Z",
+          acceptedAt: null,
+          revokedAt: null,
+        },
+      ],
+    });
+
+    await using _screen = await render(
+      <RegistryContext.Provider value={appAtomRegistry}>
+        <MembersSettings environmentId={envId} />
+      </RegistryContext.Provider>,
+    );
+
+    await expect.element(page.getByText("Share project (invite link)")).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Create invite link" })).toBeVisible();
+    await expect.element(page.getByRole("heading", { name: "kotcrm" })).toBeVisible();
+
+    await userEvent.click(page.getByRole("button", { name: "Revoke invitation for kotcrm" }));
+    await vi.waitFor(() =>
+      expect(state.revokeInvitation).toHaveBeenCalledWith({
+        environmentId: envId,
+        input: { id: pendingId },
+      }),
+    );
   });
 });

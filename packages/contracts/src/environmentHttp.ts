@@ -92,6 +92,7 @@ import {
   InvitationCreateInput,
   InvitationCreateResult,
   InvitationLoginInput,
+  InvitationPreview,
   InvitationRevokeResult,
   MemberLoginCodeResult,
   MemberRemoveResult,
@@ -496,7 +497,13 @@ const EnvironmentSessionRevokeErrors = [
 ] as const;
 const EnvironmentInvitationAcceptErrors = [
   EnvironmentHttpBadRequestError,
+  EnvironmentHttpForbiddenError,
   EnvironmentHttpConflictError,
+  EnvironmentHttpTooManyRequestsError,
+  EnvironmentInternalError,
+] as const;
+const EnvironmentInvitationPreviewErrors = [
+  EnvironmentHttpBadRequestError,
   EnvironmentHttpTooManyRequestsError,
   EnvironmentInternalError,
 ] as const;
@@ -850,6 +857,13 @@ class EnvironmentAuthHttpApi extends HttpApiGroup.make("auth")
       success: AuthOtherClientSessionsRevokeResult,
       error: EnvironmentScopedOperationErrors,
     }).middleware(EnvironmentAuthenticatedAuth),
+  )
+  .add(
+    HttpApiEndpoint.get("previewInvitation", "/api/auth/invitations/preview", {
+      query: Schema.Struct({ code: Schema.String }),
+      success: InvitationPreview,
+      error: EnvironmentInvitationPreviewErrors,
+    }),
   )
   .add(
     HttpApiEndpoint.post("acceptInvitation", "/api/auth/invitations/accept", {

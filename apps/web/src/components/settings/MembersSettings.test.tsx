@@ -5,11 +5,13 @@ import {
   AuthEnvironmentMaintainScope,
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
+  InvitationId,
   PrincipalId,
   ProjectId,
   ceilingScopes,
   type AuthAccessStreamEvent,
   type AuthSessionState,
+  type Invitation,
   type MemberWithMemberships,
   type Principal,
   type ProjectMembership,
@@ -23,6 +25,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 type SessionResult = AsyncResult.AsyncResult<AuthSessionState, Error>;
 type MembersResult = AsyncResult.AsyncResult<ReadonlyArray<MemberWithMemberships>, Error>;
+type InvitationsResult = AsyncResult.AsyncResult<ReadonlyArray<Invitation>, Error>;
 type AccessChangesResult = AsyncResult.AsyncResult<AuthAccessStreamEvent, Error>;
 
 const envId = EnvironmentId.make("env-1");
@@ -32,6 +35,7 @@ const projectB = ProjectId.make("project-b");
 const state = vi.hoisted(() => ({
   sessionAtom: null as Atom.Writable<SessionResult> | null,
   membersAtom: null as Atom.Writable<MembersResult> | null,
+  invitationsAtom: null as Atom.Writable<InvitationsResult> | null,
   accessChangesAtom: null as Atom.Writable<AccessChangesResult> | null,
   canReadMembersAtom: null as Atom.Writable<boolean> | null,
   canWriteMembersAtom: null as Atom.Writable<boolean> | null,
@@ -83,6 +87,12 @@ vi.mock(import("../../state/auth"), () => ({
       permissionAtom: () => state.canWriteMembersAtom!,
     }),
     createInvitation: Object.assign("createInvitation", {
+      permissionAtom: () => state.canWriteMembersAtom!,
+    }),
+    listInvitations: Object.assign(() => state.invitationsAtom!, {
+      permissionAtom: () => state.canWriteMembersAtom!,
+    }),
+    revokeInvitation: Object.assign("revokeInvitation", {
       permissionAtom: () => state.canWriteMembersAtom!,
     }),
     issueMemberLoginCode: Object.assign("issueMemberLoginCode", {
@@ -251,6 +261,7 @@ function setup(
   options: {
     session?: AuthSessionState;
     members?: ReadonlyArray<MemberWithMemberships>;
+    invitations?: ReadonlyArray<Invitation>;
     canReadMembers?: boolean;
     canWriteMembers?: boolean;
     canUpdateSettings?: boolean;
@@ -264,6 +275,9 @@ function setup(
   ).pipe(Atom.keepAlive);
   state.membersAtom = Atom.make<MembersResult>(
     AsyncResult.success(options.members ?? sampleMembers()),
+  ).pipe(Atom.keepAlive);
+  state.invitationsAtom = Atom.make<InvitationsResult>(
+    AsyncResult.success(options.invitations ?? []),
   ).pipe(Atom.keepAlive);
   state.accessChangesAtom = Atom.make<AccessChangesResult>(
     AsyncResult.success<AuthAccessStreamEvent>({
@@ -418,5 +432,32 @@ describe("MembersSettings environment screen gating", () => {
 
     expect(html).toContain(">Suspend<");
     expect(html).toContain(">Reactivate<");
+  });
+
+  it("renders Share project (invite link) block with pending invitations", () => {
+    setup({
+      invitations: [
+        {
+          id: InvitationId.make("inv-pending"),
+          email: null,
+          kind: "staff",
+          role: "developer",
+          projectId: projectA,
+          principalId: null,
+          ceiling: [...ceilingScopes("staff")],
+          createdBy: ownerPrincipal.id,
+          createdAt: "2026-11-28T00:00:00.000Z",
+          expiresAt: "2099-12-05T00:00:00.000Z",
+          acceptedAt: null,
+          revokedAt: null,
+        },
+      ],
+    });
+    const html = renderHtml(<MembersSettings environmentId={envId} />);
+
+    expect(html).toContain("Share project (invite link)");
+    expect(html).toContain("Create invite link");
+    expect(html).toContain("kotcrm");
+    expect(html).toContain('aria-label="Revoke invitation for kotcrm"');
   });
 });

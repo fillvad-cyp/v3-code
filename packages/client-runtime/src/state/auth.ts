@@ -26,6 +26,7 @@ import {
   type CrmNoteUpdateInput,
   type EnvironmentId,
   type InvitationCreateInput,
+  type InvitationId,
   type ListAuditEventsInput,
   type MemberUpdateInput,
   type OwnerTransferInput,
@@ -339,6 +340,38 @@ export function createAuthEnvironmentAtoms<R, E>(
             url: (urls) => urls.createInvitation(),
             timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
             request: ({ client, headers }) => client.createInvitation({ headers, payload: input }),
+          }),
+      }),
+      { permissionAtom: accessWritePermissionAtom },
+    ),
+    listInvitations: Object.assign(
+      createEnvironmentQueryAtomFamily(runtime, {
+        label: "environment-data:server:auth-list-invitations",
+        staleTimeMs: 10_000,
+        execute: (input: { readonly projectId?: ProjectId } | null) => {
+          const query = input?.projectId === undefined ? {} : { projectId: input.projectId };
+          return executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "GET",
+            url: (urls) => urls.listInvitations({ query }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) => client.listInvitations({ headers, query }),
+          });
+        },
+      }),
+      { permissionAtom: accessWritePermissionAtom },
+    ),
+    revokeInvitation: Object.assign(
+      createEnvironmentCommand(runtime, {
+        label: "environment-data:server:auth-revoke-invitation",
+        execute: (input: { readonly id: InvitationId }) =>
+          executeConnectedEnvironmentHttpRequest({
+            group: "auth",
+            method: "DELETE",
+            url: (urls) => urls.revokeInvitation({ params: { id: input.id } }),
+            timeoutMs: ACCESS_REQUEST_TIMEOUT_MS,
+            request: ({ client, headers }) =>
+              client.revokeInvitation({ headers, params: { id: input.id } }),
           }),
       }),
       { permissionAtom: accessWritePermissionAtom },

@@ -3,10 +3,13 @@ import {
   AuthAccessWriteScope,
   AuthEnvironmentMaintainScope,
   AuthOrchestrationReadScope,
+  InvitationId,
   PrincipalId,
   ProjectId,
   ceilingScopes,
+  type AdvertisedEndpoint,
   type AuthSessionState,
+  type Invitation,
   type MemberWithMemberships,
   type Principal,
   type ProjectMembership,
@@ -23,7 +26,10 @@ import {
   grantableRolesForActor,
   inferCeilingTemplate,
   isSessionOwner,
+  partitionInviteRoles,
+  pendingInvitationsList,
   projectMembersForProject,
+  resolveInviteAcceptLink,
   supportsAuditCapability,
   supportsMembersCapability,
   validateInviteForm,
@@ -429,5 +435,119 @@ describe("helpers", () => {
     expect(
       formatMembershipErrorMessage(new Error("Invitation rate limit exceeded. Try again later.")),
     ).toBe("Too many invitations created recently. Wait a while and try again.");
+  });
+
+  it("partitions invite roles into primary and More roles, hiding Manager without CRM", () => {
+    expect(partitionInviteRoles(ASSIGNABLE_PROJECT_ROLES, false)).toEqual({
+      primaryRoles: ["viewer", "developer", "admin"],
+      moreRoles: ["operator"],
+      allRoles: ["viewer", "developer", "admin", "operator"],
+    });
+    expect(partitionInviteRoles(ASSIGNABLE_PROJECT_ROLES, true)).toEqual({
+      primaryRoles: ["viewer", "developer", "admin"],
+      moreRoles: ["operator", "manager"],
+      allRoles: ["viewer", "developer", "admin", "operator", "manager"],
+    });
+  });
+
+  it("filters login codes, revoked, accepted, and expired entries from pendingInvitationsList", () => {
+    const baseInvite: Invitation = {
+      id: InvitationId.make("inv-1"),
+      email: null,
+      kind: "staff",
+      role: "developer",
+      projectId: projectA,
+      principalId: null,
+      ceiling: [...ceilingScopes("staff")],
+      createdBy: ownerPrincipal.id,
+      createdAt: "2026-11-28T10:00:00.000Z",
+      expiresAt: "2026-12-05T10:00:00.000Z",
+      acceptedAt: null,
+      revokedAt: null,
+    };
+    const nowMs = Date.parse("2026-11-28T12:00:00.000Z");
+    const result = pendingInvitationsList(
+      [
+        { ...baseInvite, id: InvitationId.make("older"), createdAt: "2026-11-28T09:00:00.000Z" },
+        { ...baseInvite, id: InvitationId.make("newer"), createdAt: "2026-11-28T11:00:00.000Z" },
+        { ...baseInvite, id: InvitationId.make("login"), principalId: devPrincipal.id },
+        { ...baseInvite, id: InvitationId.make("used"), acceptedAt: "2026-11-28T11:30:00.000Z" },
+        { ...baseInvite, id: InvitationId.make("revoked"), revokedAt: "2026-11-28T11:30:00.000Z" },
+        { ...baseInvite, id: InvitationId.make("expired"), expiresAt: "2026-11-28T11:00:00.000Z" },
+      ],
+      nowMs,
+    );
+    expect(result.map((item) => item.id)).toEqual(["newer", "older"]);
+  });
+
+  it("resolves invite accept links preferring reachable advertised and direct endpoints over 127.0.0.1", () => {
+    const lanEndpoint: AdvertisedEndpoint = {
+      id: "desktop-lan:192.168.1.50",
+      provider: { id: "desktop-core", label: "Desktop", kind: "core", isAddon: false },
+      label: "Local network",
+      httpBaseUrl: "http://192.168.1.50:3773",
+      wsBaseUrl: "ws://192.168.1.50:3773",
+      reachability: "lan",
+      source: "desktop-core",
+      status: "available",
+      isDefault: false,
+      compatibility: { desktopApp: "compatible", hostedHttpsApp: "mixed-content-blocked" },
+    };
+    const tailscaleEndpoint: AdvertisedEndpoint = {
+      id: "tailscale-magicdns:box.ts.net",
+      provider: {
+        id: "tailscale",
+        label: "Tailscale",
+        kind: "private-network",
+        isAddon: true,
+      },
+      label: "Tailscale HTTPS",
+      httpBaseUrl: "https://box.tail123.ts.net",
+      wsBaseUrl: "wss://box.tail123.ts.net",
+      reachability: "private-network",
+      source: "desktop-addon",
+      status: "available",
+      isDefault: true,
+      compatibility: { desktopApp: "compatible", hostedHttpsApp: "compatible" },
+    };
+
+    expect(
+      resolveInviteAcceptLink({
+        code: "ABCD-1234-5678",
+        advertisedEndpoints: [lanEndpoint, tailscaleEndpoint],
+        httpBaseUrl: "http://127.0.0.1:3773",
+      }),
+    ).toEqual({
+      url: "https://box.tail123.ts.net/invite/ABCD-1234-5678",
+      isLoopbackOnly: false,
+      endpointLabel: "Tailscale HTTPS",
+    });
+
+    expect(
+      resolveInviteAcceptLink({
+        code: "ABCD-1234-5678",
+        directEndpoints: [
+          { kind: "lan", httpBaseUrl: "http://192.168.1.50:3773/" },
+          { kind: "tailnet", httpBaseUrl: "https://box.tail123.ts.net/" },
+        ],
+        httpBaseUrl: "http://127.0.0.1:3773",
+      }),
+    ).toEqual({
+      url: "https://box.tail123.ts.net/invite/ABCD-1234-5678",
+      isLoopbackOnly: false,
+      endpointLabel: null,
+    });
+
+    expect(
+      resolveInviteAcceptLink({
+        code: "ABCD-1234-5678",
+        httpBaseUrl: "http://127.0.0.1:3773",
+        fallbackOrigin: "http://localhost:5173",
+      }),
+    ).toEqual({
+      url: "http://127.0.0.1:3773/invite/ABCD-1234-5678",
+      isLoopbackOnly: true,
+      endpointLabel: null,
+    });
   });
 });

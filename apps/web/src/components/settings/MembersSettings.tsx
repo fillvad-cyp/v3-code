@@ -1,6 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   type EnvironmentId,
+  type Invitation,
+  type InvitationId,
   type MemberLoginCodeResult,
   type MemberWithMemberships,
   type Principal,
@@ -9,10 +11,11 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { KeyRoundIcon, PlusIcon, ShieldAlertIcon, Trash2Icon } from "lucide-react";
+import { KeyRoundIcon, Link2Icon, PlusIcon, ShieldAlertIcon, Trash2Icon } from "lucide-react";
 import { useState } from "react";
 import { T, useGT, useMessages } from "gt-react";
 
+import { useNowSecond } from "../../hooks/useNowSecond";
 import { m as resolveMessage } from "../../i18n/messages";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { useSyncAccessRevision } from "../../state/accessRevision";
@@ -23,6 +26,7 @@ import { useEnvironmentQuery } from "../../state/query";
 import { serverEnvironment } from "../../state/server";
 import { environmentSession, useEnvironmentSessionState } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { formatExpiresInLabel } from "../../timestampFormat";
 import { Alert, AlertDescription } from "../ui/alert";
 import {
   AlertDialog,
@@ -37,6 +41,8 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Switch } from "../ui/switch";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { formatAccessTimestamp } from "./ConnectionsSettings.logic";
 import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "./itemRows";
 import { MemberInviteDialog } from "./MemberInviteDialog";
 import { MemberLoginCodeDialog } from "./MemberLoginCodeDialog";
@@ -51,6 +57,7 @@ import {
   inferCeilingTemplate,
   isCeilingTemplate,
   MEMBERSHIP_STATE_LABELS,
+  pendingInvitationsList,
   PRINCIPAL_STATUS_LABELS,
   PROJECT_ROLE_LABELS,
   supportsMembersCapability,
@@ -58,6 +65,7 @@ import {
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 const EMPTY_MEMBERS: ReadonlyArray<MemberWithMemberships> = [];
+const EMPTY_INVITATIONS: ReadonlyArray<Invitation> = [];
 
 function principalStatusVariant(status: Principal["status"]) {
   if (status === "active") return "success" as const;
@@ -77,6 +85,7 @@ export function MembersSettings({
 function MembersSettingsContent({ environmentId }: { readonly environmentId: EnvironmentId }) {
   const gt = useGT();
   const m = useMessages();
+  const nowMs = useNowSecond();
   const session = useEnvironmentSessionState(environmentId);
   const environment = useEnvironment(environmentId);
   const allProjects = useProjects();
@@ -110,6 +119,12 @@ function MembersSettingsContent({ environmentId }: { readonly environmentId: Env
   const canCreateInvitation = useAtomValue(
     authEnvironment.createInvitation.permissionAtom(environmentId),
   );
+  const canListInvitations = useAtomValue(
+    authEnvironment.listInvitations.permissionAtom(environmentId),
+  );
+  const canRevokeInvitation = useAtomValue(
+    authEnvironment.revokeInvitation.permissionAtom(environmentId),
+  );
 
   useSyncAccessRevision(environmentId, gate.visible && canReadMembers);
 
@@ -119,19 +134,30 @@ function MembersSettingsContent({ environmentId }: { readonly environmentId: Env
       : null,
     m,
   );
+  const invitationsQuery = useEnvironmentQuery(
+    gate.visible && canListInvitations
+      ? authEnvironment.listInvitations({ environmentId, input: null })
+      : null,
+    m,
+  );
 
   const updateSettings = useAtomCommand(serverEnvironment.updateSettings, {
     reportFailure: false,
   });
   const updateMember = useAtomCommand(authEnvironment.updateMember, { reportFailure: false });
   const removeMember = useAtomCommand(authEnvironment.removeMember, { reportFailure: false });
+  const revokeInvitation = useAtomCommand(authEnvironment.revokeInvitation, {
+    reportFailure: false,
+  });
   const issueMemberLoginCode = useAtomCommand(authEnvironment.issueMemberLoginCode, {
     reportFailure: false,
   });
 
   const [isUpdatingMultiUser, setIsUpdatingMultiUser] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
+  const [invitationError, setInvitationError] = useState<string | null>(null);
   const [busyPrincipalId, setBusyPrincipalId] = useState<string | null>(null);
+  const [busyInvitationId, setBusyInvitationId] = useState<string | null>(null);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [pendingRemoval, setPendingRemoval] = useState<MemberWithMemberships | null>(null);
   const [loginCodeTarget, setLoginCodeTarget] = useState<Principal | null>(null);
@@ -144,11 +170,47 @@ function MembersSettingsContent({ environmentId }: { readonly environmentId: Env
   }
 
   const members = environmentMembersList(membersQuery.data ?? EMPTY_MEMBERS);
+  const pendingInvitations = pendingInvitationsList(
+    invitationsQuery.data ?? EMPTY_INVITATIONS,
+    nowMs,
+  );
   const isLoadingInitial = membersQuery.isPending && membersQuery.data === null;
+  const isLoadingInvitations = invitationsQuery.isPending && invitationsQuery.data === null;
   const activeError = mutationError ?? membersQuery.error;
+  const activeInvitationError = invitationError ?? invitationsQuery.error;
 
   const refreshMembers = () => {
     appAtomRegistry.refresh(authEnvironment.listMembers({ environmentId, input: null }));
+  };
+
+  const refreshInvitations = () => {
+    appAtomRegistry.refresh(authEnvironment.listInvitations({ environmentId, input: null }));
+  };
+
+  const handleInvited = () => {
+    refreshMembers();
+    if (canListInvitations) {
+      refreshInvitations();
+    }
+  };
+
+  const handleRevokeInvitation = async (id: InvitationId) => {
+    if (!canRevokeInvitation || busyInvitationId !== null) return;
+    setInvitationError(null);
+    setBusyInvitationId(id);
+    const result = await revokeInvitation({
+      environmentId,
+      input: { id },
+    });
+    setBusyInvitationId(null);
+    if (result._tag === "Success") {
+      refreshInvitations();
+      return;
+    }
+    if (!isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      setInvitationError(formatMembershipErrorMessage(error, resolveMessage));
+    }
   };
 
   const handleToggleMultiUser = async (enabled: boolean) => {
@@ -260,6 +322,98 @@ function MembersSettingsContent({ environmentId }: { readonly environmentId: Env
 
   return (
     <>
+      <SettingsSection
+        id="share-project-invites"
+        title={gt("Share project (invite link)")}
+        icon={<Link2Icon aria-hidden className="size-4 text-muted-foreground" />}
+        headerAction={
+          canCreateInvitation ? (
+            <Button size="xs" variant="default" type="button" onClick={() => setInviteOpen(true)}>
+              <PlusIcon />
+              <T>Create invite link</T>
+            </Button>
+          ) : undefined
+        }
+      >
+        <div className={ITEM_ROW_CLASSNAME}>
+          <p className="text-xs text-muted-foreground">
+            <T>Create a one-time link that gives someone access to a single project and role.</T>
+          </p>
+        </div>
+
+        {activeInvitationError ? (
+          <div className="px-3 py-2 sm:px-4">
+            <Alert variant="error">
+              <AlertDescription>{activeInvitationError}</AlertDescription>
+            </Alert>
+          </div>
+        ) : null}
+
+        {canListInvitations ? (
+          isLoadingInvitations ? (
+            <div className={ITEM_ROW_CLASSNAME}>
+              <p className="text-xs text-muted-foreground">
+                <T>Loading pending invitations…</T>
+              </p>
+            </div>
+          ) : pendingInvitations.length === 0 ? (
+            <div className={ITEM_ROW_CLASSNAME}>
+              <p className="text-xs text-muted-foreground">
+                <T>No pending invitations.</T>
+              </p>
+            </div>
+          ) : (
+            pendingInvitations.map((invitation) => {
+              const projectLabel =
+                invitation.projectId !== null
+                  ? (projectTitleById.get(invitation.projectId) ?? invitation.projectId)
+                  : gt("Environment-wide");
+              const isBusy = busyInvitationId === invitation.id;
+              return (
+                <div key={invitation.id} className={ITEM_ROW_CLASSNAME}>
+                  <div className={ITEM_ROW_INNER_CLASSNAME}>
+                    <div className="min-w-0 flex-1 space-y-1">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <h3 className="truncate text-sm font-medium text-foreground">
+                          {projectLabel}
+                        </h3>
+                        <Badge variant="secondary" size="sm">
+                          {m(PROJECT_ROLE_LABELS[invitation.role])}
+                        </Badge>
+                      </div>
+                      <p className="text-xs text-muted-foreground">
+                        <Tooltip>
+                          <TooltipTrigger render={<span />}>
+                            {formatExpiresInLabel(invitation.expiresAt, nowMs, m)}
+                          </TooltipTrigger>
+                          <TooltipPopup side="top">
+                            {formatAccessTimestamp(invitation.expiresAt)}
+                          </TooltipPopup>
+                        </Tooltip>
+                      </p>
+                    </div>
+                    <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+                      <Button
+                        size="xs"
+                        variant="destructive-outline"
+                        type="button"
+                        disabled={!canRevokeInvitation || isBusy}
+                        aria-label={gt("Revoke invitation for {project}", {
+                          project: projectLabel,
+                        })}
+                        onClick={() => void handleRevokeInvitation(invitation.id)}
+                      >
+                        {isBusy ? gt("Revoking…") : gt("Revoke")}
+                      </Button>
+                    </div>
+                  </div>
+                </div>
+              );
+            })
+          )
+        ) : null}
+      </SettingsSection>
+
       <SettingsSection
         id="environment-members"
         title={gt("Members")}
@@ -493,7 +647,7 @@ function MembersSettingsContent({ environmentId }: { readonly environmentId: Env
         isOwner
         grantableRoles={ASSIGNABLE_PROJECT_ROLES}
         projects={environmentProjects}
-        onInvited={refreshMembers}
+        onInvited={handleInvited}
       />
 
       <MemberLoginCodeDialog

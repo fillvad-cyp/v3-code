@@ -631,6 +631,7 @@ export class EnvironmentAuth extends Context.Service<
       readonly method: "browser-session-cookie" | "bearer-access-token";
       readonly client: AuthClientMetadata;
       readonly ttl?: Duration.Duration;
+      readonly replaceSessionId?: AuthSessionId;
     }) => Effect.Effect<
       {
         readonly sessionId: AuthSessionId;
@@ -1686,6 +1687,9 @@ export const make = Effect.gen(function* () {
         binding: input.binding,
         client: input.client,
         ...(input.ttl ? { ttl: input.ttl } : {}),
+        ...(input.replaceSessionId !== undefined
+          ? { replaceSessionId: input.replaceSessionId }
+          : {}),
       })
       .pipe(
         Effect.map((issued) => ({

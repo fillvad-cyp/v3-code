@@ -5,6 +5,7 @@ import {
   type CrmClientId,
   InvitationId,
   type InvitationKind,
+  type InvitationPreview,
   PrincipalId,
   type Invitation,
   type Principal,
@@ -42,6 +43,9 @@ import * as MembershipService from "./MembershipService.ts";
 export const OWNER_PRINCIPAL_ID = PrincipalId.make("owner");
 const DEFAULT_INVITATION_TTL = Duration.days(7);
 const DEFAULT_LOGIN_CODE_TTL = Duration.minutes(15);
+const PREVIEW_RATE_LIMIT_MAX_REQUESTS = 30;
+const PREVIEW_RATE_LIMIT_WINDOW = Duration.minutes(15);
+const MAX_PREVIEW_RATE_LIMIT_KEYS = 10_000;
 const isAuthEnvironmentScope = Schema.is(AuthEnvironmentScope);
 
 export const InvitationInvalidReason = Schema.Literals([
@@ -106,6 +110,7 @@ export const InvitationForbiddenReason = Schema.Literals([
   "owner_role_not_invitable",
   "role_exceeds_issuer",
   "ceiling_exceeds_issuer",
+  "ceiling_exceeds_member",
   "invitation_not_in_scope",
 ]);
 export type InvitationForbiddenReason = typeof InvitationForbiddenReason.Type;
@@ -128,6 +133,8 @@ export class InvitationForbiddenError extends Schema.TaggedError<InvitationForbi
         return "You cannot invite a member with a higher role than your own.";
       case "ceiling_exceeds_issuer":
         return "The requested role exceeds your scope ceiling.";
+      case "ceiling_exceeds_member":
+        return "The invitation role exceeds this member's scope ceiling.";
       case "invitation_not_in_scope":
         return "You do not have permission to manage this invitation.";
     }
@@ -137,7 +144,8 @@ export class InvitationForbiddenError extends Schema.TaggedError<InvitationForbi
 export class InvitationRateLimitedError extends Schema.TaggedError<InvitationRateLimitedError>()(
   "InvitationRateLimitedError",
   {
-    principalId: PrincipalId,
+    principalId: Schema.optionalKey(PrincipalId),
+    retryAfterSeconds: Schema.optionalKey(Schema.Number),
   },
 ) {
   override get message(): string {
@@ -193,7 +201,14 @@ export interface IssuedInvitation {
 export interface ConsumeInvitationInput {
   readonly code: string;
   readonly displayName?: string;
+  /** When set, attaches the invitation's project membership to this active member instead of creating a new principal. */
+  readonly existingPrincipalId?: PrincipalId;
   readonly audit?: InvitationAuditContext;
+}
+
+export interface PreviewInvitationInput {
+  readonly code: string;
+  readonly ip?: string | null;
 }
 
 export interface ConsumedInvitation {
@@ -226,9 +241,11 @@ export type IssueLoginError =
   | InvitationInternalError;
 export type ConsumeInvitationError =
   | InvitationInvalidError
+  | InvitationForbiddenError
   | InvitationExpiredError
   | InvitationAlreadyUsedError
   | InvitationInternalError;
+export type PreviewInvitationError = InvitationRateLimitedError | InvitationInternalError;
 export type ListPendingInvitationsError = InvitationForbiddenError | InvitationInternalError;
 export type RevokeInvitationError = InvitationForbiddenError | InvitationInternalError;
 
@@ -241,6 +258,9 @@ export class InvitationService extends Context.Service<
     readonly issueLogin: (
       input: PrincipalId | IssueLoginInput,
     ) => Effect.Effect<IssuedInvitation, IssueLoginError>;
+    readonly preview: (
+      input: PreviewInvitationInput,
+    ) => Effect.Effect<InvitationPreview, PreviewInvitationError>;
     readonly consume: (
       input: ConsumeInvitationInput,
     ) => Effect.Effect<ConsumedInvitation, ConsumeInvitationError>;
@@ -284,6 +304,45 @@ const make = Effect.gen(function* () {
   const projectAccess = yield* ProjectAccess.ProjectAccess;
   const membershipService = yield* MembershipService.MembershipService;
   const codes = yield* InvitationCodes.make();
+
+  // In-memory sliding-window limiter keyed by client IP for public invitation previews.
+  const previewAttemptsByIp = new Map<string, Array<number>>();
+  const previewWindowMs = Duration.toMillis(PREVIEW_RATE_LIMIT_WINDOW);
+
+  const prunePreviewWindow = (key: string, nowMs: number): Array<number> => {
+    const cutoff = nowMs - previewWindowMs;
+    const existing = previewAttemptsByIp.get(key);
+    if (existing === undefined) {
+      return [];
+    }
+    const fresh = existing.filter((timestamp) => timestamp > cutoff);
+    if (fresh.length === 0) {
+      previewAttemptsByIp.delete(key);
+    } else if (fresh.length !== existing.length) {
+      previewAttemptsByIp.set(key, fresh);
+    }
+    return fresh;
+  };
+
+  const recordPreviewAttempt = (key: string, nowMs: number): void => {
+    const fresh = prunePreviewWindow(key, nowMs);
+    if (!previewAttemptsByIp.has(key) && previewAttemptsByIp.size >= MAX_PREVIEW_RATE_LIMIT_KEYS) {
+      const cutoff = nowMs - previewWindowMs;
+      for (const [entryKey, timestamps] of previewAttemptsByIp) {
+        if (!timestamps.some((timestamp) => timestamp > cutoff)) {
+          previewAttemptsByIp.delete(entryKey);
+        }
+      }
+      if (previewAttemptsByIp.size >= MAX_PREVIEW_RATE_LIMIT_KEYS) {
+        const oldestKey = previewAttemptsByIp.keys().next().value;
+        if (oldestKey !== undefined) {
+          previewAttemptsByIp.delete(oldestKey);
+        }
+      }
+    }
+    fresh.push(nowMs);
+    previewAttemptsByIp.set(key, fresh);
+  };
 
   const resolveActor = Effect.fnUntraced(function* (
     principalId: PrincipalId,
@@ -575,6 +634,92 @@ const make = Effect.gen(function* () {
     return { invitation, code } satisfies IssuedInvitation;
   });
 
+  const preview = Effect.fn("InvitationService.preview")(function* (input: PreviewInvitationInput) {
+    const now = yield* DateTime.now;
+    const nowMs = DateTime.toEpochMillis(now);
+    const rateLimitKey = input.ip?.trim() || "unknown";
+    const fresh = prunePreviewWindow(rateLimitKey, nowMs);
+    if (fresh.length >= PREVIEW_RATE_LIMIT_MAX_REQUESTS) {
+      const retryAfterSeconds = Math.max(
+        1,
+        Math.ceil(((fresh[0] ?? nowMs) + previewWindowMs - nowMs) / 1_000),
+      );
+      return yield* new InvitationRateLimitedError({ retryAfterSeconds });
+    }
+    recordPreviewAttempt(rateLimitKey, nowMs);
+
+    const canonical = InvitationCodes.normalizeInvitationCode(input.code);
+    if (canonical === undefined) {
+      return {
+        valid: false,
+        reason: "not_found",
+        projectTitle: null,
+      } satisfies InvitationPreview;
+    }
+
+    const tokenHash = yield* codes
+      .hash(canonical)
+      .pipe(
+        Effect.mapError((cause) => new InvitationInternalError({ operation: "preview", cause })),
+      );
+    const existing = yield* invitations
+      .getByTokenHash(tokenHash)
+      .pipe(
+        Effect.mapError((cause) => new InvitationInternalError({ operation: "preview", cause })),
+      );
+    if (Option.isNone(existing)) {
+      return {
+        valid: false,
+        reason: "not_found",
+        projectTitle: null,
+      } satisfies InvitationPreview;
+    }
+
+    const invitation = existing.value;
+    if (invitation.acceptedAt !== null) {
+      return {
+        valid: false,
+        reason: "used",
+        projectTitle: null,
+      } satisfies InvitationPreview;
+    }
+    if (invitation.revokedAt !== null) {
+      return {
+        valid: false,
+        reason: "revoked",
+        projectTitle: null,
+      } satisfies InvitationPreview;
+    }
+    const expiresAtMs = Date.parse(invitation.expiresAt);
+    if (!Number.isFinite(expiresAtMs) || expiresAtMs <= nowMs) {
+      return {
+        valid: false,
+        reason: "expired",
+        projectTitle: null,
+      } satisfies InvitationPreview;
+    }
+
+    let projectTitle: string | null = null;
+    if (invitation.projectId !== null) {
+      const rows = yield* sql<{ readonly title: string }>`
+        SELECT title
+        FROM projection_projects
+        WHERE project_id = ${invitation.projectId} AND deleted_at IS NULL
+        LIMIT 1
+      `.pipe(
+        Effect.mapError((cause) => new InvitationInternalError({ operation: "preview", cause })),
+      );
+      projectTitle = rows[0]?.title ?? null;
+    }
+
+    return {
+      valid: true,
+      projectTitle,
+      role: invitation.role,
+      expiresAt: invitation.expiresAt,
+    } satisfies InvitationPreview;
+  });
+
   const consume = Effect.fn("InvitationService.consume")(function* (input: ConsumeInvitationInput) {
     const trimmedDisplayName = input.displayName?.trim() ?? "";
     const canonical = InvitationCodes.normalizeInvitationCode(input.code);
@@ -676,6 +821,95 @@ const make = Effect.gen(function* () {
               invitation,
               principal,
               memberships: principalMemberships,
+            } satisfies ConsumedInvitation;
+          }
+
+          if (input.existingPrincipalId !== undefined) {
+            const maybeInviter = yield* principals
+              .get(invitation.createdBy)
+              .pipe(
+                Effect.mapError(
+                  (cause) => new InvitationInternalError({ operation: "consume", cause }),
+                ),
+              );
+            const inviterIsOwner =
+              (Option.isSome(maybeInviter) && maybeInviter.value.kind === "owner") ||
+              (Option.isNone(maybeInviter) && invitation.createdBy === OWNER_PRINCIPAL_ID);
+
+            const granted = yield* membershipService
+              .upsertFromInvitation({
+                projectId: invitation.projectId,
+                principalId: input.existingPrincipalId,
+                role: invitation.role,
+                invitedBy: invitation.createdBy,
+                inviterIsOwner,
+                ...(input.audit === undefined ? {} : { audit: input.audit }),
+              })
+              .pipe(
+                Effect.mapError((error) => {
+                  switch (error._tag) {
+                    case "MembershipCeilingError":
+                      return new InvitationForbiddenError({ reason: "ceiling_exceeds_member" });
+                    case "MembershipForbiddenError":
+                      return new InvitationForbiddenError({ reason: "not_authorized" });
+                    case "MembershipNotFoundError":
+                      return new InvitationInvalidError({ reason: "principal_not_found" });
+                    case "MembershipInternalError":
+                      return new InvitationInternalError({ operation: "consume", cause: error });
+                  }
+                }),
+              );
+
+            const crmClientId = invitation.crmClientId ?? null;
+            if (
+              invitation.projectId !== null &&
+              invitation.kind === "client" &&
+              crmClientId !== null
+            ) {
+              const nowMs = DateTime.toEpochMillis(now);
+              yield* sql`
+                UPDATE crm_clients
+                SET principal_id = ${granted.principal.id}, updated_at = ${nowMs}
+                WHERE id = ${crmClientId}
+                  AND project_id = ${invitation.projectId}
+                  AND redacted_at IS NULL
+              `.pipe(
+                Effect.mapError(
+                  (cause) => new InvitationInternalError({ operation: "consume", cause }),
+                ),
+              );
+            }
+
+            yield* auditEvents
+              .append({
+                at: nowIso,
+                actorPrincipalId: granted.principal.id,
+                actorSessionId: input.audit?.sessionId ?? null,
+                action: "invitation.accepted",
+                resourceType: "invitation",
+                resourceId: invitation.id,
+                projectId: invitation.projectId,
+                ip: input.audit?.ip ?? null,
+                userAgent: input.audit?.userAgent ?? null,
+                outcome: "allow",
+                metadata: {
+                  principalId: granted.principal.id,
+                  role: invitation.role,
+                  projectId: invitation.projectId,
+                  existingPrincipal: true,
+                  ...(granted.ceilingWidened ? { ceilingWidened: true } : {}),
+                },
+              })
+              .pipe(
+                Effect.mapError(
+                  (cause) => new InvitationInternalError({ operation: "consume", cause }),
+                ),
+              );
+
+            return {
+              invitation,
+              principal: granted.principal,
+              memberships: granted.memberships,
             } satisfies ConsumedInvitation;
           }
 
@@ -800,6 +1034,7 @@ const make = Effect.gen(function* () {
       .pipe(
         Effect.mapError((error) =>
           error._tag === "InvitationInvalidError" ||
+          error._tag === "InvitationForbiddenError" ||
           error._tag === "InvitationExpiredError" ||
           error._tag === "InvitationAlreadyUsedError" ||
           error._tag === "InvitationInternalError"
@@ -918,6 +1153,7 @@ const make = Effect.gen(function* () {
   return InvitationService.of({
     issue,
     issueLogin,
+    preview,
     consume,
     listPending,
     revoke,

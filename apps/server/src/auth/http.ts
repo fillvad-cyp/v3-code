@@ -40,6 +40,7 @@ import { parseOAuthScope } from "@t3tools/shared/oauthScope";
 import { causeErrorTag } from "@t3tools/shared/observability";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
+import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -55,6 +56,8 @@ import * as AuditService from "../identity/AuditService.ts";
 import * as InvitationService from "../identity/InvitationService.ts";
 import * as MembershipService from "../identity/MembershipService.ts";
 import * as Passwords from "../identity/Passwords.ts";
+import * as Principals from "../persistence/Principals.ts";
+import * as ServerSettings from "../serverSettings.ts";
 import * as EnvironmentAuth from "./EnvironmentAuth.ts";
 import { renderInvitePage } from "./inviteHtml.ts";
 import * as SessionStore from "./SessionStore.ts";
@@ -342,6 +345,47 @@ export const layer = HttpApiBuilder.group(
     const auditService = yield* AuditService.AuditService;
     const apiTokenService = yield* ApiTokenService.ApiTokenService;
     const projectAccess = yield* ProjectAccess.ProjectAccess;
+    const principalsRepo = yield* Effect.serviceOption(Principals.PrincipalRepository);
+    const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+
+    const resolveExistingMemberCookieSession = Effect.fnUntraced(function* (
+      request: HttpServerRequest.HttpServerRequest,
+    ) {
+      if (Option.isNone(principalsRepo)) {
+        return undefined;
+      }
+      const credential = EnvironmentAuth.selectRequestCredential(
+        request,
+        sessions.cookieName,
+        sessions.legacyCookieName,
+      );
+      if (
+        credential === undefined ||
+        !EnvironmentAuth.isBrowserCookieCredential(credential.source)
+      ) {
+        return undefined;
+      }
+      const authenticated = yield* serverAuth
+        .authenticateHttpRequest(request)
+        .pipe(Effect.orElseSucceed(() => undefined));
+      if (authenticated?.principalId === undefined) {
+        return undefined;
+      }
+      const maybePrincipal = yield* principalsRepo.value
+        .get(authenticated.principalId)
+        .pipe(Effect.orElseSucceed(() => Option.none()));
+      if (Option.isNone(maybePrincipal)) {
+        return undefined;
+      }
+      const principal = maybePrincipal.value;
+      if (principal.status !== "active" || principal.kind === "owner") {
+        return undefined;
+      }
+      return {
+        sessionId: authenticated.sessionId,
+        principal,
+      } as const;
+    });
 
     const resolveSessionActor = (session: EnvironmentAuthenticatedPrincipal["Service"]) =>
       projectAccess
@@ -366,15 +410,16 @@ export const layer = HttpApiBuilder.group(
       readonly method: "browser-session-cookie" | "bearer-access-token";
       readonly request: HttpServerRequest.HttpServerRequest;
       readonly clientMetadata: ReturnType<typeof deriveAuthClientMetadata>;
+      readonly replaceSessionId?: EnvironmentAuthenticatedPrincipal["Service"]["sessionId"];
     }) {
-      const { accepted, method, request, clientMetadata } = input;
+      const { accepted, method, request, clientMetadata, replaceSessionId } = input;
       const principalCeiling = accepted.principal.ceiling.filter(isAuthEnvironmentScope);
       let scopes: ReadonlyArray<AuthEnvironmentScope>;
       let role: ProjectRole | undefined;
       if (accepted.principal.kind === "owner") {
         scopes = AuthAdministrativeClientScopes;
         role = "owner";
-      } else if ((accepted.invitation.principalId ?? null) !== null) {
+      } else {
         const activeRoles = accepted.memberships
           .filter((membership) => membership.state === "active")
           .map((membership) => membership.role);
@@ -386,9 +431,6 @@ export const layer = HttpApiBuilder.group(
             ? intersectScopes(roleScopeUnion, principalCeiling)
             : intersectScopes(roleScopes(accepted.invitation.role), principalCeiling);
         role = highestProjectRole(activeRoles) ?? accepted.invitation.role;
-      } else {
-        scopes = intersectScopes(roleScopes(accepted.invitation.role), principalCeiling);
-        role = accepted.invitation.role;
       }
       const binding = { _tag: "principal" as const };
       const issued = yield* serverAuth
@@ -397,6 +439,7 @@ export const layer = HttpApiBuilder.group(
           binding,
           scopes,
           method,
+          ...(replaceSessionId === undefined ? {} : { replaceSessionId }),
           client: {
             ...clientMetadata,
             label: accepted.principal.displayName,
@@ -423,6 +466,7 @@ export const layer = HttpApiBuilder.group(
         binding,
         ...(role !== undefined ? { role } : {}),
         principal: accepted.principal,
+        projectId: accepted.invitation.projectId,
       } satisfies AuthInvitationSessionResult;
     });
 
@@ -760,16 +804,43 @@ export const layer = HttpApiBuilder.group(
         ),
       )
       .handle(
+        "previewInvitation",
+        Effect.fn("environment.auth.previewInvitation")(
+          function* (args) {
+            yield* annotateEnvironmentRequest(args.endpoint.name);
+            const request = yield* HttpServerRequest.HttpServerRequest;
+            const clientMetadata = deriveAuthClientMetadata({ request });
+            yield* appendCredentialResponseHeaders;
+            return yield* invitations.preview({
+              code: args.query.code,
+              ip: clientMetadata.ipAddress ?? null,
+            });
+          },
+          Effect.catchTags({
+            InvitationRateLimitedError: (error) =>
+              failTooManyRequests(error.message, error.retryAfterSeconds ?? 60),
+            InvitationInternalError: (error) => failEnvironmentInternal("internal_error", error),
+          }),
+        ),
+      )
+      .handle(
         "acceptInvitation",
         Effect.fn("environment.auth.acceptInvitation")(
           function* (args) {
             yield* annotateEnvironmentRequest(args.endpoint.name);
             const request = yield* HttpServerRequest.HttpServerRequest;
             const clientMetadata = deriveAuthClientMetadata({ request });
+            const existingMember = yield* resolveExistingMemberCookieSession(request);
             const accepted = yield* invitations.consume({
               code: args.payload.code,
-              displayName: args.payload.displayName,
+              ...(args.payload.displayName === undefined
+                ? {}
+                : { displayName: args.payload.displayName }),
+              ...(existingMember === undefined
+                ? {}
+                : { existingPrincipalId: existingMember.principal.id }),
               audit: {
+                ...(existingMember === undefined ? {} : { sessionId: existingMember.sessionId }),
                 ip: clientMetadata.ipAddress ?? null,
                 userAgent: clientMetadata.userAgent ?? null,
               },
@@ -779,11 +850,16 @@ export const layer = HttpApiBuilder.group(
               method: "browser-session-cookie",
               request,
               clientMetadata,
+              ...(existingMember === undefined
+                ? {}
+                : { replaceSessionId: existingMember.sessionId }),
             });
           },
           Effect.catchTags({
             InvitationInvalidError: (error) =>
               Effect.fail(new EnvironmentHttpBadRequestError({ message: error.message })),
+            InvitationForbiddenError: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
             InvitationExpiredError: (error) =>
               Effect.fail(new EnvironmentHttpBadRequestError({ message: error.message })),
             InvitationAlreadyUsedError: (error) =>
@@ -817,6 +893,8 @@ export const layer = HttpApiBuilder.group(
           Effect.catchTags({
             InvitationInvalidError: (error) =>
               Effect.fail(new EnvironmentHttpBadRequestError({ message: error.message })),
+            InvitationForbiddenError: (error) =>
+              Effect.fail(new EnvironmentHttpForbiddenError({ message: error.message })),
             InvitationExpiredError: (error) =>
               Effect.fail(new EnvironmentHttpBadRequestError({ message: error.message })),
             InvitationAlreadyUsedError: (error) =>
@@ -827,11 +905,47 @@ export const layer = HttpApiBuilder.group(
         ),
       )
       .handleRaw("invitePage", ({ params }) =>
-        Effect.succeed(
-          HttpServerResponse.text(renderInvitePage(params.code), {
-            status: 200,
-            contentType: "text/html; charset=utf-8",
-            headers: INVITE_PAGE_HEADERS,
+        Effect.gen(function* () {
+          const request = yield* HttpServerRequest.HttpServerRequest;
+          const clientMetadata = deriveAuthClientMetadata({ request });
+          const preview = yield* invitations.preview({
+            code: params.code,
+            ip: clientMetadata.ipAddress ?? null,
+          });
+          const existingMember = preview.valid
+            ? yield* resolveExistingMemberCookieSession(request)
+            : undefined;
+          return HttpServerResponse.text(
+            renderInvitePage({
+              code: params.code,
+              preview,
+              existingMemberName: existingMember?.principal.displayName ?? null,
+            }),
+            {
+              status: 200,
+              contentType: "text/html; charset=utf-8",
+              headers: INVITE_PAGE_HEADERS,
+            },
+          );
+        }).pipe(
+          Effect.catchTags({
+            InvitationRateLimitedError: (error) =>
+              Effect.succeed(
+                HttpServerResponse.text(error.message, {
+                  status: 429,
+                  headers: {
+                    ...INVITE_PAGE_HEADERS,
+                    "retry-after": String(Math.max(1, Math.ceil(error.retryAfterSeconds ?? 60))),
+                  },
+                }),
+              ),
+            InvitationInternalError: () =>
+              Effect.succeed(
+                HttpServerResponse.text("Failed to load invitation.", {
+                  status: 500,
+                  headers: INVITE_PAGE_HEADERS,
+                }),
+              ),
           }),
         ),
       )
@@ -850,13 +964,16 @@ export const layer = HttpApiBuilder.group(
             const actor = yield* resolveSessionActor(session);
             const createdBy = session.principalId ?? InvitationService.OWNER_PRINCIPAL_ID;
             yield* appendCredentialResponseHeaders;
-            return yield* invitations.issue({
+            const issued = yield* invitations.issue({
               ...(args.payload.kind === undefined ? {} : { kind: args.payload.kind }),
               role: args.payload.role,
               projectId: args.payload.projectId,
               ...(args.payload.crmClientId === undefined
                 ? {}
                 : { crmClientId: args.payload.crmClientId }),
+              ...(args.payload.expiresInHours === undefined
+                ? {}
+                : { ttl: Duration.hours(args.payload.expiresInHours) }),
               createdBy,
               actor,
               audit: {
@@ -865,6 +982,22 @@ export const layer = HttpApiBuilder.group(
                 userAgent: clientMetadata.userAgent ?? null,
               },
             });
+            let multiUserEnabled: boolean | undefined;
+            if (actor.isOwner && Option.isSome(serverSettings)) {
+              const currentSettings = yield* serverSettings.value.getSettings.pipe(
+                Effect.catch((error) => failEnvironmentInternal("internal_error", error)),
+              );
+              if (currentSettings.multiUser !== true) {
+                yield* serverSettings.value
+                  .updateSettings({ multiUser: true })
+                  .pipe(Effect.catch((error) => failEnvironmentInternal("internal_error", error)));
+                multiUserEnabled = true;
+              }
+            }
+            return {
+              ...issued,
+              ...(multiUserEnabled === true ? { multiUserEnabled: true } : {}),
+            };
           },
           Effect.catchTags({
             InvitationForbiddenError: (error) =>

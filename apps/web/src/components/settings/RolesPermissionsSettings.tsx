@@ -2,6 +2,7 @@ import { useAtomValue } from "@effect/atom-react";
 import { EnvironmentId, type MemberWithMemberships, type ProjectRole } from "@t3tools/contracts";
 import { Link, useSearch } from "@tanstack/react-router";
 import { CheckIcon, MinusIcon, ShieldAlertIcon } from "lucide-react";
+import { Fragment } from "react";
 import { T, useGT, useMessages } from "gt-react";
 
 import { useSyncAccessRevision } from "../../state/accessRevision";
@@ -12,6 +13,7 @@ import { Alert, AlertDescription } from "../ui/alert";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "../ui/table";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { ITEM_ROW_CLASSNAME } from "./itemRows";
 import { isSessionOwner, PROJECT_ROLE_LABELS } from "./MembersSettings.logic";
 import {
@@ -42,12 +44,6 @@ function RolesPermissionsView({
       <SettingsSection
         id="roles-permissions"
         title={gt("Roles & permissions")}
-        titleAction={
-          <Badge variant="warning" size="sm">
-            <ShieldAlertIcon aria-hidden />
-            <T>L0 · Terminal sees host</T>
-          </Badge>
-        }
         headerAction={
           <div className="flex flex-wrap items-center gap-1.5">
             <Button size="xs" variant="outline" render={<Link to="/settings/my-access" />}>
@@ -59,17 +55,15 @@ function RolesPermissionsView({
           </div>
         }
       >
-        <div className="px-3 py-2.5 sm:px-4">
-          <Alert variant="warning">
-            <ShieldAlertIcon aria-hidden />
-            <AlertDescription>
-              <T>
-                Host boundary (L0): terminal and agent processes run under this machine&apos;s OS
-                user and see the host. Project roles enforce logical isolation inside V3 Code.
-              </T>
-            </AlertDescription>
-          </Alert>
-        </div>
+        <p className="flex items-center gap-1.5 px-3 py-2 text-xs text-warning sm:px-4">
+          <ShieldAlertIcon aria-hidden className="size-3.5 shrink-0" />
+          <span>
+            <T>
+              L0 host isolation: terminal and agent processes run under this machine&apos;s OS user
+              and can see the host.
+            </T>
+          </span>
+        </p>
 
         {membersError ? (
           <div className="px-3 py-2 sm:px-4">
@@ -111,42 +105,62 @@ function RolesPermissionsView({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {matrix.rows.map((row) => (
-                  <TableRow key={row.capability}>
-                    <TableCell>
-                      <div className="flex flex-col gap-0.5 py-0.5">
-                        <span className="font-medium text-foreground">{row.label}</span>
-                        <code className="font-mono text-2xs text-muted-foreground">
-                          {row.capability}
-                        </code>
-                      </div>
-                    </TableCell>
-                    {matrix.roles.map((role) => {
-                      const allowed = row.roles[role];
-                      return (
-                        <TableCell key={role}>
-                          <div className="flex items-center justify-center">
-                            {allowed ? (
-                              <>
-                                <CheckIcon aria-hidden className="size-4 text-success" />
-                                <span className="sr-only">
-                                  {gt("Allowed", { $context: "permission state" })}
-                                </span>
-                              </>
-                            ) : (
-                              <>
-                                <MinusIcon
-                                  aria-hidden
-                                  className="size-3.5 text-muted-foreground/40"
+                {matrix.sections.map((section) => (
+                  <Fragment key={section.id}>
+                    <TableRow>
+                      <TableCell colSpan={matrix.roles.length + 1}>
+                        <span className="text-2xs font-semibold tracking-wide text-muted-foreground uppercase">
+                          {section.label}
+                        </span>
+                      </TableCell>
+                    </TableRow>
+                    {section.rows.map((row) => (
+                      <TableRow key={row.capability}>
+                        <TableCell>
+                          <Tooltip>
+                            <TooltipTrigger
+                              render={
+                                <span
+                                  tabIndex={0}
+                                  className="inline-block cursor-help py-0.5 font-medium text-foreground underline decoration-border/70 decoration-dotted underline-offset-4 outline-none focus-visible:text-primary"
                                 />
-                                <span className="sr-only">{gt("Not granted")}</span>
-                              </>
-                            )}
-                          </div>
+                              }
+                            >
+                              {row.label}
+                            </TooltipTrigger>
+                            <TooltipPopup side="right">
+                              <code className="font-mono text-xs">{row.capability}</code>
+                            </TooltipPopup>
+                          </Tooltip>
                         </TableCell>
-                      );
-                    })}
-                  </TableRow>
+                        {matrix.roles.map((role) => {
+                          const allowed = row.roles[role];
+                          return (
+                            <TableCell key={role}>
+                              <div className="flex items-center justify-center">
+                                {allowed ? (
+                                  <>
+                                    <CheckIcon aria-hidden className="size-4 text-success" />
+                                    <span className="sr-only">
+                                      {gt("Allowed", { $context: "permission state" })}
+                                    </span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <MinusIcon
+                                      aria-hidden
+                                      className="size-3.5 text-muted-foreground/40"
+                                    />
+                                    <span className="sr-only">{gt("Not granted")}</span>
+                                  </>
+                                )}
+                              </div>
+                            </TableCell>
+                          );
+                        })}
+                      </TableRow>
+                    ))}
+                  </Fragment>
                 ))}
               </TableBody>
             </Table>
@@ -155,20 +169,6 @@ function RolesPermissionsView({
       </SettingsSection>
 
       <SettingsSection title={gt("Key rules & boundaries")}>
-        <SettingsRow
-          title={
-            <span className="inline-flex flex-wrap items-center gap-2">
-              <T>L0 host isolation</T>
-              <Badge variant="warning" size="sm">
-                <ShieldAlertIcon aria-hidden />
-                <T>L0 · Terminal sees host</T>
-              </Badge>
-            </span>
-          }
-          description={gt(
-            "Members with terminal or agent capabilities run processes under the host OS user and can see the host filesystem and environment.",
-          )}
-        />
         <SettingsRow
           title={gt("Owner bypasses project checks")}
           description={gt(

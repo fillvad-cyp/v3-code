@@ -297,7 +297,7 @@ function setup(
 }
 
 describe("RolesPermissionsPage browser rendering", () => {
-  it("renders the contract capability matrix, L0 badge, rules notes, and current role highlight", async () => {
+  it("renders the grouped capability matrix with plain labels, single L0 warning, rules notes, and current role highlight", async () => {
     setup();
     await using _screen = await render(
       <RegistryContext.Provider value={appAtomRegistry}>
@@ -306,14 +306,26 @@ describe("RolesPermissionsPage browser rendering", () => {
       { router: "/settings/roles" },
     );
 
-    await expect.element(page.getByRole("table", { name: "Role capability matrix" })).toBeVisible();
+    const table = page.getByRole("table", { name: "Role capability matrix" });
+    await expect.element(table).toBeVisible();
     for (const column of ["Viewer", "Operator", "Developer", "Manager", "Admin", "Owner"]) {
       await expect
         .element(page.getByRole("columnheader", { name: new RegExp(column) }))
         .toBeVisible();
     }
 
-    await expect.element(page.getByText("L0 · Terminal sees host").first()).toBeVisible();
+    for (const heading of ["Reading", "Code & agents", "Project management", "CRM"]) {
+      await expect.element(page.getByText(heading, { exact: true })).toBeVisible();
+    }
+
+    // Raw project:* codes are moved into tooltips instead of rendered inline in table cells.
+    expect(page.getByText("project:read", { exact: true }).query()).toBeNull();
+    expect(page.getByText("project:terminal.operate", { exact: true }).query()).toBeNull();
+
+    // Single compact L0 warning line instead of repeated badges/banners.
+    expect(page.getByText(/L0 host isolation:/).elements()).toHaveLength(1);
+    expect(page.getByText("L0 · Terminal sees host").query()).toBeNull();
+
     await expect.element(page.getByText("Owner bypasses project checks")).toBeVisible();
     await expect.element(page.getByText("Creating a project: developer+")).toBeVisible();
     await expect.element(page.getByText("Deleting a project: owner only")).toBeVisible();

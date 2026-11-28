@@ -1,10 +1,12 @@
 import { errorDisplayMessage, thrownErrorMessage } from "@t3tools/client-runtime/errors";
 import {
+  type AdvertisedEndpoint,
   AuthAccessWriteScope,
   AuthEnvironmentMaintainScope,
   AuthEnvironmentScope,
   type AuthSessionState,
   type ExecutionEnvironmentCapabilities,
+  type Invitation,
   type MemberWithMemberships,
   type MembershipState,
   type Principal,
@@ -13,6 +15,7 @@ import {
   type ProjectId,
   type ProjectMembership,
   type ProjectRole,
+  type ServerDirectEndpoint,
   boundProjectRole,
   ceilingScopes,
   passesProjectChecks,
@@ -24,7 +27,9 @@ import {
 import * as Schema from "effect/Schema";
 import { msg } from "gt-react";
 
+import { isLoopbackHostname } from "~/environments/primary";
 import { m, type MessageResolver } from "../../i18n/messages";
+import { selectPairingEndpoint } from "./ConnectionsSettings.logic";
 
 export const ASSIGNABLE_PROJECT_ROLES = [
   "viewer",
@@ -35,6 +40,74 @@ export const ASSIGNABLE_PROJECT_ROLES = [
 ] as const satisfies ReadonlyArray<Exclude<ProjectRole, "owner">>;
 
 export type AssignableProjectRole = (typeof ASSIGNABLE_PROJECT_ROLES)[number];
+
+const PRIMARY_INVITE_ROLES = [
+  "viewer",
+  "developer",
+  "admin",
+] as const satisfies ReadonlyArray<AssignableProjectRole>;
+
+const MORE_INVITE_ROLES = [
+  "operator",
+  "manager",
+] as const satisfies ReadonlyArray<AssignableProjectRole>;
+
+export const PROJECT_ROLE_DESCRIPTIONS: Readonly<Record<AssignableProjectRole, string>> = {
+  viewer: msg("Read-only access"),
+  developer: msg("Code, terminal, and agents"),
+  admin: msg("Members and project settings"),
+  operator: msg("Run agents, terminal, and previews"),
+  manager: msg("Operate threads and manage CRM clients"),
+};
+
+export const INVITATION_EXPIRY_OPTIONS = [
+  { hours: 24, label: msg("24 hours") },
+  { hours: 168, label: msg("7 days") },
+  { hours: 720, label: msg("30 days") },
+] as const;
+
+export type InvitationExpiryHours = (typeof INVITATION_EXPIRY_OPTIONS)[number]["hours"];
+export const DEFAULT_INVITATION_EXPIRES_IN_HOURS: InvitationExpiryHours = 168;
+
+export function isInvitationExpiryHours(value: number): value is InvitationExpiryHours {
+  return value === 24 || value === 168 || value === 720;
+}
+
+export function partitionInviteRoles(
+  grantableRoles: ReadonlyArray<AssignableProjectRole>,
+  crmConfigured: boolean,
+): {
+  readonly primaryRoles: ReadonlyArray<AssignableProjectRole>;
+  readonly moreRoles: ReadonlyArray<AssignableProjectRole>;
+  readonly allRoles: ReadonlyArray<AssignableProjectRole>;
+} {
+  const primaryRoles = PRIMARY_INVITE_ROLES.filter((role) => grantableRoles.includes(role));
+  const moreRoles = MORE_INVITE_ROLES.filter(
+    (role) => grantableRoles.includes(role) && (role !== "manager" || crmConfigured),
+  );
+  return {
+    primaryRoles,
+    moreRoles,
+    allRoles: [...primaryRoles, ...moreRoles],
+  };
+}
+
+export function pendingInvitationsList(
+  invitations: ReadonlyArray<Invitation>,
+  nowMs?: number,
+): ReadonlyArray<Invitation> {
+  return invitations
+    .filter((invitation) => {
+      if (invitation.principalId != null) return false;
+      if (invitation.acceptedAt !== null || invitation.revokedAt !== null) return false;
+      if (nowMs !== undefined) {
+        const expiresAtMs = Date.parse(invitation.expiresAt);
+        if (Number.isFinite(expiresAtMs) && expiresAtMs <= nowMs) return false;
+      }
+      return true;
+    })
+    .toSorted((left, right) => Date.parse(right.createdAt) - Date.parse(left.createdAt));
+}
 
 export const CEILING_TEMPLATES = [
   "staff",
@@ -327,6 +400,118 @@ export function buildInviteAcceptUrl(
   } catch {
     return path;
   }
+}
+
+function parseHttpBaseUrl(value: string | null | undefined): URL | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "http:" || parsed.protocol === "https:" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function isNonLoopbackHttpUrl(value: string | null | undefined): boolean {
+  const parsed = parseHttpBaseUrl(value);
+  return parsed !== null && !isLoopbackHostname(parsed.hostname);
+}
+
+export interface ResolvedInviteAcceptLink {
+  readonly url: string;
+  readonly isLoopbackOnly: boolean;
+  readonly endpointLabel: string | null;
+}
+
+/**
+ * Resolves the best shareable `/invite/<code>` URL, preferring reachable advertised endpoints
+ * (matching pairing links) before falling back to direct endpoints, the prepared base URL, or
+ * the current origin. Flags loopback-only URLs so the UI can warn the owner.
+ */
+export function resolveInviteAcceptLink(input: {
+  readonly code: string;
+  readonly advertisedEndpoints?: ReadonlyArray<AdvertisedEndpoint> | undefined;
+  readonly defaultAdvertisedEndpointKey?: string | null | undefined;
+  readonly desktopEndpointUrl?: string | null | undefined;
+  readonly directEndpoints?: ReadonlyArray<ServerDirectEndpoint> | undefined;
+  readonly httpBaseUrl?: string | null | undefined;
+  readonly fallbackOrigin?: string | undefined;
+}): ResolvedInviteAcceptLink {
+  const { code } = input;
+  const nonLoopbackAdvertised = (input.advertisedEndpoints ?? []).filter(
+    (endpoint) =>
+      endpoint.status !== "unavailable" &&
+      endpoint.reachability !== "loopback" &&
+      isNonLoopbackHttpUrl(endpoint.httpBaseUrl),
+  );
+  const selectedAdvertised = selectPairingEndpoint(
+    nonLoopbackAdvertised,
+    input.defaultAdvertisedEndpointKey,
+  );
+  if (selectedAdvertised !== null) {
+    return {
+      url: buildInviteAcceptUrl(selectedAdvertised.httpBaseUrl, code),
+      isLoopbackOnly: false,
+      endpointLabel: selectedAdvertised.label,
+    };
+  }
+
+  if (isNonLoopbackHttpUrl(input.desktopEndpointUrl)) {
+    return {
+      url: buildInviteAcceptUrl(input.desktopEndpointUrl, code),
+      isLoopbackOnly: false,
+      endpointLabel: null,
+    };
+  }
+
+  const nonLoopbackDirect = (input.directEndpoints ?? []).filter((endpoint) =>
+    isNonLoopbackHttpUrl(endpoint.httpBaseUrl),
+  );
+  const preferredDirect =
+    nonLoopbackDirect.find(
+      (endpoint) => endpoint.kind === "tailnet" && endpoint.httpBaseUrl.startsWith("https://"),
+    ) ??
+    nonLoopbackDirect.find((endpoint) => endpoint.kind === "tailnet") ??
+    nonLoopbackDirect[0] ??
+    null;
+  if (preferredDirect !== null) {
+    return {
+      url: buildInviteAcceptUrl(preferredDirect.httpBaseUrl, code),
+      isLoopbackOnly: false,
+      endpointLabel: null,
+    };
+  }
+
+  if (isNonLoopbackHttpUrl(input.httpBaseUrl)) {
+    return {
+      url: buildInviteAcceptUrl(input.httpBaseUrl, code),
+      isLoopbackOnly: false,
+      endpointLabel: null,
+    };
+  }
+
+  if (isNonLoopbackHttpUrl(input.fallbackOrigin)) {
+    return {
+      url: buildInviteAcceptUrl(input.fallbackOrigin, code),
+      isLoopbackOnly: false,
+      endpointLabel: null,
+    };
+  }
+
+  const loopbackAdvertised = (input.advertisedEndpoints ?? []).find(
+    (endpoint) =>
+      endpoint.status !== "unavailable" && parseHttpBaseUrl(endpoint.httpBaseUrl) !== null,
+  );
+  const fallbackBase =
+    (parseHttpBaseUrl(input.httpBaseUrl) !== null ? input.httpBaseUrl : null) ??
+    loopbackAdvertised?.httpBaseUrl ??
+    (parseHttpBaseUrl(input.fallbackOrigin) !== null ? input.fallbackOrigin : null);
+  return {
+    url: buildInviteAcceptUrl(fallbackBase, code),
+    isLoopbackOnly: true,
+    endpointLabel: loopbackAdvertised?.label ?? null,
+  };
 }
 
 export function formatMembershipErrorMessage(error: unknown, resolve: MessageResolver = m): string {

@@ -1,4 +1,5 @@
 import {
+  type AdvertisedEndpoint,
   type EnvironmentId,
   type InvitationCreateResult,
   type ProjectId,
@@ -7,17 +8,23 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { CheckIcon, CopyIcon } from "lucide-react";
+import { CheckIcon, ChevronRightIcon, CopyIcon, TriangleAlertIcon } from "lucide-react";
 import { useState } from "react";
 import { T, useGT, useMessages, Var } from "gt-react";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { useNowSecond } from "../../hooks/useNowSecond";
 import { m as resolveMessage } from "../../i18n/messages";
+import { cn } from "../../lib/utils";
+import { appAtomRegistry } from "../../rpc/atomRegistry";
 import { authEnvironment } from "../../state/auth";
-import { usePreparedConnection } from "../../state/session";
+import { desktopNetworkAccessStateAtom } from "../../state/desktopNetworkAccess";
+import { useEnvironment, usePrimaryEnvironmentId } from "../../state/environments";
+import { useEnvironmentQuery } from "../../state/query";
+import { environmentSession, usePreparedConnection } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { formatExpiresInLabel } from "../../timestampFormat";
+import { useUiStateStore } from "../../uiStateStore";
 import { Alert, AlertDescription } from "../ui/alert";
 import { Button } from "../ui/button";
 import {
@@ -32,17 +39,23 @@ import {
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { Textarea } from "../ui/textarea";
 import { stackedThreadToast, toastManager } from "../ui/toast";
-import { formatAccessTimestamp } from "./ConnectionsSettings.logic";
+import { formatAccessTimestamp, isTailscaleHttpsEndpoint } from "./ConnectionsSettings.logic";
 import {
-  buildInviteAcceptUrl,
-  formatMembershipErrorMessage,
-  isAssignableProjectRole,
+  DEFAULT_INVITATION_EXPIRES_IN_HOURS,
+  INVITATION_EXPIRY_OPTIONS,
+  PROJECT_ROLE_DESCRIPTIONS,
   PROJECT_ROLE_LABELS,
+  formatMembershipErrorMessage,
+  isInvitationExpiryHours,
+  partitionInviteRoles,
+  resolveInviteAcceptLink,
   validateInviteForm,
   type AssignableProjectRole,
+  type InvitationExpiryHours,
 } from "./MembersSettings.logic";
 
 const ENVIRONMENT_SCOPE_VALUE = "__environment__";
+const EMPTY_ADVERTISED_ENDPOINTS: ReadonlyArray<AdvertisedEndpoint> = [];
 
 export interface InviteProjectOption {
   readonly id: ProjectId;
@@ -57,14 +70,15 @@ export interface MemberInviteDialogProps {
   readonly grantableRoles: ReadonlyArray<AssignableProjectRole>;
   readonly fixedProject?: InviteProjectOption | null;
   readonly projects?: ReadonlyArray<InviteProjectOption>;
+  readonly crmEnabled?: boolean;
   readonly onInvited?: () => void;
 }
 
 function defaultInviteRole(
-  grantableRoles: ReadonlyArray<AssignableProjectRole>,
+  availableRoles: ReadonlyArray<AssignableProjectRole>,
 ): AssignableProjectRole | null {
-  if (grantableRoles.includes("developer")) return "developer";
-  return grantableRoles[0] ?? null;
+  if (availableRoles.includes("developer")) return "developer";
+  return availableRoles[0] ?? null;
 }
 
 export function MemberInviteDialog({
@@ -75,22 +89,42 @@ export function MemberInviteDialog({
   grantableRoles,
   fixedProject = null,
   projects = [],
+  crmEnabled,
   onInvited,
 }: MemberInviteDialogProps) {
   const gt = useGT();
   const m = useMessages();
   const nowMs = useNowSecond();
   const prepared = usePreparedConnection(environmentId);
+  const environment = useEnvironment(environmentId);
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const desktopBridge = typeof window !== "undefined" ? window.desktopBridge : undefined;
+  const isPrimary = primaryEnvironmentId !== null && primaryEnvironmentId === environmentId;
+  const defaultAdvertisedEndpointKey = useUiStateStore(
+    (state) => state.defaultAdvertisedEndpointKey,
+  );
+  const desktopNetworkAccess = useEnvironmentQuery(
+    open && isPrimary && desktopBridge ? desktopNetworkAccessStateAtom : null,
+    m,
+  );
   const createInvitation = useAtomCommand(authEnvironment.createInvitation, {
     reportFailure: false,
   });
 
+  const crmConfigured =
+    crmEnabled ?? environment?.serverConfig?.environment.capabilities.crm === true;
+  const { primaryRoles, moreRoles, allRoles } = partitionInviteRoles(grantableRoles, crmConfigured);
+
   const [selectedRole, setSelectedRole] = useState<AssignableProjectRole | null>(() =>
-    defaultInviteRole(grantableRoles),
+    defaultInviteRole(allRoles),
   );
-  const [selectedProjectValue, setSelectedProjectValue] = useState<string>(
-    fixedProject ? fixedProject.id : ENVIRONMENT_SCOPE_VALUE,
+  const [selectedProjectValue, setSelectedProjectValue] = useState<string | null>(
+    fixedProject ? fixedProject.id : null,
   );
+  const [expiresInHours, setExpiresInHours] = useState<InvitationExpiryHours>(
+    DEFAULT_INVITATION_EXPIRES_IN_HOURS,
+  );
+  const [moreRolesExpanded, setMoreRolesExpanded] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [created, setCreated] = useState<InvitationCreateResult | null>(null);
@@ -98,20 +132,52 @@ export function MemberInviteDialog({
   const [manualCopyValue, setManualCopyValue] = useState<string | null>(null);
 
   const effectiveRole: AssignableProjectRole | null =
-    selectedRole !== null && grantableRoles.includes(selectedRole)
+    selectedRole !== null && allRoles.includes(selectedRole)
       ? selectedRole
-      : defaultInviteRole(grantableRoles);
+      : defaultInviteRole(allRoles);
+
+  const isMoreRolesOpen =
+    moreRolesExpanded || (effectiveRole !== null && moreRoles.includes(effectiveRole));
+
+  const resolvedProjectValue: string =
+    fixedProject !== null
+      ? fixedProject.id
+      : (selectedProjectValue ?? projects[0]?.id ?? (isOwner ? ENVIRONMENT_SCOPE_VALUE : ""));
 
   const effectiveProjectId: ProjectId | null =
     fixedProject !== null
       ? fixedProject.id
-      : selectedProjectValue === ENVIRONMENT_SCOPE_VALUE
+      : resolvedProjectValue === ENVIRONMENT_SCOPE_VALUE || resolvedProjectValue.length === 0
         ? null
-        : (projects.find((project) => project.id === selectedProjectValue)?.id ?? null);
+        : (projects.find((project) => project.id === resolvedProjectValue)?.id ?? null);
+
+  const desktopExposure = desktopNetworkAccess.data?.serverExposureState ?? null;
+  const desktopAdvertisedEndpoints =
+    desktopNetworkAccess.data?.advertisedEndpoints ?? EMPTY_ADVERTISED_ENDPOINTS;
+  const tailscaleHttpsEndpoint = desktopAdvertisedEndpoints.find(isTailscaleHttpsEndpoint) ?? null;
+  const visibleDesktopNetworkEndpoints =
+    desktopExposure?.mode === "network-accessible"
+      ? desktopAdvertisedEndpoints.filter((endpoint) => !isTailscaleHttpsEndpoint(endpoint))
+      : [];
+  const visibleDesktopAdvertisedEndpoints = tailscaleHttpsEndpoint
+    ? [...visibleDesktopNetworkEndpoints, tailscaleHttpsEndpoint]
+    : visibleDesktopNetworkEndpoints;
 
   const httpBaseUrl = prepared._tag === "Some" ? prepared.value.httpBaseUrl : null;
   const fallbackOrigin = typeof window !== "undefined" ? window.location.origin : undefined;
-  const acceptUrl = created ? buildInviteAcceptUrl(httpBaseUrl, created.code, fallbackOrigin) : "";
+  const resolvedLink = created
+    ? resolveInviteAcceptLink({
+        code: created.code,
+        advertisedEndpoints: visibleDesktopAdvertisedEndpoints,
+        defaultAdvertisedEndpointKey,
+        desktopEndpointUrl:
+          desktopExposure?.mode === "network-accessible" ? desktopExposure.endpointUrl : null,
+        directEndpoints: environment?.serverConfig?.directEndpoints,
+        httpBaseUrl,
+        fallbackOrigin,
+      })
+    : null;
+  const acceptUrl = resolvedLink?.url ?? "";
 
   const { copyToClipboard } = useCopyToClipboard<{
     readonly target: "code" | "link";
@@ -137,8 +203,10 @@ export function MemberInviteDialog({
   });
 
   const resetDialogState = () => {
-    setSelectedRole(defaultInviteRole(grantableRoles));
-    setSelectedProjectValue(fixedProject ? fixedProject.id : ENVIRONMENT_SCOPE_VALUE);
+    setSelectedRole(defaultInviteRole(allRoles));
+    setSelectedProjectValue(fixedProject ? fixedProject.id : null);
+    setExpiresInHours(DEFAULT_INVITATION_EXPIRES_IN_HOURS);
+    setMoreRolesExpanded(false);
     setErrorMessage(null);
     setCreated(null);
     setCopiedTarget(null);
@@ -160,7 +228,7 @@ export function MemberInviteDialog({
         role: effectiveRole,
         projectId: effectiveProjectId,
         isOwner,
-        grantableRoles,
+        grantableRoles: allRoles,
       },
       resolveMessage,
     );
@@ -177,12 +245,16 @@ export function MemberInviteDialog({
         kind: "staff",
         role: validation.role,
         projectId: validation.projectId,
+        expiresInHours,
       },
     });
     setIsSubmitting(false);
 
     if (result._tag === "Success") {
       setCreated(result.value);
+      if (result.value.multiUserEnabled === true) {
+        appAtomRegistry.refresh(environmentSession.sessionStateAtom(environmentId));
+      }
       onInvited?.();
       return;
     }
@@ -194,30 +266,111 @@ export function MemberInviteDialog({
   };
 
   const selectedProjectLabel =
-    selectedProjectValue === ENVIRONMENT_SCOPE_VALUE
-      ? gt("Environment-wide (no project assigned)")
-      : (projects.find((project) => project.id === selectedProjectValue)?.label ??
+    resolvedProjectValue === ENVIRONMENT_SCOPE_VALUE
+      ? gt("Environment-wide (advanced: no project assigned)")
+      : (projects.find((project) => project.id === resolvedProjectValue)?.label ??
         gt("Choose a project"));
+
+  const createdProjectLabel = created
+    ? created.invitation.projectId === null
+      ? gt("Environment-wide")
+      : fixedProject && fixedProject.id === created.invitation.projectId
+        ? fixedProject.label
+        : (projects.find((project) => project.id === created.invitation.projectId)?.label ??
+          created.invitation.projectId)
+    : null;
+
+  const selectedExpiryOption =
+    INVITATION_EXPIRY_OPTIONS.find((option) => option.hours === expiresInHours) ??
+    INVITATION_EXPIRY_OPTIONS[1];
+
+  const renderRoleOption = (role: AssignableProjectRole) => {
+    const isSelected = effectiveRole === role;
+    return (
+      <button
+        key={role}
+        type="button"
+        role="radio"
+        aria-checked={isSelected}
+        disabled={isSubmitting}
+        onClick={() => {
+          setSelectedRole(role);
+          setErrorMessage(null);
+        }}
+        className={cn(
+          "flex w-full items-start justify-between gap-3 rounded-lg border px-3 py-2 text-left transition-colors outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring disabled:opacity-60",
+          isSelected ? "border-foreground/60 bg-muted/40" : "border-border/60 hover:bg-muted/20",
+        )}
+      >
+        <span className="min-w-0 space-y-0.5">
+          <span className="block text-xs font-medium text-foreground">
+            {m(PROJECT_ROLE_LABELS[role])}
+          </span>
+          <span className="block text-xs text-muted-foreground">
+            {m(PROJECT_ROLE_DESCRIPTIONS[role])}
+          </span>
+        </span>
+        {isSelected ? (
+          <CheckIcon aria-hidden className="mt-0.5 size-3.5 shrink-0 text-foreground" />
+        ) : null}
+      </button>
+    );
+  };
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogPopup className="max-w-md">
         <DialogHeader>
-          <DialogTitle>{created ? gt("Invitation created") : gt("Invite member")}</DialogTitle>
+          <DialogTitle>{created ? gt("Invite link ready") : gt("Invite member")}</DialogTitle>
           <DialogDescription>
             {created
-              ? gt("Share this one-time code or link. It can only be used once.")
+              ? gt("Share this one-time link or code. It can only be used once.")
               : fixedProject
-                ? gt("Create a one-time invitation code for {project}.", {
+                ? gt("Create a one-time invite link for {project}.", {
                     project: fixedProject.label,
                   })
-                : gt("Create a one-time invitation code for this environment.")}
+                : gt("Create a one-time invite link that grants access to one project.")}
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
           <div className="space-y-4">
             {created ? (
               <>
+                <div className="space-y-1.5">
+                  <p className="text-xs font-medium text-foreground">
+                    <T>Invite link</T>
+                  </p>
+                  <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2">
+                    <code className="min-w-0 flex-1 truncate font-mono text-xs text-foreground">
+                      {acceptUrl}
+                    </code>
+                    <Button
+                      size="xs"
+                      variant="default"
+                      type="button"
+                      onClick={() =>
+                        copyToClipboard(acceptUrl, { target: "link", value: acceptUrl })
+                      }
+                    >
+                      {copiedTarget === "link" ? <CheckIcon /> : <CopyIcon />}
+                      {copiedTarget === "link" ? gt("Copied") : gt("Copy link")}
+                    </Button>
+                  </div>
+                </div>
+
+                {resolvedLink?.isLoopbackOnly ? (
+                  <Alert variant="warning">
+                    <TriangleAlertIcon aria-hidden />
+                    <AlertDescription>
+                      <T>
+                        Only a local address (127.0.0.1) is available. Other devices cannot open
+                        this link until you enable Network access or Tailscale HTTPS in Sharing
+                        &amp; access.
+                      </T>
+                    </AlertDescription>
+                  </Alert>
+                ) : null}
+
                 <div className="space-y-1.5">
                   <p className="text-xs font-medium text-foreground">
                     <T>Invitation code</T>
@@ -240,28 +393,6 @@ export function MemberInviteDialog({
                   </div>
                 </div>
 
-                <div className="space-y-1.5">
-                  <p className="text-xs font-medium text-foreground">
-                    <T>Accept link</T>
-                  </p>
-                  <div className="flex items-center gap-2 rounded-lg border border-border/60 bg-muted/30 px-3 py-2">
-                    <code className="min-w-0 flex-1 truncate font-mono text-xs text-muted-foreground">
-                      {acceptUrl}
-                    </code>
-                    <Button
-                      size="xs"
-                      variant="outline"
-                      type="button"
-                      onClick={() =>
-                        copyToClipboard(acceptUrl, { target: "link", value: acceptUrl })
-                      }
-                    >
-                      {copiedTarget === "link" ? <CheckIcon /> : <CopyIcon />}
-                      {copiedTarget === "link" ? gt("Copied") : gt("Copy link")}
-                    </Button>
-                  </div>
-                </div>
-
                 {manualCopyValue !== null ? (
                   <div className="space-y-1">
                     <p className="text-xs text-muted-foreground">
@@ -279,6 +410,11 @@ export function MemberInviteDialog({
 
                 <p className="text-xs text-muted-foreground">
                   <T>
+                    Project:{" "}
+                    <strong className="font-medium text-foreground">
+                      <Var>{createdProjectLabel}</Var>
+                    </strong>
+                    {" · "}
                     Role:{" "}
                     <strong className="font-medium text-foreground">
                       <Var>{m(PROJECT_ROLE_LABELS[created.invitation.role])}</Var>
@@ -291,13 +427,13 @@ export function MemberInviteDialog({
               </>
             ) : (
               <>
-                {fixedProject === null && isOwner ? (
+                {fixedProject === null && (projects.length > 0 || isOwner) ? (
                   <div className="space-y-1.5">
                     <span className="block text-xs font-medium text-foreground">
-                      <T>Project scope</T>
+                      <T>Project</T>
                     </span>
                     <Select
-                      value={selectedProjectValue}
+                      value={resolvedProjectValue}
                       onValueChange={(value) => {
                         if (typeof value === "string") {
                           setSelectedProjectValue(value);
@@ -307,20 +443,24 @@ export function MemberInviteDialog({
                     >
                       <SelectTrigger
                         size="sm"
-                        aria-label={gt("Invitation project scope")}
+                        aria-label={gt("Invitation project")}
                         disabled={isSubmitting}
                       >
                         <SelectValue>{selectedProjectLabel}</SelectValue>
                       </SelectTrigger>
                       <SelectPopup align="start" alignItemWithTrigger={false}>
-                        <SelectItem hideIndicator value={ENVIRONMENT_SCOPE_VALUE}>
-                          <T>Environment-wide (no project assigned)</T>
-                        </SelectItem>
                         {projects.map((project) => (
                           <SelectItem hideIndicator key={project.id} value={project.id}>
                             {project.label}
                           </SelectItem>
                         ))}
+                        {isOwner ? (
+                          <SelectItem hideIndicator value={ENVIRONMENT_SCOPE_VALUE}>
+                            <span className="text-muted-foreground">
+                              <T>Environment-wide (advanced: no project assigned)</T>
+                            </span>
+                          </SelectItem>
+                        ) : null}
                       </SelectPopup>
                     </Select>
                   </div>
@@ -330,46 +470,75 @@ export function MemberInviteDialog({
                   <span className="block text-xs font-medium text-foreground">
                     <T>Role</T>
                   </span>
-                  {grantableRoles.length === 0 ? (
+                  {allRoles.length === 0 ? (
                     <p className="text-xs text-muted-foreground">
                       <T>Your current permissions do not allow inviting new members.</T>
                     </p>
                   ) : (
-                    <Select
-                      value={effectiveRole ?? ""}
-                      onValueChange={(value) => {
-                        if (isAssignableProjectRole(value)) {
-                          setSelectedRole(value);
-                          setErrorMessage(null);
-                        }
-                      }}
-                    >
-                      <SelectTrigger
-                        size="sm"
-                        aria-label={gt("Invitation role")}
-                        disabled={isSubmitting}
-                      >
-                        <SelectValue>
-                          {effectiveRole
-                            ? m(PROJECT_ROLE_LABELS[effectiveRole])
-                            : gt("Choose role")}
-                        </SelectValue>
-                      </SelectTrigger>
-                      <SelectPopup align="start" alignItemWithTrigger={false}>
-                        {grantableRoles.map((role) => (
-                          <SelectItem hideIndicator key={role} value={role}>
-                            {m(PROJECT_ROLE_LABELS[role])}
-                          </SelectItem>
-                        ))}
-                      </SelectPopup>
-                    </Select>
+                    <div className="space-y-2" role="radiogroup" aria-label={gt("Invitation role")}>
+                      {primaryRoles.map(renderRoleOption)}
+                      {moreRoles.length > 0 ? (
+                        <div className="space-y-2 pt-0.5">
+                          <button
+                            type="button"
+                            aria-expanded={isMoreRolesOpen}
+                            disabled={isSubmitting}
+                            onClick={() => setMoreRolesExpanded((current) => !current)}
+                            className="inline-flex items-center gap-1 rounded-md text-xs font-medium text-muted-foreground transition-colors hover:text-foreground outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+                          >
+                            <ChevronRightIcon
+                              aria-hidden
+                              className={cn(
+                                "size-3.5 transition-transform duration-150 motion-reduce:transition-none",
+                                isMoreRolesOpen && "rotate-90",
+                              )}
+                            />
+                            <T>More roles</T>
+                          </button>
+                          {isMoreRolesOpen ? (
+                            <div className="space-y-2">{moreRoles.map(renderRoleOption)}</div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                    </div>
                   )}
+                </div>
+
+                <div className="space-y-1.5">
+                  <span className="block text-xs font-medium text-foreground">
+                    <T>Expires in</T>
+                  </span>
+                  <Select
+                    value={String(expiresInHours)}
+                    onValueChange={(value) => {
+                      const parsed = Number(value);
+                      if (isInvitationExpiryHours(parsed)) {
+                        setExpiresInHours(parsed);
+                        setErrorMessage(null);
+                      }
+                    }}
+                  >
+                    <SelectTrigger
+                      size="sm"
+                      aria-label={gt("Invitation expiration")}
+                      disabled={isSubmitting}
+                    >
+                      <SelectValue>{m(selectedExpiryOption.label)}</SelectValue>
+                    </SelectTrigger>
+                    <SelectPopup align="start" alignItemWithTrigger={false}>
+                      {INVITATION_EXPIRY_OPTIONS.map((option) => (
+                        <SelectItem hideIndicator key={option.hours} value={String(option.hours)}>
+                          {m(option.label)}
+                        </SelectItem>
+                      ))}
+                    </SelectPopup>
+                  </Select>
                 </div>
 
                 <p className="text-xs text-muted-foreground">
                   <T>
-                    No email is sent. The invited person opens the accept link or enters the code to
-                    set their display name and start a session.
+                    No email is sent. The invited person opens the link to join directly, or adds
+                    this project to their existing account.
                   </T>
                 </p>
 
@@ -400,7 +569,7 @@ export function MemberInviteDialog({
               <Button
                 type="button"
                 variant="default"
-                disabled={isSubmitting || grantableRoles.length === 0}
+                disabled={isSubmitting || allRoles.length === 0}
                 onClick={() => void handleSubmit()}
               >
                 {isSubmitting ? gt("Creating…") : gt("Create invitation")}

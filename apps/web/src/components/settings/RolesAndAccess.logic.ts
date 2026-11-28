@@ -36,15 +36,65 @@ export const PROJECT_CAPABILITY_LABELS: Readonly<Record<ProjectCapability, strin
   "project:delete": msg("Delete projects"),
 };
 
+export type RoleMatrixGroupId = "reading" | "code_and_agents" | "project_management" | "crm";
+
+const ROLE_MATRIX_GROUP_ORDER: ReadonlyArray<RoleMatrixGroupId> = [
+  "reading",
+  "code_and_agents",
+  "project_management",
+  "crm",
+];
+
+const ROLE_MATRIX_GROUP_LABELS: Readonly<Record<RoleMatrixGroupId, string>> = {
+  reading: msg("Reading", { $context: "role capability matrix section" }),
+  code_and_agents: msg("Code & agents", { $context: "role capability matrix section" }),
+  project_management: msg("Project management", { $context: "role capability matrix section" }),
+  crm: msg("CRM", { $context: "role capability matrix section" }),
+};
+
+const CAPABILITY_GROUP_MAP: Readonly<Record<ProjectCapability, RoleMatrixGroupId>> = {
+  "project:read": "reading",
+  "project:terminal.read": "reading",
+  "project:thread.operate": "code_and_agents",
+  "project:terminal.operate": "code_and_agents",
+  "project:preview.operate": "code_and_agents",
+  "project:file.write": "code_and_agents",
+  "project:source.write": "code_and_agents",
+  "project:thread.manage": "code_and_agents",
+  "project:settings": "project_management",
+  "project:members": "project_management",
+  "project:secrets": "project_management",
+  "project:webhooks": "project_management",
+  "project:create": "project_management",
+  "project:delete": "project_management",
+  "project:crm.read": "crm",
+  "project:crm.write": "crm",
+  "project:crm.invite_client": "crm",
+};
+
 export interface RoleMatrixRow {
   readonly capability: string;
   readonly label: string;
   readonly roles: Readonly<Record<ProjectRole, boolean>>;
 }
 
+export interface RoleMatrixSection {
+  readonly id: RoleMatrixGroupId;
+  readonly label: string;
+  readonly rows: ReadonlyArray<RoleMatrixRow>;
+}
+
 export interface RoleMatrixData {
   readonly roles: ReadonlyArray<ProjectRole>;
   readonly rows: ReadonlyArray<RoleMatrixRow>;
+  readonly sections: ReadonlyArray<RoleMatrixSection>;
+}
+
+function capabilityGroup(capability: string): RoleMatrixGroupId {
+  if (Object.hasOwn(CAPABILITY_GROUP_MAP, capability)) {
+    return CAPABILITY_GROUP_MAP[capability as ProjectCapability];
+  }
+  return "project_management";
 }
 
 export function capabilityLabel(capability: string, resolve: MessageResolver = m): string {
@@ -99,7 +149,25 @@ export function buildRoleMatrix(input?: {
     };
   });
 
-  return { roles, rows };
+  const rowsByGroup = new Map<RoleMatrixGroupId, Array<RoleMatrixRow>>(
+    ROLE_MATRIX_GROUP_ORDER.map((groupId) => [groupId, []]),
+  );
+  for (const row of rows) {
+    rowsByGroup.get(capabilityGroup(row.capability))!.push(row);
+  }
+  const sections: ReadonlyArray<RoleMatrixSection> = ROLE_MATRIX_GROUP_ORDER.flatMap((groupId) => {
+    const groupRows = rowsByGroup.get(groupId) ?? [];
+    if (groupRows.length === 0) return [];
+    return [
+      {
+        id: groupId,
+        label: resolve(ROLE_MATRIX_GROUP_LABELS[groupId]),
+        rows: groupRows,
+      },
+    ];
+  });
+
+  return { roles, rows, sections };
 }
 
 export function hasHostTerminalCapability(capabilities: ReadonlyArray<string>): boolean {

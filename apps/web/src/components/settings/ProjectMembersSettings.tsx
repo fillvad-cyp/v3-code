@@ -1,6 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   type EnvironmentId,
+  type Invitation,
+  type InvitationId,
   type MemberLoginCodeResult,
   type MemberWithMemberships,
   type Principal,
@@ -14,6 +16,7 @@ import { KeyRoundIcon, PlusIcon, ShieldAlertIcon, Trash2Icon } from "lucide-reac
 import { useState } from "react";
 import { T, useGT, useMessages } from "gt-react";
 
+import { useNowSecond } from "../../hooks/useNowSecond";
 import { m as resolveMessage } from "../../i18n/messages";
 import { appAtomRegistry } from "../../rpc/atomRegistry";
 import type { SidebarProjectGroupMember } from "../../sidebarProjectGrouping";
@@ -23,6 +26,7 @@ import { useEnvironment, useEnvironments } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
 import { useEnvironmentSessionState } from "../../state/session";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { formatExpiresInLabel } from "../../timestampFormat";
 import { Alert, AlertDescription } from "../ui/alert";
 import {
   AlertDialog,
@@ -36,7 +40,9 @@ import {
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
+import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { formatAccessTimestamp } from "./ConnectionsSettings.logic";
 import { ITEM_ROW_CLASSNAME, ITEM_ROW_INNER_CLASSNAME } from "./itemRows";
 import { MemberInviteDialog } from "./MemberInviteDialog";
 import { MemberLoginCodeDialog } from "./MemberLoginCodeDialog";
@@ -45,6 +51,7 @@ import {
   formatMembershipErrorMessage,
   isAssignableProjectRole,
   MEMBERSHIP_STATE_LABELS,
+  pendingInvitationsList,
   PROJECT_ROLE_LABELS,
   projectMembersForProject,
   supportsMembersCapability,
@@ -53,6 +60,7 @@ import {
 import { SettingsSection } from "./settingsLayout";
 
 const EMPTY_MEMBERS: ReadonlyArray<MemberWithMemberships> = [];
+const EMPTY_INVITATIONS: ReadonlyArray<Invitation> = [];
 
 function stateBadgeVariant(state: ProjectMemberEntry["membership"]["state"]) {
   if (state === "active") return "success" as const;
@@ -79,6 +87,7 @@ export function ProjectMembersCard({
 }: ProjectMembersCardProps) {
   const gt = useGT();
   const m = useMessages();
+  const nowMs = useNowSecond();
   const environment = useEnvironment(environmentId);
   const membersSupported = supportsMembersCapability(
     environment?.serverConfig?.environment.capabilities,
@@ -89,6 +98,12 @@ export function ProjectMembersCard({
   const canInviteCommand = useAtomValue(
     authEnvironment.createInvitation.permissionAtom(environmentId),
   );
+  const canListInvitations = useAtomValue(
+    authEnvironment.listInvitations.permissionAtom(environmentId),
+  );
+  const canRevokeInvitation = useAtomValue(
+    authEnvironment.revokeInvitation.permissionAtom(environmentId),
+  );
   useSyncAccessRevision(environmentId, membersSupported && canReadMembers);
   const membersQuery = useEnvironmentQuery(
     membersSupported && canReadMembers
@@ -96,8 +111,24 @@ export function ProjectMembersCard({
       : null,
     m,
   );
+  const rawMembers = membersQuery.data ?? EMPTY_MEMBERS;
+  const permissions = deriveProjectMemberPermissions({
+    session: session.data,
+    canWriteAccess: canUpdateMembers,
+    projectId,
+    members: rawMembers,
+  });
+  const invitationsQuery = useEnvironmentQuery(
+    membersSupported && permissions.canManage && canListInvitations
+      ? authEnvironment.listInvitations({ environmentId, input: { projectId } })
+      : null,
+    m,
+  );
   const updateMember = useAtomCommand(authEnvironment.updateMember, { reportFailure: false });
   const removeMember = useAtomCommand(authEnvironment.removeMember, { reportFailure: false });
+  const revokeInvitation = useAtomCommand(authEnvironment.revokeInvitation, {
+    reportFailure: false,
+  });
   const issueMemberLoginCode = useAtomCommand(authEnvironment.issueMemberLoginCode, {
     reportFailure: false,
   });
@@ -105,6 +136,7 @@ export function ProjectMembersCard({
   const [inviteOpen, setInviteOpen] = useState(false);
   const [mutationError, setMutationError] = useState<string | null>(null);
   const [busyPrincipalId, setBusyPrincipalId] = useState<string | null>(null);
+  const [busyInvitationId, setBusyInvitationId] = useState<string | null>(null);
   const [pendingRemoval, setPendingRemoval] = useState<ProjectMemberEntry | null>(null);
   const [loginCodeTarget, setLoginCodeTarget] = useState<Principal | null>(null);
   const [loginCodeResult, setLoginCodeResult] = useState<MemberLoginCodeResult | null>(null);
@@ -115,18 +147,47 @@ export function ProjectMembersCard({
     return null;
   }
 
-  const rawMembers = membersQuery.data ?? EMPTY_MEMBERS;
   const projectMembers = projectMembersForProject(rawMembers, projectId);
-  const permissions = deriveProjectMemberPermissions({
-    session: session.data,
-    canWriteAccess: canUpdateMembers,
-    projectId,
-    members: rawMembers,
-  });
+  const pendingInvitations = pendingInvitationsList(
+    invitationsQuery.data ?? EMPTY_INVITATIONS,
+    nowMs,
+  );
   const canInvite = permissions.canInvite && canInviteCommand;
 
   const refreshMembers = () => {
     appAtomRegistry.refresh(authEnvironment.listMembers({ environmentId, input: null }));
+  };
+
+  const refreshInvitations = () => {
+    appAtomRegistry.refresh(
+      authEnvironment.listInvitations({ environmentId, input: { projectId } }),
+    );
+  };
+
+  const handleInvited = () => {
+    refreshMembers();
+    if (permissions.canManage && canListInvitations) {
+      refreshInvitations();
+    }
+  };
+
+  const handleRevokeInvitation = async (id: InvitationId) => {
+    if (!canRevokeInvitation || busyInvitationId !== null) return;
+    setMutationError(null);
+    setBusyInvitationId(id);
+    const result = await revokeInvitation({
+      environmentId,
+      input: { id },
+    });
+    setBusyInvitationId(null);
+    if (result._tag === "Success") {
+      refreshInvitations();
+      return;
+    }
+    if (!isAtomCommandInterrupted(result)) {
+      const error = squashAtomCommandFailure(result);
+      setMutationError(formatMembershipErrorMessage(error, resolveMessage));
+    }
   };
 
   const handleRoleChange = async (entry: ProjectMemberEntry, nextRole: string) => {
@@ -226,7 +287,7 @@ export function ProjectMembersCard({
   };
 
   const isLoadingInitial = membersQuery.isPending && membersQuery.data === null;
-  const activeError = mutationError ?? membersQuery.error;
+  const activeError = mutationError ?? membersQuery.error ?? invitationsQuery.error;
   const sectionTitle =
     showEnvironmentSubtitle && environmentLabel
       ? gt("Members · {environment}", { environment: environmentLabel })
@@ -403,6 +464,57 @@ export function ProjectMembersCard({
                 );
               })
             )}
+
+            {permissions.canManage && canListInvitations && pendingInvitations.length > 0 ? (
+              <>
+                <div className="bg-muted/20 px-3 py-1.5 sm:px-4">
+                  <p className="text-2xs font-medium tracking-wide text-muted-foreground uppercase">
+                    <T>Pending invitations</T>
+                  </p>
+                </div>
+                {pendingInvitations.map((invitation) => {
+                  const isBusy = busyInvitationId === invitation.id;
+                  return (
+                    <div key={invitation.id} className={ITEM_ROW_CLASSNAME}>
+                      <div className={ITEM_ROW_INNER_CLASSNAME}>
+                        <div className="min-w-0 flex-1 space-y-1">
+                          <div className="flex flex-wrap items-center gap-1.5">
+                            <span className="text-sm font-medium text-foreground">
+                              {m(PROJECT_ROLE_LABELS[invitation.role])}
+                            </span>
+                            <Badge variant="outline" size="sm">
+                              <T>Pending</T>
+                            </Badge>
+                          </div>
+                          <p className="text-xs text-muted-foreground">
+                            <Tooltip>
+                              <TooltipTrigger render={<span />}>
+                                {formatExpiresInLabel(invitation.expiresAt, nowMs, m)}
+                              </TooltipTrigger>
+                              <TooltipPopup side="top">
+                                {formatAccessTimestamp(invitation.expiresAt)}
+                              </TooltipPopup>
+                            </Tooltip>
+                          </p>
+                        </div>
+                        <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+                          <Button
+                            size="xs"
+                            variant="destructive-outline"
+                            type="button"
+                            disabled={!canRevokeInvitation || isBusy}
+                            aria-label={gt("Revoke pending invitation")}
+                            onClick={() => void handleRevokeInvitation(invitation.id)}
+                          >
+                            {isBusy ? gt("Revoking…") : gt("Revoke")}
+                          </Button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </>
+            ) : null}
           </>
         )}
       </SettingsSection>
@@ -414,7 +526,7 @@ export function ProjectMembersCard({
         isOwner={permissions.isOwner}
         grantableRoles={permissions.grantableRoles}
         fixedProject={{ id: projectId, label: projectTitle }}
-        onInvited={refreshMembers}
+        onInvited={handleInvited}
       />
 
       <MemberLoginCodeDialog

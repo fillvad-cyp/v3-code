@@ -352,18 +352,33 @@ export const InvitationCreateInput = Schema.Struct({
   role: ProjectRole,
   projectId: Schema.NullOr(ProjectId),
   crmClientId: Schema.optionalKey(Schema.NullOr(CrmClientId)),
+  expiresInHours: Schema.optionalKey(PositiveInt.check(Schema.isLessThanOrEqualTo(720))),
 });
 export type InvitationCreateInput = typeof InvitationCreateInput.Type;
 
 export const InvitationCreateResult = Schema.Struct({
   invitation: Invitation,
   code: TrimmedNonEmptyString,
+  multiUserEnabled: Schema.optionalKey(Schema.Boolean),
 });
 export type InvitationCreateResult = typeof InvitationCreateResult.Type;
 
+export const InvitationPreviewReason = Schema.Literals(["expired", "used", "revoked", "not_found"]);
+export type InvitationPreviewReason = typeof InvitationPreviewReason.Type;
+
+/** Read-only public preview of an invitation code; never exposes `projectId`. */
+export const InvitationPreview = Schema.Struct({
+  valid: Schema.Boolean,
+  reason: Schema.optionalKey(InvitationPreviewReason),
+  projectTitle: Schema.NullOr(Schema.String),
+  role: Schema.optionalKey(ProjectRole),
+  expiresAt: Schema.optionalKey(IsoDateTime),
+});
+export type InvitationPreview = typeof InvitationPreview.Type;
+
 export const InvitationAcceptInput = Schema.Struct({
   code: TrimmedNonEmptyString,
-  displayName: TrimmedNonEmptyString,
+  displayName: Schema.optionalKey(TrimmedNonEmptyString),
 });
 export type InvitationAcceptInput = typeof InvitationAcceptInput.Type;
 

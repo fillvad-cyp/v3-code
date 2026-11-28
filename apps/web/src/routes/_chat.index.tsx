@@ -1,7 +1,7 @@
 import { workspaceAreaProps } from "../lib/workspaceFocus";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { scopeProjectRef } from "@t3tools/client-runtime/environment";
-import { createFileRoute, useRouter } from "@tanstack/react-router";
+import { createFileRoute, useRouter, useSearch } from "@tanstack/react-router";
 import { T, useGT } from "gt-react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
@@ -45,12 +45,17 @@ function IndexDraftLanding() {
   const startedAttemptRef = useRef<number | null>(null);
   const [startState, setStartState] = useState({ failed: false, retryRequest: 0 });
 
+  const requestedProjectId = useSearch({
+    strict: false,
+    select: (search) => (typeof search.project === "string" ? search.project : null),
+  });
+  const unarchivedProjects = projects.filter((project) => project.archivedAt == null);
   const mostRecentProject =
-    sortScopedProjectsForSidebar(
-      projects.filter((project) => project.archivedAt == null),
-      threads,
-      "updated_at",
-    )[0] ?? null;
+    (requestedProjectId !== null
+      ? unarchivedProjects.find((project) => project.id === requestedProjectId)
+      : undefined) ??
+    sortScopedProjectsForSidebar(unarchivedProjects, threads, "updated_at")[0] ??
+    null;
   const attempt = startState.retryRequest;
 
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- starts a draft thread in the most recent project and navigates to it while still on the index

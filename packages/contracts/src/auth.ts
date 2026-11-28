@@ -231,6 +231,7 @@ export const AuthInvitationSessionResult = Schema.Struct({
   binding: SessionBinding,
   role: Schema.optionalKey(ProjectRole),
   principal: Principal,
+  projectId: Schema.optionalKey(Schema.NullOr(ProjectId)),
 });
 export type AuthInvitationSessionResult = typeof AuthInvitationSessionResult.Type;
 

@@ -195,6 +195,21 @@ describe("buildRoleMatrix", () => {
     expect(hasHostTerminalCapability(capabilitiesForRole("developer"))).toBe(true);
     expect(hasHostTerminalCapability(capabilitiesForRole("manager"))).toBe(true);
   });
+
+  it("groups all 17 capabilities into Reading, Code & agents, Project management, and CRM sections", () => {
+    const matrix = buildRoleMatrix();
+    expect(matrix.sections.map((section) => ({ id: section.id, label: section.label }))).toEqual([
+      { id: "reading", label: "Reading" },
+      { id: "code_and_agents", label: "Code & agents" },
+      { id: "project_management", label: "Project management" },
+      { id: "crm", label: "CRM" },
+    ]);
+    const groupedCapabilities = matrix.sections.flatMap((section) =>
+      section.rows.map((row) => row.capability),
+    );
+    expect(groupedCapabilities).toHaveLength(ProjectCapability.literals.length);
+    expect(new Set(groupedCapabilities)).toEqual(new Set(ProjectCapability.literals));
+  });
 });
 
 describe("deriveMyAccessState", () => {
