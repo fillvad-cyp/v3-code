@@ -536,7 +536,13 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
 
       assert.isNull(preview.publish);
       assert.isNull(previewChannel.publish);
-      assert.isNull(release.publish);
+      assert.deepStrictEqual(release.publish, [
+        {
+          provider: "github",
+          owner: "fillvad-cyp",
+          repo: "v3-code",
+        },
+      ]);
     }).pipe(
       Effect.provide(
         ConfigProvider.layer(
@@ -562,7 +568,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
     }),
   );
 
-  it.effect("keeps AppImage artifacts versioned with auto-update feeds disabled", () =>
+  it.effect("keeps AppImage artifacts versioned with GitHub Releases auto-update feeds", () =>
     Effect.gen(function* () {
       const stable = yield* createBuildConfig(
         "linux",
@@ -583,8 +589,22 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         undefined,
       );
 
-      assert.isNull(stable.publish);
-      assert.isNull(nightly.publish);
+      assert.deepStrictEqual(stable.publish, [
+        {
+          provider: "github",
+          owner: "fillvad-cyp",
+          repo: "v3-code",
+        },
+      ]);
+      assert.deepStrictEqual(nightly.publish, [
+        {
+          provider: "github",
+          owner: "fillvad-cyp",
+          repo: "v3-code",
+          releaseType: "prerelease",
+          channel: "nightly",
+        },
+      ]);
       assert.equal(stable.artifactName, "V3-Code-${version}-${arch}.${ext}");
       assert.equal(nightly.artifactName, "V3-Code-${version}-${arch}.${ext}");
     }).pipe(
@@ -1951,5 +1971,32 @@ it.effect.skipIf(!symlinksSupported)("preserves relative links when replacing di
     yield* copyDesktopBuildArtifacts(stage, output, true);
     assert.equal(yield* fs.readLink(path.join(output, app, "Current")), "New.plist");
     assert.equal(yield* fs.readFileString(path.join(output, app, "Current")), "rebuilt-app");
+  }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+);
+
+it.effect("copies update metadata manifests and blockmaps alongside installer artifacts", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const path = yield* Path.Path;
+    const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-update-metadata-" });
+    const stage = path.join(root, "stage");
+    const output = path.join(root, "output");
+    yield* fs.makeDirectory(stage, { recursive: true });
+    for (const file of [
+      "V3-Code-0.2.1-x64.exe",
+      "V3-Code-0.2.1-x64.exe.blockmap",
+      "latest.yml",
+      "latest-mac.yml",
+    ]) {
+      yield* fs.writeFileString(path.join(stage, file), file);
+    }
+
+    const copied = yield* copyDesktopBuildArtifacts(stage, output);
+    assert.sameMembers(copied, [
+      path.join(output, "V3-Code-0.2.1-x64.exe"),
+      path.join(output, "V3-Code-0.2.1-x64.exe.blockmap"),
+      path.join(output, "latest.yml"),
+      path.join(output, "latest-mac.yml"),
+    ]);
   }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
 );

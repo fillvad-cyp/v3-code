@@ -1047,6 +1047,71 @@ it.effect("requires provider management to send /logout through chat", () =>
   }).pipe(Effect.scoped),
 );
 
+it.effect(
+  "requires operate scope for prompt cost classification but keeps plain estimates readable",
+  () =>
+    Effect.gen(function* () {
+      const group = WsRpcGroup.omit(
+        ...[...WsRpcGroup.requests.keys()].filter(
+          (
+            tag,
+          ): tag is Exclude<
+            keyof typeof RPC_REQUIRED_SCOPES,
+            typeof WS_METHODS.serverPredictPromptCost
+          > => tag !== WS_METHODS.serverPredictPromptCost,
+        ),
+      );
+      const handled: boolean[] = [];
+      const handler = group.toLayerHandler(WS_METHODS.serverPredictPromptCost, (input) =>
+        Effect.sync(() => {
+          handled.push(input.useClassifier);
+          return {
+            inputTokens: { context: 0, prompt: 10, attachments: 0, output: 10 },
+            estimate: { medianUsd: 0.01, p90Usd: 0.02 },
+            confidence: "none" as const,
+            basis: [] as const,
+            classifier: null,
+            alternatives: [] as const,
+            recommendation: null,
+            priced: false,
+            note: "noPrice" as const,
+          };
+        }),
+      );
+      const baseInput = {
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-opus-4-5",
+        threadId: null,
+        promptText: "refactor the auth flow cleanly",
+        attachments: [],
+        compactFirst: false,
+      };
+
+      const reader = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(Layer.merge(handler, RpcAuthorization.layer([AuthOrchestrationReadScope]))),
+      );
+      yield* reader[WS_METHODS.serverPredictPromptCost]({ ...baseInput, useClassifier: false });
+      expect(
+        yield* reader[WS_METHODS.serverPredictPromptCost]({
+          ...baseInput,
+          useClassifier: true,
+        }).pipe(Effect.flip),
+      ).toMatchObject({
+        _tag: "EnvironmentAuthorizationError",
+        requiredPermission: AuthOrchestrationOperateScope,
+      });
+      expect(handled).toEqual([false]);
+
+      const operator = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(handler, RpcAuthorization.layer([AuthOrchestrationOperateScope])),
+        ),
+      );
+      yield* operator[WS_METHODS.serverPredictPromptCost]({ ...baseInput, useClassifier: true });
+      expect(handled).toEqual([false, true]);
+    }).pipe(Effect.scoped),
+);
+
 describe("RPC project access gate", () => {
   const accessTags = [
     ORCHESTRATION_V2_WS_METHODS.launchThread,

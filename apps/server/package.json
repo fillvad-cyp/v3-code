@@ -1,6 +1,6 @@
 {
   "name": "v3code",
-  "version": "0.2.0",
+  "version": "0.2.3",
   "license": "MIT",
   "bin": {
     "v3": "./dist/bin.mjs"

@@ -329,6 +329,8 @@ function createTextGeneration(
     generateReviewGuide: () => Effect.succeed({ stops: [] }),
     generateTranscriptionPostProcessing: () =>
       Effect.succeed({ transcription: "processed transcript" }),
+    generatePromptCostAssessment: () =>
+      Effect.succeed({ complexity: "moderate" as const, reason: "fake assessment" }),
     ...overrides,
   };
 
@@ -380,6 +382,7 @@ function createTextGeneration(
     generateReviewGuide: (input) => implementation.generateReviewGuide(input),
     generateTranscriptionPostProcessing: (input) =>
       implementation.generateTranscriptionPostProcessing(input),
+    generatePromptCostAssessment: (input) => implementation.generatePromptCostAssessment(input),
   };
 }
 

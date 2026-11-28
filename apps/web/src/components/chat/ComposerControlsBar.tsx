@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import type { ChatComposerProps } from "./ChatComposer";
 import type { PromptUltrathink } from "./TraitsPicker";
 import type { ProviderInstanceEntry } from "../../providerInstances";
@@ -87,6 +88,7 @@ export function ComposerControlsBar(props: {
   onModelPickerOpenChange: (open: boolean) => void;
   modelPickerIconClassName: string | undefined;
   getModelDisabledReason: ChatComposerProps["getModelDisabledReason"];
+  promptCost: ReactNode | null;
 }) {
   const {
     environmentId,
@@ -131,6 +133,7 @@ export function ComposerControlsBar(props: {
     onModelPickerOpenChange,
     modelPickerIconClassName,
     getModelDisabledReason,
+    promptCost,
   } = props;
   const accessMatchesDefault = compatibleRuntimeMode === defaultRuntimeMode;
   const {
@@ -266,6 +269,7 @@ export function ComposerControlsBar(props: {
   ) : (
     <>
       {composerModelPicker}
+      {promptCost}
 
       <>
         {restingBlockDefs.map((def, index) => {

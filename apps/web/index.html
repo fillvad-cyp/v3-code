@@ -16,6 +16,18 @@
     <link rel="manifest" href="/manifest.webmanifest" />
     <script>
       (() => {
+        try {
+          const hashQueryIndex = window.location.hash.indexOf("?");
+          const hashQuery =
+            hashQueryIndex >= 0 ? window.location.hash.slice(hashQueryIndex + 1) : "";
+          const isPopoutWindow =
+            new URLSearchParams(window.location.search).get("popout") === "1" ||
+            new URLSearchParams(hashQuery).get("popout") === "1";
+          if (isPopoutWindow) {
+            document.documentElement.dataset.popoutWindow = "true";
+          }
+        } catch {}
+
         const LIGHT_BACKGROUND = "#ffffff";
         const DARK_BACKGROUND = "#000000";
         const CUSTOM_THEMES_STORAGE_KEY = "v3code:themes:v1";
@@ -441,6 +453,10 @@
       html[data-theme-selected="true"] #boot-shell {
         background: var(--boot-background);
         color: var(--boot-foreground);
+      }
+
+      html[data-popout-window="true"] #boot-shell:not(:has(> #boot-error)) {
+        display: none;
       }
 
       #boot-shell-card {

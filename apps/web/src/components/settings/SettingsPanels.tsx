@@ -311,6 +311,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.enableAgentBrowserAccess !== DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess
       ? [gt("Agent browser access")]
       : []),
+    ...(settings.promptCostEstimate !== DEFAULT_UNIFIED_SETTINGS.promptCostEstimate
+      ? [gt("Prompt cost mode")]
+      : []),
   ];
 
   const restoreDefaults = async () => {
@@ -441,6 +444,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       browserAutoShowFloatingPreview: DEFAULT_UNIFIED_SETTINGS.browserAutoShowFloatingPreview,
       pullRequestLinksOpenInApp: DEFAULT_UNIFIED_SETTINGS.pullRequestLinksOpenInApp,
       enableAgentBrowserAccess: DEFAULT_UNIFIED_SETTINGS.enableAgentBrowserAccess,
+      promptCostEstimate: DEFAULT_UNIFIED_SETTINGS.promptCostEstimate,
     });
     onRestored?.();
   };

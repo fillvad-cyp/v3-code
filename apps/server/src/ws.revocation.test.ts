@@ -131,6 +131,7 @@ import * as ProjectSetupScriptRunner from "./project/ProjectSetupScriptRunner.ts
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
 import * as ScratchThreadPromotion from "./project/ScratchThreadPromotion.ts";
 import * as WorktreeSetupTracker from "./project/WorktreeSetupTracker.ts";
+import * as PromptCostService from "./promptCost/PromptCostService.ts";
 import * as AcpRegistrySessions from "./provider/AcpRegistrySessions.ts";
 import * as AntigravityInstallation from "./provider/AntigravityInstallation.ts";
 import * as CodexInstallation from "./provider/CodexInstallation.ts";
@@ -159,6 +160,7 @@ import * as SourceControlRepositoryService from "./sourceControl/SourceControlRe
 import * as SourceControlSignIn from "./sourceControl/SourceControlSignIn.ts";
 import * as StorageCleanup from "./storageCleanup.ts";
 import * as TerminalManager from "./terminal/Manager.ts";
+import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import * as TextGenerators from "./textGeneration/TextGenerators.ts";
 import * as TriageService from "./triage/TriageService.ts";
 import * as UsageLimitSources from "./usage/UsageLimitSources.ts";
@@ -441,6 +443,17 @@ const layerUnusedWsServices = Layer.mergeAll(
   Layer.mock(ThreadManagement.ThreadManagementService)({}),
   Layer.mock(ThreadSearch.ThreadSearch)({}),
   Layer.mock(UsageService.UsageService)({}),
+  Layer.mock(TextGeneration.TextGeneration)({}),
+  PromptCostService.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(UsageService.UsageService)({}),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({}),
+        Layer.mock(TextGeneration.TextGeneration)({}),
+        Layer.mock(ServerSettings.ServerSettingsService)({}),
+      ),
+    ),
+  ),
   Layer.mock(VcsProvisioningService.VcsProvisioningService)({}),
   Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({}),
   Layer.mock(WorkspaceEntries.WorkspaceEntries)({}),

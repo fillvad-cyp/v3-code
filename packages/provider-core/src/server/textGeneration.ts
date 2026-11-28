@@ -118,10 +118,34 @@ export interface TranscriptionPostProcessingResult {
   transcription: string;
 }
 
+export interface PromptCostAssessmentCandidateInput {
+  readonly label: string;
+  readonly medianUsd: number;
+}
+
+export interface PromptCostAssessmentGenerationInput {
+  cwd: string;
+  prompt: string;
+  candidates: ReadonlyArray<PromptCostAssessmentCandidateInput>;
+  targetLabel: string;
+  targetMedianUsd: number;
+  modelSelection: ModelSelection;
+  projectId?: ProjectId | null | undefined;
+}
+
+export interface PromptCostAssessmentGenerationResult {
+  complexity: "simple" | "moderate" | "complex";
+  reason: string;
+}
+
 export interface ProviderTextGeneration {
   readonly generateTranscriptionPostProcessing: (
     input: TranscriptionPostProcessingInput,
   ) => Effect.Effect<TranscriptionPostProcessingResult, TextGenerationError>;
+
+  readonly generatePromptCostAssessment: (
+    input: PromptCostAssessmentGenerationInput,
+  ) => Effect.Effect<PromptCostAssessmentGenerationResult, TextGenerationError>;
 
   readonly generateCommitMessage: (
     input: CommitMessageGenerationInput,

@@ -4407,4 +4407,114 @@ describe("UsageService", () => {
       );
     }),
   );
+
+  it.effect(
+    "lookupRates loads saved rates, applies provider rateModel, overrides and aliases, and skips unpriced models",
+    () =>
+      Effect.gen(function* () {
+        const { home, settings } = yield* setup;
+        const prefix = "usage-lookup-rates";
+
+        const [claudeRates, cursorRates] = yield* Effect.gen(function* () {
+          const { stateDir } = yield* ServerConfig.ServerConfig;
+          yield* Effect.promise(async () => {
+            await NodeFSP.mkdir(stateDir, { recursive: true });
+            await NodeFSP.writeFile(
+              NodePath.join(stateDir, "usage-model-rates.json"),
+              encodeUnknownJsonString({
+                fetchedAtMs: Date.parse("2026-08-01T10:00:00Z"),
+                document: {
+                  "claude-fable-5": {
+                    input_cost_per_token: 3e-6,
+                    output_cost_per_token: 15e-6,
+                    cache_read_input_token_cost: 0.3e-6,
+                    cache_creation_input_token_cost: 3.75e-6,
+                  },
+                  "claude-sonnet-4-5": {
+                    input_cost_per_token: 3e-6,
+                    output_cost_per_token: 15e-6,
+                    cache_read_input_token_cost: 0.3e-6,
+                  },
+                  "incomplete-model": {
+                    input_cost_per_token: 2e-6,
+                  },
+                },
+              }),
+            );
+          });
+          const service = yield* UsageService.make;
+          const claude = yield* service.lookupRates("claude", [
+            "claude-fable-5",
+            "aliased-fable",
+            "aliased-with-stale-pre-override",
+            "override-model",
+            "incomplete-model",
+            "missing-model",
+          ]);
+          const cursor = yield* service.lookupRates("cursor", ["claude-sonnet-4-5-thinking"]);
+          return [claude, cursor] as const;
+        }).pipe(
+          Effect.scoped,
+          Effect.provide(
+            layerService({
+              prefix,
+              home,
+              settings: {
+                ...settings,
+                usageModelAliases: {
+                  "aliased-fable": "claude-fable-5",
+                  "aliased-with-stale-pre-override": "claude-fable-5",
+                },
+                usagePriceOverrides: {
+                  // Pre-alias override must NOT apply when the model is aliased, matching UsageAggregator.
+                  "aliased-with-stale-pre-override": {
+                    inputCostPerMillionTokens: 99,
+                    outputCostPerMillionTokens: 99,
+                  },
+                  "override-model": {
+                    inputCostPerMillionTokens: 2,
+                    outputCostPerMillionTokens: 8,
+                    cacheReadCostPerMillionTokens: 0.25,
+                    cacheWriteCostPerMillionTokens: 2.5,
+                  },
+                },
+              },
+            }),
+          ),
+        );
+
+        assert.deepStrictEqual(claudeRates.get("claude-fable-5"), {
+          inputPerToken: 3e-6,
+          cacheReadPerToken: 0.3e-6,
+          cacheWritePerToken: 3.75e-6,
+          outputPerToken: 15e-6,
+        });
+        assert.deepStrictEqual(claudeRates.get("aliased-fable"), {
+          inputPerToken: 3e-6,
+          cacheReadPerToken: 0.3e-6,
+          cacheWritePerToken: 3.75e-6,
+          outputPerToken: 15e-6,
+        });
+        assert.deepStrictEqual(claudeRates.get("aliased-with-stale-pre-override"), {
+          inputPerToken: 3e-6,
+          cacheReadPerToken: 0.3e-6,
+          cacheWritePerToken: 3.75e-6,
+          outputPerToken: 15e-6,
+        });
+        assert.deepStrictEqual(claudeRates.get("override-model"), {
+          inputPerToken: 2e-6,
+          cacheReadPerToken: 0.25 / 1_000_000,
+          cacheWritePerToken: 2.5 / 1_000_000,
+          outputPerToken: 8e-6,
+        });
+        assert.deepStrictEqual(cursorRates.get("claude-sonnet-4-5-thinking"), {
+          inputPerToken: 3e-6,
+          cacheReadPerToken: 0.3e-6,
+          cacheWritePerToken: 3e-6,
+          outputPerToken: 15e-6,
+        });
+        assert.isUndefined(claudeRates.get("incomplete-model"));
+        assert.isUndefined(claudeRates.get("missing-model"));
+      }).pipe(Effect.scoped),
+  );
 });

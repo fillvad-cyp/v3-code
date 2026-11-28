@@ -135,6 +135,14 @@ export function clientRpcRequiredScopes(
   if (method === WS_METHODS.guestShareCreate) {
     return [AuthAccessWriteScope, AuthOrchestrationReadScope];
   }
+  if (method === WS_METHODS.serverPredictPromptCost) {
+    return typeof input === "object" &&
+      input !== null &&
+      "useClassifier" in input &&
+      input.useClassifier === true
+      ? [AuthOrchestrationOperateScope]
+      : [AuthOrchestrationReadScope];
+  }
   return Object.hasOwn(CLIENT_GUARDED_RPC_SCOPES, method)
     ? [CLIENT_GUARDED_RPC_SCOPES[method as ClientGuardedRpcTag]]
     : [];

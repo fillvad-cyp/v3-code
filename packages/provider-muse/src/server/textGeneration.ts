@@ -392,8 +392,17 @@ export const makeMuseTextGeneration = Effect.fn("makeMuseTextGeneration")(functi
         modelSelection: input.modelSelection,
       });
     });
+  const unsupported = (operation: string) =>
+    Effect.fail(
+      new TextGenerationError({
+        operation,
+        detail: "Muse Code does not support this text generation operation.",
+      }),
+    );
   const generateReviewGuide: ProviderTextGeneration["generateReviewGuide"] = () =>
     Effect.fail(investigationUnsupported("generateReviewGuide", "Muse Code"));
+  const generatePromptCostAssessment: ProviderTextGeneration["generatePromptCostAssessment"] = () =>
+    unsupported("generatePromptCostAssessment");
   return {
     generateCommitMessage,
     generatePrContent,
@@ -401,5 +410,6 @@ export const makeMuseTextGeneration = Effect.fn("makeMuseTextGeneration")(functi
     generateThreadTitle,
     generateReviewGuide,
     generateTranscriptionPostProcessing,
+    generatePromptCostAssessment,
   } satisfies ProviderTextGeneration;
 });

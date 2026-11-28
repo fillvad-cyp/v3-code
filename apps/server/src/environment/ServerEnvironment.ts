@@ -261,6 +261,7 @@ export const make = Effect.gen(function* () {
       modelCatalogRefresh: false,
       usagePriceOverrides: true,
       usageModelAliases: true,
+      promptCostClassifier: true,
       threadPinning: true,
       threadPinReorder: true,
       threadActiveReorder: true,

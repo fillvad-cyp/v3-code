@@ -69,12 +69,14 @@ const environmentInput = {
   runningUnderArm64Translation: false,
 } satisfies DesktopEnvironment.MakeDesktopEnvironmentInput;
 
+let nextFakeWebContentsId = 1;
+
 function makeFakeBrowserWindow() {
   const windowListeners = new Map<string, (...args: readonly unknown[]) => void>();
   const webContentsListeners = new Map<string, (...args: readonly unknown[]) => void>();
   let zoomLevel = 0;
   const webContents = {
-    id: 1,
+    id: nextFakeWebContentsId++,
     session: {
       setPermissionRequestHandler: vi.fn(),
       webRequest: {
@@ -82,6 +84,7 @@ function makeFakeBrowserWindow() {
       },
     },
     copyImageAt: vi.fn(),
+    executeJavaScript: vi.fn((_code: string) => Promise.resolve()),
     focus: vi.fn(),
     isDestroyed: vi.fn(() => false),
     getURL: vi.fn(() => "v3code-dev://app/"),
@@ -135,6 +138,7 @@ function makeFakeBrowserWindow() {
     setAutoHideCursor: vi.fn(),
     setFullScreen: vi.fn(),
     setOpacity: vi.fn(),
+    setPosition: vi.fn(),
     setTitle: vi.fn(),
     setTitleBarOverlay: vi.fn(),
     setWindowButtonPosition: vi.fn(),
@@ -144,6 +148,8 @@ function makeFakeBrowserWindow() {
 
   return {
     window: window as unknown as Electron.BrowserWindow,
+    close: window.close,
+    executeJavaScript: webContents.executeJavaScript,
     getBounds: window.getBounds,
     getNormalBounds: window.getNormalBounds,
     isDestroyed: window.isDestroyed,
@@ -165,6 +171,8 @@ function makeFakeBrowserWindow() {
     setAutoHideCursor: window.setAutoHideCursor,
     setFullScreen: window.setFullScreen,
     setOpacity: window.setOpacity,
+    setPosition: window.setPosition,
+    setTitle: window.setTitle,
     webContentsListeners,
     webContentsOnce: webContents.once,
     windowListeners,
@@ -255,6 +263,11 @@ function layerTest(input: {
   readonly previewZoomReapplies?: number[];
   readonly onReveal?: (window: Electron.BrowserWindow) => void;
   readonly focusedWindow?: Electron.BrowserWindow;
+  readonly focusedWindowRef?: Ref.Ref<Option.Option<Electron.BrowserWindow>>;
+  readonly createWindow?: (
+    options: Electron.BrowserWindowConstructorOptions,
+    behavior?: { readonly auxiliary?: boolean },
+  ) => Electron.BrowserWindow;
   readonly fallbackWindow?: Electron.BrowserWindow;
   readonly platform?: NodeJS.Platform;
   readonly appearanceWindows?: ReadonlyArray<{
@@ -299,26 +312,55 @@ function layerTest(input: {
     applyWslWindowsFallbackInMemory: Effect.die("unexpected WSL Windows fallback"),
   } satisfies DesktopAppSettings.DesktopAppSettings["Service"]);
 
+  const registeredAppWindows = new Set<Electron.BrowserWindow>();
+  const currentMainOrFirst = Ref.get(input.mainWindow).pipe(
+    Effect.map(Option.orElse(() => Option.fromNullishOr(input.fallbackWindow ?? null))),
+  );
+  const readFocusedWindow =
+    input.focusedWindowRef !== undefined
+      ? Ref.get(input.focusedWindowRef)
+      : Effect.succeed(Option.fromNullishOr(input.focusedWindow ?? null));
+
   const layerElectronWindow = Layer.succeed(ElectronWindow.ElectronWindow, {
-    create: (options) =>
-      Effect.sync(() => {
+    create: (options, behavior) =>
+      Effect.gen(function* () {
+        if (input.createWindow !== undefined) {
+          input.createdWindowOptions?.push(options);
+          yield* Ref.update(input.createCount, (count) => count + 1);
+          yield* input.onWindowCreate ?? Effect.void;
+          return input.createWindow(options, behavior);
+        }
+        if (behavior?.auxiliary === true && Option.isSome(yield* Ref.get(input.mainWindow))) {
+          return makeFakeBrowserWindow().window;
+        }
         input.createdWindowOptions?.push(options);
-      }).pipe(
-        Effect.andThen(Ref.update(input.createCount, (count) => count + 1)),
-        Effect.andThen(input.onWindowCreate ?? Effect.void),
-        Effect.as(input.window),
-      ),
+        yield* Ref.update(input.createCount, (count) => count + 1);
+        yield* input.onWindowCreate ?? Effect.void;
+        return input.window;
+      }),
     main: Ref.get(input.mainWindow),
-    currentMainOrFirst: Ref.get(input.mainWindow).pipe(
-      Effect.map(Option.orElse(() => Option.fromNullishOr(input.fallbackWindow ?? null))),
-    ),
-    focusedMainOrFirst:
-      input.focusedWindow === undefined
-        ? Ref.get(input.mainWindow)
-        : Effect.succeedSome(input.focusedWindow),
+    currentMainOrFirst,
+    focusedMainOrFirst: Effect.gen(function* () {
+      const focused = yield* readFocusedWindow;
+      return Option.isSome(focused) ? focused : yield* Ref.get(input.mainWindow);
+    }),
+    focusedAppOrMain: Effect.gen(function* () {
+      const focused = yield* readFocusedWindow;
+      if (
+        Option.isSome(focused) &&
+        registeredAppWindows.has(focused.value) &&
+        !focused.value.isDestroyed()
+      ) {
+        return focused;
+      }
+      return yield* currentMainOrFirst;
+    }),
     setMain: (window) => Ref.set(input.mainWindow, Option.some(window)),
     clearMain: () => Ref.set(input.mainWindow, Option.none()),
-    registerAppWindow: () => Effect.void,
+    registerAppWindow: (window) =>
+      Effect.sync(() => {
+        registeredAppWindows.add(window);
+      }),
     trustedAppWindowForSender: () => Ref.get(input.mainWindow),
     prepareReveal: () => Effect.succeed(false),
     reveal: (window) => Effect.sync(() => input.onReveal?.(window)),
@@ -449,6 +491,7 @@ const makeSplashScenario = (createOutcomes: readonly (Electron.BrowserWindow | n
       main: Ref.get(mainWindow),
       currentMainOrFirst,
       focusedMainOrFirst: currentMainOrFirst,
+      focusedAppOrMain: currentMainOrFirst,
       setMain: (window) => Ref.set(mainWindow, Option.some(window)),
       clearMain: () => Ref.set(mainWindow, Option.none()),
       registerAppWindow: () => Effect.void,
@@ -795,7 +838,7 @@ describe("DesktopWindow", () => {
   // Chromium hands the main window's zoom level down to embedded preview
   // guests, so every app zoom has to put the preview browser back at its own
   // zoom or zooming the UI drags the previewed page with it.
-  it.effect("zooms main with a focused popup and reapplies preview zoom", () =>
+  it.effect("zooms main with a focused unregistered popup and reapplies preview zoom", () =>
     Effect.gen(function* () {
       const fakeWindow = makeFakeBrowserWindow();
       const popup = makeFakeBrowserWindow();
@@ -825,6 +868,50 @@ describe("DesktopWindow", () => {
         );
         assert.deepEqual(previewZoomReapplies, [-0.5, -1, -0.5, 0]);
         assert.equal(popup.setZoomLevel.mock.calls.length, 0);
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("zooms a focused registered pop-out window without touching main", () =>
+    Effect.gen(function* () {
+      const main = makeFakeBrowserWindow();
+      const popout = makeFakeBrowserWindow();
+      const created = [main, popout];
+      let nextIndex = 0;
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const focusedWindowRef = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(
+        Option.none(),
+      );
+      const layer = layerTest({
+        window: main.window,
+        createCount,
+        mainWindow,
+        focusedWindowRef,
+        createWindow: () => (created[nextIndex++] ?? makeFakeBrowserWindow()).window,
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+        assert.isTrue(
+          yield* desktopWindow.openThreadPopout({
+            routePath: "/local/thread-zoom",
+            title: "Zoom Thread",
+          }),
+        );
+
+        yield* Ref.set(focusedWindowRef, Option.some(popout.window));
+        yield* desktopWindow.zoomMain("in");
+        yield* desktopWindow.zoomMain("in");
+        yield* desktopWindow.zoomMain("out");
+        yield* desktopWindow.zoomMain("reset");
+
+        assert.deepEqual(
+          popout.setZoomLevel.mock.calls.map(([level]) => level),
+          [0.5, 1, 0.5, 0],
+        );
+        assert.equal(main.setZoomLevel.mock.calls.length, 0);
       }).pipe(Effect.provide(layer));
     }),
   );
@@ -1891,6 +1978,239 @@ describe("DesktopWindow", () => {
           popoutWindow.loadURL.mock.calls.at(-1)?.[0],
           "v3code-dev://app/#/popout/thread/thread-99?env=local",
         );
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect(
+    "reuses a ready warm pop-out window across different routes and schedules a replacement",
+    () =>
+      Effect.gen(function* () {
+        const created: ReturnType<typeof makeFakeBrowserWindow>[] = [];
+        const createdWindowOptions: Electron.BrowserWindowConstructorOptions[] = [];
+        const events: string[] = [];
+        const createCount = yield* Ref.make(0);
+        const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+        const revealed: Electron.BrowserWindow[] = [];
+        const layer = layerTest({
+          window: makeFakeBrowserWindow().window,
+          createCount,
+          mainWindow,
+          createdWindowOptions,
+          onReveal: (window) => {
+            revealed.push(window);
+            events.push(`reveal:${window.webContents.id}`);
+          },
+          createWindow: () => {
+            const fake = makeFakeBrowserWindow();
+            fake.executeJavaScript.mockImplementation((code: string) => {
+              events.push(`nav:${fake.window.webContents.id}:${code}`);
+              return Promise.resolve();
+            });
+            created.push(fake);
+            return fake.window;
+          },
+        });
+
+        yield* Effect.gen(function* () {
+          const desktopWindow = yield* DesktopWindow.DesktopWindow;
+          yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+          const main = created[0]!;
+          main.getBounds.mockReturnValue({ x: 100, y: 80, width: 1200, height: 800 });
+          assert.equal(created.length, 1);
+
+          main.windowListeners.get("ready-to-show")?.();
+          yield* Effect.promise(() => Promise.resolve());
+          yield* Effect.yieldNow;
+
+          assert.equal(created.length, 2);
+          const warm1 = created[1]!;
+          assert.deepEqual(warm1.loadURL.mock.calls, [["v3code-dev://app/#/?popout=1"]]);
+          assert.isFalse(createdWindowOptions[1]?.show);
+          assert.isFalse(createdWindowOptions[1]?.webPreferences?.backgroundThrottling);
+          assert.equal(revealed.length, 1);
+
+          warm1.webContentsListeners.get("did-finish-load")?.();
+          events.length = 0;
+
+          assert.isTrue(
+            yield* desktopWindow.openThreadPopout({
+              routePath: "/local/thread-1",
+              title: "Thread One",
+            }),
+          );
+          yield* Effect.yieldNow;
+          yield* Effect.promise(() => Promise.resolve());
+
+          // Claiming warm1 navigated hash before reveal and scheduled warm2 as replacement.
+          assert.deepEqual(events, [
+            `nav:${warm1.window.webContents.id}:window.location.hash = "#/local/thread-1?popout=1"`,
+            `reveal:${warm1.window.webContents.id}`,
+          ]);
+          assert.deepEqual(warm1.setTitle.mock.calls, [["Thread One - V3 Code (Dev)"]]);
+          assert.deepEqual(warm1.setPosition.mock.calls, [[128, 108]]);
+          assert.deepEqual(warm1.setBackgroundThrottling.mock.calls, [[true]]);
+
+          // Blank page-title-updated restores the claimed thread's title.
+          const preventDefault = vi.fn();
+          warm1.windowListeners.get("page-title-updated")?.({ preventDefault }, "   ");
+          assert.equal(preventDefault.mock.calls.length, 1);
+          assert.deepEqual(warm1.setTitle.mock.calls, [
+            ["Thread One - V3 Code (Dev)"],
+            ["Thread One - V3 Code (Dev)"],
+          ]);
+
+          assert.equal(created.length, 3);
+          const warm2 = created[2]!;
+          assert.deepEqual(warm2.loadURL.mock.calls, [["v3code-dev://app/#/?popout=1"]]);
+
+          warm2.webContentsListeners.get("did-finish-load")?.();
+          events.length = 0;
+
+          assert.isTrue(
+            yield* desktopWindow.openThreadPopout({
+              routePath: "/local/thread-2",
+              title: "Thread Two",
+            }),
+          );
+          yield* Effect.yieldNow;
+          yield* Effect.promise(() => Promise.resolve());
+
+          assert.deepEqual(events, [
+            `nav:${warm2.window.webContents.id}:window.location.hash = "#/local/thread-2?popout=1"`,
+            `reveal:${warm2.window.webContents.id}`,
+          ]);
+          assert.deepEqual(warm2.setTitle.mock.calls, [["Thread Two - V3 Code (Dev)"]]);
+          assert.deepEqual(warm2.setPosition.mock.calls, [[156, 136]]);
+          assert.equal(created.length, 4);
+          assert.deepEqual(created[3]!.loadURL.mock.calls, [["v3code-dev://app/#/?popout=1"]]);
+        }).pipe(Effect.provide(layer));
+      }),
+  );
+
+  it.effect("falls back to cold pop-out creation when the warm window is not ready yet", () =>
+    Effect.gen(function* () {
+      const created: ReturnType<typeof makeFakeBrowserWindow>[] = [];
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const revealed: Electron.BrowserWindow[] = [];
+      const layer = layerTest({
+        window: makeFakeBrowserWindow().window,
+        createCount,
+        mainWindow,
+        onReveal: (window) => {
+          revealed.push(window);
+        },
+        createWindow: () => {
+          const fake = makeFakeBrowserWindow();
+          created.push(fake);
+          return fake.window;
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+        created[0]!.windowListeners.get("ready-to-show")?.();
+        yield* Effect.promise(() => Promise.resolve());
+        yield* Effect.yieldNow;
+
+        assert.equal(created.length, 2);
+        const warm = created[1]!;
+
+        assert.isTrue(
+          yield* desktopWindow.openThreadPopout({
+            routePath: "/local/thread-cold",
+            title: "Cold Thread",
+          }),
+        );
+        assert.equal(created.length, 3);
+        const cold = created[2]!;
+        assert.deepEqual(cold.loadURL.mock.calls, [
+          ["v3code-dev://app/#/local/thread-cold?popout=1"],
+        ]);
+        assert.equal(warm.executeJavaScript.mock.calls.length, 0);
+
+        warm.webContentsListeners.get("did-finish-load")?.();
+        assert.isTrue(
+          yield* desktopWindow.openThreadPopout({
+            routePath: "/local/thread-warm",
+            title: "Warm Thread",
+          }),
+        );
+        assert.deepEqual(warm.executeJavaScript.mock.calls, [
+          ['window.location.hash = "#/local/thread-warm?popout=1"'],
+        ]);
+        assert.isTrue(revealed.includes(warm.window));
+      }).pipe(Effect.provide(layer));
+    }),
+  );
+
+  it.effect("clears the warm pool when the warm window closes or its renderer crashes", () =>
+    Effect.gen(function* () {
+      const created: ReturnType<typeof makeFakeBrowserWindow>[] = [];
+      const createCount = yield* Ref.make(0);
+      const mainWindow = yield* Ref.make<Option.Option<Electron.BrowserWindow>>(Option.none());
+      const layer = layerTest({
+        window: makeFakeBrowserWindow().window,
+        createCount,
+        mainWindow,
+        createWindow: () => {
+          const fake = makeFakeBrowserWindow();
+          created.push(fake);
+          return fake.window;
+        },
+      });
+
+      yield* Effect.gen(function* () {
+        const desktopWindow = yield* DesktopWindow.DesktopWindow;
+        yield* desktopWindow.handleBackendReady(new URL("http://127.0.0.1:3773"));
+        created[0]!.windowListeners.get("ready-to-show")?.();
+        yield* Effect.promise(() => Promise.resolve());
+        yield* Effect.yieldNow;
+
+        assert.equal(created.length, 2);
+        const warm1 = created[1]!;
+        warm1.webContentsListeners.get("did-finish-load")?.();
+        warm1.windowListeners.get("close")?.();
+
+        // Warm pool is now empty, so openThreadPopout falls back to a cold window.
+        assert.isTrue(
+          yield* desktopWindow.openThreadPopout({
+            routePath: "/local/after-close",
+            title: "After Close",
+          }),
+        );
+        assert.equal(created.length, 3);
+        const cold1 = created[2]!;
+        assert.equal(warm1.executeJavaScript.mock.calls.length, 0);
+        assert.deepEqual(cold1.loadURL.mock.calls, [
+          ["v3code-dev://app/#/local/after-close?popout=1"],
+        ]);
+
+        // Revealing the cold popout warms a replacement window.
+        cold1.windowListeners.get("ready-to-show")?.();
+        yield* Effect.promise(() => Promise.resolve());
+        yield* Effect.yieldNow;
+        assert.equal(created.length, 4);
+        const warm2 = created[3]!;
+        warm2.webContentsListeners.get("did-finish-load")?.();
+
+        // render-process-gone clears the pool and closes the crashed warm window.
+        warm2.webContentsListeners.get("render-process-gone")?.({}, { reason: "crashed" });
+        assert.equal(warm2.close.mock.calls.length, 1);
+
+        assert.isTrue(
+          yield* desktopWindow.openThreadPopout({
+            routePath: "/local/after-crash",
+            title: "After Crash",
+          }),
+        );
+        assert.equal(created.length, 5);
+        assert.equal(warm2.executeJavaScript.mock.calls.length, 0);
+        assert.deepEqual(created[4]!.loadURL.mock.calls, [
+          ["v3code-dev://app/#/local/after-crash?popout=1"],
+        ]);
       }).pipe(Effect.provide(layer));
     }),
   );

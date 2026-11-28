@@ -1,4 +1,5 @@
 import {
+  DEFAULT_SERVER_SETTINGS,
   type ProviderInstanceConfig,
   ProviderInstanceId,
   USAGE_CONTRACT_VERSION,
@@ -44,7 +45,12 @@ import {
   usageTimestampFilter,
   UsageAggregator,
 } from "./usageAggregation.ts";
-import { createOverrideRateTable, parseRateTable, type RateTable } from "./usagePricing.ts";
+import {
+  createOverrideRateTable,
+  lookupRate,
+  parseRateTable,
+  type RateTable,
+} from "./usagePricing.ts";
 import {
   DESKTOP_HOST_SCOPE_ENV,
   listTranscriptFiles,
@@ -147,11 +153,22 @@ const decodeCachedSources = Schema.decodeUnknownOption(
   }),
 );
 
+export interface UsageModelRate {
+  readonly inputPerToken: number;
+  readonly cacheReadPerToken: number;
+  readonly cacheWritePerToken: number;
+  readonly outputPerToken: number;
+}
+
 export class UsageService extends Context.Service<
   UsageService,
   {
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
     readonly refreshRates: Effect.Effect<UsagePricing>;
+    readonly lookupRates: (
+      provider: UsageProviderKind | undefined,
+      models: ReadonlyArray<string>,
+    ) => Effect.Effect<ReadonlyMap<string, UsageModelRate>>;
   }
 >()("v3code/usage/UsageService") {}
 
@@ -1167,7 +1184,55 @@ export const make = Effect.gen(function* () {
     return yield* Deferred.await(deferred);
   });
 
-  return { readSummary, refreshRates, awaitPersisted } as const;
+  const lookupRates = Effect.fn("UsageService.lookupRates")(function* (
+    provider: UsageProviderKind | undefined,
+    models: ReadonlyArray<string>,
+  ) {
+    yield* ensureRates(false);
+    const settings = yield* settingsService.getSettings.pipe(
+      Effect.orElseSucceed(() => DEFAULT_SERVER_SETTINGS),
+    );
+    const priceOverrides = createOverrideRateTable(settings.usagePriceOverrides);
+    const modelAliases = resolveModelAliases(settings.usageModelAliases);
+    const rateModelFor = provider === undefined ? undefined : providerRateModels.get(provider);
+    const resolved = new Map<string, UsageModelRate>();
+    for (const model of models) {
+      if (resolved.has(model)) continue;
+      if (model.trim().length === 0) continue;
+      const alias = modelAliases.get(model);
+      const effectiveModel = alias ?? model;
+      const mappedRateModel =
+        alias === undefined
+          ? rateModelFor?.(model)
+          : lookupRate(rates, effectiveModel) === null
+            ? rateModelFor?.(effectiveModel)
+            : undefined;
+      const rate =
+        priceOverrides.get(effectiveModel.trim()) ??
+        (mappedRateModel === undefined ? null : lookupRate(rates, mappedRateModel)) ??
+        lookupRate(rates, effectiveModel);
+      if (
+        rate === null ||
+        !Number.isFinite(rate.inputCostPerToken) ||
+        !Number.isFinite(rate.outputCostPerToken) ||
+        !Number.isFinite(rate.cacheReadCostPerToken)
+      ) {
+        continue;
+      }
+      const cacheWritePerToken = Number.isFinite(rate.cacheCreationCostPerToken)
+        ? rate.cacheCreationCostPerToken
+        : rate.inputCostPerToken;
+      resolved.set(model, {
+        inputPerToken: rate.inputCostPerToken,
+        cacheReadPerToken: rate.cacheReadCostPerToken,
+        cacheWritePerToken,
+        outputPerToken: rate.outputCostPerToken,
+      });
+    }
+    return resolved as ReadonlyMap<string, UsageModelRate>;
+  });
+
+  return { readSummary, refreshRates, lookupRates, awaitPersisted } as const;
 });
 
 export const layer = Layer.effect(UsageService, make);
