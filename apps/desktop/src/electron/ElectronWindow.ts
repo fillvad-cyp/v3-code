@@ -118,6 +118,7 @@ export class ElectronWindow extends Context.Service<
     readonly main: Effect.Effect<Option.Option<Electron.BrowserWindow>>;
     readonly currentMainOrFirst: Effect.Effect<Option.Option<Electron.BrowserWindow>>;
     readonly focusedMainOrFirst: Effect.Effect<Option.Option<Electron.BrowserWindow>>;
+    readonly focusedAppOrMain: Effect.Effect<Option.Option<Electron.BrowserWindow>>;
     readonly setMain: (window: Electron.BrowserWindow) => Effect.Effect<void>;
     readonly clearMain: (window: Option.Option<Electron.BrowserWindow>) => Effect.Effect<void>;
     readonly registerAppWindow: (window: Electron.BrowserWindow) => Effect.Effect<void>;
@@ -204,20 +205,33 @@ export const make = Effect.gen(function* () {
     return first;
   });
 
+  const getFocusedWindow = Effect.try({
+    try: () => Option.fromNullishOr(Electron.BrowserWindow.getFocusedWindow() ?? null),
+    catch: (cause) =>
+      new ElectronWindowOperationError({
+        operation: "get-focused-window",
+        platform,
+        windowId: null,
+        channel: null,
+        cause,
+      }),
+  }).pipe(Effect.orDie);
+
   const focusedMainOrFirst = Effect.gen(function* () {
-    const focused = yield* Effect.try({
-      try: () => Option.fromNullishOr(Electron.BrowserWindow.getFocusedWindow() ?? null),
-      catch: (cause) =>
-        new ElectronWindowOperationError({
-          operation: "get-focused-window",
-          platform,
-          windowId: null,
-          channel: null,
-          cause,
-        }),
-    }).pipe(Effect.orDie);
+    const focused = yield* getFocusedWindow;
     if (Option.isSome(focused) && !(yield* isWindowDestroyed(focused.value))) {
       return focused;
+    }
+    return yield* currentMainOrFirst;
+  });
+
+  const focusedAppOrMain = Effect.gen(function* () {
+    const focused = yield* getFocusedWindow;
+    if (Option.isSome(focused) && trustedAppWindows.has(focused.value)) {
+      if (!(yield* isWindowDestroyed(focused.value))) {
+        return focused;
+      }
+      trustedAppWindows.delete(focused.value);
     }
     return yield* currentMainOrFirst;
   });
@@ -262,6 +276,7 @@ export const make = Effect.gen(function* () {
     main: liveMain,
     currentMainOrFirst,
     focusedMainOrFirst,
+    focusedAppOrMain,
     setMain: Effect.fn("ElectronWindow.setMain")(function (window) {
       return Ref.set(mainWindowRef, Option.some(window));
     }),

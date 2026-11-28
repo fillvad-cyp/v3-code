@@ -1,6 +1,7 @@
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -55,6 +56,15 @@ class ContextMenuImageCopyError extends Schema.TaggedError<ContextMenuImageCopyE
 ) {
   override get message(): string {
     return "Could not copy the context-menu image.";
+  }
+}
+
+class PopoutNavigationError extends Schema.TaggedError<PopoutNavigationError>()(
+  "PopoutNavigationError",
+  { cause: Schema.Defect() },
+) {
+  override get message(): string {
+    return "Could not navigate the warm pop-out window.";
   }
 }
 // Match --workspace-topbar-height in apps/web/src/index.css; native macOS buttons stay 14 points at any zoom.
@@ -113,6 +123,18 @@ function isValidThreadPopoutRoutePath(routePath: string): boolean {
       return false;
     }
   });
+}
+
+function buildPopoutHash(routePath: string): string {
+  return `#${routePath}?popout=1`;
+}
+
+function buildPopoutUrl(applicationUrl: string, routePath: string): string {
+  return `${applicationUrl}${buildPopoutHash(routePath)}`;
+}
+
+function buildPopoutHashNavigationScript(routePath: string): string {
+  return `window.location.hash = ${JSON.stringify(buildPopoutHash(routePath))}`;
 }
 const DEVELOPMENT_LOAD_RETRY_DELAYS_MS = [100, 250, 500, 1_000, 2_000] as const;
 const RENDERER_RECOVERY_RELOAD_DELAY_MS = 500;
@@ -621,6 +643,313 @@ export const make = Effect.gen(function* () {
     yield* previewManager.reapplyZoom();
   });
 
+  type PopoutWindowHandle = {
+    readonly window: Electron.BrowserWindow;
+    readonly webContentsId: number;
+    title: string;
+    routePath: string | null;
+    ready: boolean;
+    revealed: boolean;
+    readonly reveal: () => Effect.Effect<void>;
+  };
+
+  let warmPopout: PopoutWindowHandle | null = null;
+
+  const formatPopoutTitle = (title?: string): string => {
+    const cleanTitle = title?.trim();
+    return cleanTitle && cleanTitle.length > 0
+      ? `${cleanTitle} - ${environment.displayName}`
+      : environment.displayName;
+  };
+
+  const computePopoutPosition = Effect.gen(function* () {
+    const anchor = yield* electronWindow.focusedMainOrFirst;
+    const cascadeIndex = popoutWindows.size % 6;
+    const cascadeOffset = (cascadeIndex + 1) * THREAD_POPOUT_CASCADE_STEP_PX;
+    const anchorBounds =
+      Option.isSome(anchor) && !anchor.value.isDestroyed() ? anchor.value.getBounds() : null;
+    return anchorBounds !== null
+      ? { x: anchorBounds.x + cascadeOffset, y: anchorBounds.y + cascadeOffset }
+      : null;
+  });
+
+  const createPopoutWindow = Effect.fn("desktop.window.createPopoutWindow")(function* (input: {
+    readonly applicationUrl: string;
+    readonly title: string;
+    readonly position: { readonly x: number; readonly y: number } | null;
+    readonly routePath: string | null;
+    readonly autoReveal: boolean;
+    readonly onRevealed?: () => void;
+  }): Effect.fn.Return<Option.Option<PopoutWindowHandle>, DesktopWindowError> {
+    if (yield* Ref.get(desktopState.quitting)) return Option.none();
+    const iconPaths = yield* assets.iconPaths;
+    const iconOption = getIconOption(iconPaths, environment.platform);
+    const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
+    if (yield* Ref.get(desktopState.quitting)) return Option.none();
+
+    const popout = yield* electronWindow.create(
+      {
+        ...THREAD_POPOUT_DEFAULT_SIZE,
+        ...input.position,
+        minWidth: THREAD_POPOUT_MIN_SIZE.width,
+        minHeight: THREAD_POPOUT_MIN_SIZE.height,
+        show: false,
+        autoHideMenuBar: true,
+        ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
+        backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
+        ...iconOption,
+        title: input.title,
+        ...getWindowTitleBarOptions(shouldUseDarkColors, environment.platform),
+        webPreferences: {
+          preload: environment.preloadPath,
+          backgroundThrottling: false,
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          spellcheck: false,
+          webviewTag: true,
+          disableHtmlFullscreenWindowResize: true,
+        },
+      },
+      { auxiliary: true },
+    );
+
+    if (yield* Ref.get(desktopState.quitting)) {
+      yield* electronWindow.destroyAll;
+      return Option.none();
+    }
+
+    const popoutWebContentsId = popout.webContents.id;
+    yield* electronWindow.registerAppWindow(popout);
+    if (input.routePath !== null) {
+      popoutWindows.set(input.routePath, popout);
+    }
+    attachRemoteRequestHeadersForWindow(popout, popoutWebContentsId);
+    if (environment.platform === "darwin") {
+      popout.setAutoHideCursor(false);
+    }
+
+    const revealPopout = Effect.gen(function* () {
+      if (handle.revealed || popout.isDestroyed() || (yield* Ref.get(desktopState.quitting))) {
+        return false;
+      }
+      handle.revealed = true;
+      popout.webContents.setBackgroundThrottling(true);
+      yield* electronWindow.reveal(popout);
+      return true;
+    });
+
+    const handle: PopoutWindowHandle = {
+      window: popout,
+      webContentsId: popoutWebContentsId,
+      title: input.title,
+      routePath: input.routePath,
+      ready: false,
+      revealed: false,
+      reveal: () => revealPopout.pipe(Effect.asVoid),
+    };
+
+    const cleanupPopout = () => {
+      if (warmPopout === handle) {
+        warmPopout = null;
+      }
+      if (handle.routePath !== null && popoutWindows.get(handle.routePath) === popout) {
+        popoutWindows.delete(handle.routePath);
+      }
+      detachRemoteRequestHeadersForWindow(popoutWebContentsId);
+    };
+
+    popout.webContents.on("will-attach-webview", (event, webPreferences, params) => {
+      if (
+        typeof params.partition !== "string" ||
+        !previewManager.isBrowserPartition(params.partition)
+      ) {
+        event.preventDefault();
+        return;
+      }
+      webPreferences.sandbox = true;
+      webPreferences.nodeIntegration = false;
+      webPreferences.nodeIntegrationInSubFrames = false;
+      webPreferences.contextIsolation = true;
+      webPreferences.disableHtmlFullscreenWindowResize = true;
+      if (previewPasskeys.bridgeEnabled) {
+        webPreferences.additionalArguments = [
+          ...(webPreferences.additionalArguments ?? []),
+          PASSKEY_BRIDGE_ARGUMENT,
+        ];
+      }
+      if (!primaryPaste.enabled) {
+        webPreferences.additionalArguments = [
+          ...(webPreferences.additionalArguments ?? []),
+          PRIMARY_PASTE_DISABLED_ARGUMENT,
+        ];
+      }
+    });
+
+    installContextMenu(popout, popout.webContents);
+    popout.webContents.on("did-attach-webview", (_event, contents) => {
+      installContextMenu(popout, contents, true);
+      void runPromise(previewManager.prepareWebview(contents));
+    });
+    popout.webContents.setWindowOpenHandler(({ url }) => {
+      if (Option.isSome(ElectronShell.parseWebExternalUrl(url))) {
+        void runPromise(electronShell.openExternal(url));
+      }
+      return { action: "deny" };
+    });
+    if (
+      typeof popout.webContents.getUserAgent === "function" &&
+      typeof popout.webContents.setUserAgent === "function"
+    ) {
+      const sanitizedUserAgent = popout.webContents
+        .getUserAgent()
+        .replace(/\s*(?:T3Code|V3Code|Electron)\/[^\s]+/gi, "")
+        .trim();
+      if (sanitizedUserAgent.length > 0) {
+        popout.webContents.setUserAgent(sanitizedUserAgent);
+      }
+    }
+    popout.webContents.on("will-navigate", (event, url) => {
+      if (
+        isSameOriginRendererNavigation({ applicationUrl: input.applicationUrl, navigationUrl: url })
+      ) {
+        return;
+      }
+      event.preventDefault();
+      if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
+        void runPromise(electronShell.openExternal(url));
+      }
+    });
+    const popoutQuitShortcutHandler = makeQuitShortcutHandler({
+      platform: environment.platform,
+      getMode: () =>
+        runPromise(
+          Effect.map(
+            clientSettings.get,
+            Option.match({
+              onNone: () => DEFAULT_CLIENT_SETTINGS.confirmQuit,
+              onSome: (settings) => settings.confirmQuit,
+            }),
+          ),
+        ),
+      notify: (hint) => {
+        if (!popout.isDestroyed()) {
+          popout.webContents.send(QUIT_SHORTCUT_CHANNEL, hint);
+        }
+      },
+      concealWindow: () => concealPendingQuitWindow(popout),
+      quit: () => {
+        void runPromise(electronApp.quit);
+      },
+    });
+    popout.webContents.on("before-input-event", (event, keyInput) => {
+      popoutQuitShortcutHandler(event, keyInput);
+      if (popout.isDestroyed()) return;
+      const modifier = environment.platform === "darwin" ? keyInput.meta : keyInput.control;
+      if (
+        keyInput.type === "keyDown" &&
+        !keyInput.isAutoRepeat &&
+        modifier &&
+        !keyInput.alt &&
+        !keyInput.shift &&
+        keyInput.key.toLowerCase() === "w"
+      ) {
+        event.preventDefault();
+        popout.close();
+      }
+    });
+    popout.webContents.on("zoom-changed", (_event, direction) => {
+      if (popout.isDestroyed()) return;
+      runFork(zoomWindow(popout, direction));
+    });
+    popout.webContents.on("render-process-gone", () => {
+      cleanupPopout();
+      if (!popout.isDestroyed()) {
+        popout.close();
+      }
+    });
+    popout.on("page-title-updated", (event, nextTitle) => {
+      if (nextTitle.trim() !== "") return;
+      event.preventDefault();
+      popout.setTitle(handle.title);
+    });
+    if (environment.platform === "darwin") {
+      popout.on("enter-full-screen", () => {
+        popout.webContents.send(WINDOW_FULLSCREEN_STATE_CHANNEL, true);
+      });
+      popout.on("leave-full-screen", () => {
+        syncMacosWindowButtons(popout);
+        popout.webContents.send(WINDOW_FULLSCREEN_STATE_CHANNEL, false);
+      });
+    }
+    popout.webContents.on("did-finish-load", () => {
+      handle.ready = true;
+      if (environment.platform === "darwin") syncMacosWindowButtons(popout);
+    });
+
+    if (input.autoReveal) {
+      const revealSubscribers: RevealSubscription[] = [
+        (fire) => popout.once("ready-to-show", fire),
+      ];
+      if (environment.platform === "linux") {
+        revealSubscribers.push((fire) => popout.webContents.once("did-finish-load", fire));
+      }
+      bindFirstRevealTrigger(revealSubscribers, () => {
+        void runPromise(
+          revealPopout.pipe(
+            Effect.tap((didReveal) =>
+              didReveal && input.onRevealed ? Effect.sync(input.onRevealed) : Effect.void,
+            ),
+          ),
+        );
+      });
+    }
+
+    popout.on("close", () => {
+      if (warmPopout === handle) {
+        warmPopout = null;
+      }
+    });
+    popout.on("closed", cleanupPopout);
+
+    return Option.some(handle);
+  });
+
+  const ensureWarmPopout = Effect.gen(function* () {
+    if (yield* Ref.get(desktopState.quitting)) return;
+    if (warmPopout !== null) {
+      if (!warmPopout.window.isDestroyed()) return;
+      warmPopout = null;
+    }
+
+    const applicationUrl = getDesktopUrl(environment.isDevelopment);
+    const created = yield* createPopoutWindow({
+      applicationUrl,
+      title: environment.displayName,
+      position: null,
+      routePath: null,
+      autoReveal: false,
+    });
+    if (Option.isNone(created)) return;
+
+    const handle = created.value;
+    warmPopout = handle;
+    void handle.window.loadURL(buildPopoutUrl(applicationUrl, "/")).catch(() => undefined);
+    yield* logWindowInfo("warm thread pop-out window created");
+  }).pipe(
+    popoutWindowMutex.withPermits(1),
+    Effect.catch((error) =>
+      logWindowWarning("failed to create warm thread pop-out window", {
+        message: error.message,
+      }),
+    ),
+    Effect.withSpan("desktop.window.ensureWarmPopout"),
+  );
+
+  const scheduleWarmPopout = () => {
+    runFork(ensureWarmPopout);
+  };
+
   const createWindow = Effect.fn("desktop.window.createWindow")(function* (): Effect.fn.Return<
     Option.Option<Electron.BrowserWindow>,
     DesktopWindowError
@@ -1121,6 +1450,7 @@ export const make = Effect.gen(function* () {
       if (persistedSettings.mainWindowMaximized) window.maximize();
       yield* electronWindow.reveal(window);
       yield* dismissConnectingSplash;
+      scheduleWarmPopout();
     });
     pendingMainReveals.set(window, revealWhenReady);
     bindFirstRevealTrigger(revealSubscribers, () => {
@@ -1326,7 +1656,7 @@ export const make = Effect.gen(function* () {
     }),
     zoomMain: Effect.fn("desktop.window.zoomMain")(function* (direction) {
       yield* Effect.annotateCurrentSpan({ direction });
-      const window = yield* electronWindow.main;
+      const window = yield* electronWindow.focusedAppOrMain;
       if (Option.isNone(window) || window.value.isDestroyed()) {
         return;
       }
@@ -1363,216 +1693,68 @@ export const make = Effect.gen(function* () {
       popoutWindows.delete(routePath);
 
       const applicationUrl = getDesktopUrl(environment.isDevelopment);
-      const iconPaths = yield* assets.iconPaths;
-      const iconOption = getIconOption(iconPaths, environment.platform);
-      const shouldUseDarkColors = yield* electronTheme.shouldUseDarkColors;
-      const anchor = yield* electronWindow.focusedMainOrFirst;
-      const cascadeIndex = popoutWindows.size % 6;
-      const cascadeOffset = (cascadeIndex + 1) * THREAD_POPOUT_CASCADE_STEP_PX;
-      const anchorBounds =
-        Option.isSome(anchor) && !anchor.value.isDestroyed() ? anchor.value.getBounds() : null;
-      const position =
-        anchorBounds !== null
-          ? { x: anchorBounds.x + cascadeOffset, y: anchorBounds.y + cascadeOffset }
-          : {};
-      const cleanTitle = title?.trim();
-      const popoutTitle =
-        cleanTitle && cleanTitle.length > 0
-          ? `${cleanTitle} - ${environment.displayName}`
-          : environment.displayName;
+      const position = yield* computePopoutPosition;
+      const popoutTitle = formatPopoutTitle(title);
 
-      const popout = yield* electronWindow.create(
-        {
-          ...THREAD_POPOUT_DEFAULT_SIZE,
-          ...position,
-          minWidth: THREAD_POPOUT_MIN_SIZE.width,
-          minHeight: THREAD_POPOUT_MIN_SIZE.height,
-          show: false,
-          autoHideMenuBar: true,
-          ...(environment.platform === "darwin" ? { disableAutoHideCursor: true } : {}),
-          backgroundColor: getInitialWindowBackgroundColor(shouldUseDarkColors),
-          ...iconOption,
-          title: popoutTitle,
-          ...getWindowTitleBarOptions(shouldUseDarkColors, environment.platform),
-          webPreferences: {
-            preload: environment.preloadPath,
-            backgroundThrottling: false,
-            contextIsolation: true,
-            nodeIntegration: false,
-            sandbox: true,
-            spellcheck: false,
-            webviewTag: true,
-            disableHtmlFullscreenWindowResize: true,
-          },
-        },
-        { auxiliary: true },
-      );
-
-      if (yield* Ref.get(desktopState.quitting)) {
-        yield* electronWindow.destroyAll;
-        return false;
+      if (warmPopout !== null && warmPopout.window.isDestroyed()) {
+        warmPopout = null;
       }
-
-      const popoutWebContentsId = popout.webContents.id;
-      yield* electronWindow.registerAppWindow(popout);
-      popoutWindows.set(routePath, popout);
-      attachRemoteRequestHeadersForWindow(popout, popoutWebContentsId);
-      if (environment.platform === "darwin") {
-        popout.setAutoHideCursor(false);
-      }
-
-      const cleanupPopout = () => {
-        if (popoutWindows.get(routePath) === popout) {
-          popoutWindows.delete(routePath);
+      if (warmPopout !== null && warmPopout.ready) {
+        const claimed = warmPopout;
+        warmPopout = null;
+        claimed.title = popoutTitle;
+        claimed.window.setTitle(popoutTitle);
+        if (position !== null) {
+          claimed.window.setPosition(position.x, position.y);
         }
-        detachRemoteRequestHeadersForWindow(popoutWebContentsId);
-      };
-
-      popout.webContents.on("will-attach-webview", (event, webPreferences, params) => {
-        if (
-          typeof params.partition !== "string" ||
-          !previewManager.isBrowserPartition(params.partition)
-        ) {
-          event.preventDefault();
-          return;
-        }
-        webPreferences.sandbox = true;
-        webPreferences.nodeIntegration = false;
-        webPreferences.nodeIntegrationInSubFrames = false;
-        webPreferences.contextIsolation = true;
-        webPreferences.disableHtmlFullscreenWindowResize = true;
-        if (previewPasskeys.bridgeEnabled) {
-          webPreferences.additionalArguments = [
-            ...(webPreferences.additionalArguments ?? []),
-            PASSKEY_BRIDGE_ARGUMENT,
-          ];
-        }
-        if (!primaryPaste.enabled) {
-          webPreferences.additionalArguments = [
-            ...(webPreferences.additionalArguments ?? []),
-            PRIMARY_PASTE_DISABLED_ARGUMENT,
-          ];
-        }
-      });
-
-      installContextMenu(popout, popout.webContents);
-      popout.webContents.on("did-attach-webview", (_event, contents) => {
-        installContextMenu(popout, contents, true);
-        void runPromise(previewManager.prepareWebview(contents));
-      });
-      popout.webContents.setWindowOpenHandler(({ url }) => {
-        if (Option.isSome(ElectronShell.parseWebExternalUrl(url))) {
-          void runPromise(electronShell.openExternal(url));
-        }
-        return { action: "deny" };
-      });
-      if (
-        typeof popout.webContents.getUserAgent === "function" &&
-        typeof popout.webContents.setUserAgent === "function"
-      ) {
-        const sanitizedUserAgent = popout.webContents
-          .getUserAgent()
-          .replace(/\s*(?:T3Code|V3Code|Electron)\/[^\s]+/gi, "")
-          .trim();
-        if (sanitizedUserAgent.length > 0) {
-          popout.webContents.setUserAgent(sanitizedUserAgent);
-        }
-      }
-      popout.webContents.on("will-navigate", (event, url) => {
-        if (isSameOriginRendererNavigation({ applicationUrl, navigationUrl: url })) {
-          return;
-        }
-        event.preventDefault();
-        if (Option.isSome(ElectronShell.parseSafeExternalUrl(url))) {
-          void runPromise(electronShell.openExternal(url));
-        }
-      });
-      const popoutQuitShortcutHandler = makeQuitShortcutHandler({
-        platform: environment.platform,
-        getMode: () =>
-          runPromise(
-            Effect.map(
-              clientSettings.get,
-              Option.match({
-                onNone: () => DEFAULT_CLIENT_SETTINGS.confirmQuit,
-                onSome: (settings) => settings.confirmQuit,
-              }),
-            ),
-          ),
-        notify: (hint) => {
-          if (!popout.isDestroyed()) {
-            popout.webContents.send(QUIT_SHORTCUT_CHANNEL, hint);
-          }
-        },
-        concealWindow: () => concealPendingQuitWindow(popout),
-        quit: () => {
-          void runPromise(electronApp.quit);
-        },
-      });
-      popout.webContents.on("before-input-event", (event, keyInput) => {
-        popoutQuitShortcutHandler(event, keyInput);
-        if (popout.isDestroyed()) return;
-        const modifier = environment.platform === "darwin" ? keyInput.meta : keyInput.control;
-        if (
-          keyInput.type === "keyDown" &&
-          !keyInput.isAutoRepeat &&
-          modifier &&
-          !keyInput.alt &&
-          !keyInput.shift &&
-          keyInput.key.toLowerCase() === "w"
-        ) {
-          event.preventDefault();
-          popout.close();
-        }
-      });
-      popout.webContents.on("zoom-changed", (_event, direction) => {
-        if (popout.isDestroyed()) return;
-        runFork(zoomWindow(popout, direction));
-      });
-      popout.webContents.on("render-process-gone", () => {
-        cleanupPopout();
-        if (!popout.isDestroyed()) {
-          popout.close();
-        }
-      });
-      popout.on("page-title-updated", (event, nextTitle) => {
-        if (nextTitle.trim() !== "") return;
-        event.preventDefault();
-        popout.setTitle(popoutTitle);
-      });
-      if (environment.platform === "darwin") {
-        popout.on("enter-full-screen", () => {
-          popout.webContents.send(WINDOW_FULLSCREEN_STATE_CHANNEL, true);
-        });
-        popout.on("leave-full-screen", () => {
-          syncMacosWindowButtons(popout);
-          popout.webContents.send(WINDOW_FULLSCREEN_STATE_CHANNEL, false);
-        });
-      }
-      popout.webContents.on("did-finish-load", () => {
-        if (environment.platform === "darwin") syncMacosWindowButtons(popout);
-      });
-
-      const revealSubscribers: RevealSubscription[] = [
-        (fire) => popout.once("ready-to-show", fire),
-      ];
-      if (environment.platform === "linux") {
-        revealSubscribers.push((fire) => popout.webContents.once("did-finish-load", fire));
-      }
-      bindFirstRevealTrigger(revealSubscribers, () => {
-        void runPromise(
-          Effect.gen(function* () {
-            if (popout.isDestroyed() || (yield* Ref.get(desktopState.quitting))) return;
-            popout.webContents.setBackgroundThrottling(true);
-            yield* electronWindow.reveal(popout);
+        const navigationExit = yield* Effect.exit(
+          Effect.tryPromise({
+            try: () =>
+              claimed.window.webContents.executeJavaScript(
+                buildPopoutHashNavigationScript(routePath),
+              ),
+            catch: (cause) => new PopoutNavigationError({ cause }),
           }),
         );
+        if (Exit.isSuccess(navigationExit) && !claimed.window.isDestroyed()) {
+          if (yield* Ref.get(desktopState.quitting)) {
+            yield* electronWindow.destroyAll;
+            return false;
+          }
+          claimed.routePath = routePath;
+          popoutWindows.set(routePath, claimed.window);
+          yield* claimed.reveal();
+          scheduleWarmPopout();
+          yield* logWindowInfo("thread pop-out window opened from warm pool", { routePath });
+          return true;
+        }
+        if (!claimed.window.isDestroyed()) {
+          claimed.window.close();
+        }
+        if (yield* Ref.get(desktopState.quitting)) {
+          return false;
+        }
+        yield* logWindowWarning(
+          "warm thread pop-out navigation failed; falling back to cold open",
+          {
+            routePath,
+          },
+        );
+      }
+
+      const created = yield* createPopoutWindow({
+        applicationUrl,
+        title: popoutTitle,
+        position,
+        routePath,
+        autoReveal: true,
+        onRevealed: scheduleWarmPopout,
       });
+      if (Option.isNone(created)) return false;
 
-      popout.on("closed", cleanupPopout);
-
-      const popoutUrl = `${applicationUrl}#${routePath}?popout=1`;
-      void popout.loadURL(popoutUrl).catch(() => undefined);
+      void created.value.window
+        .loadURL(buildPopoutUrl(applicationUrl, routePath))
+        .catch(() => undefined);
       yield* logWindowInfo("thread pop-out window created", { routePath });
       return true;
     }, popoutWindowMutex.withPermits(1)),

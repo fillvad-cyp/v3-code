@@ -261,4 +261,52 @@ describe("ElectronWindow", () => {
       assert.isTrue(afterClose._tag === "None");
     }).pipe(Effect.provide(layerTest)),
   );
+
+  it.effect(
+    "focusedAppOrMain returns a focused registered app window and falls back to main otherwise",
+    () =>
+      Effect.gen(function* () {
+        const electronWindow = yield* ElectronWindow.ElectronWindow;
+        let popoutClosed: (() => void) | undefined;
+        let popoutDestroyed = false;
+        const main = {
+          isDestroyed: () => false,
+        } as unknown as Electron.BrowserWindow;
+        const popout = {
+          isDestroyed: () => popoutDestroyed,
+          once: (event: string, listener: () => void) => {
+            if (event === "closed") popoutClosed = listener;
+          },
+        } as unknown as Electron.BrowserWindow;
+        const popup = {
+          isDestroyed: () => false,
+        } as unknown as Electron.BrowserWindow;
+
+        yield* electronWindow.setMain(main);
+        yield* electronWindow.registerAppWindow(popout);
+
+        getFocusedWindowMock.mockReturnValue(popout);
+        const focusedPopout = yield* electronWindow.focusedAppOrMain;
+        assert.isTrue(focusedPopout._tag === "Some" && focusedPopout.value === popout);
+
+        getFocusedWindowMock.mockReturnValue(popup);
+        const focusedPopup = yield* electronWindow.focusedAppOrMain;
+        assert.isTrue(focusedPopup._tag === "Some" && focusedPopup.value === main);
+
+        getFocusedWindowMock.mockReturnValue(null);
+        const focusedNone = yield* electronWindow.focusedAppOrMain;
+        assert.isTrue(focusedNone._tag === "Some" && focusedNone.value === main);
+
+        popoutDestroyed = true;
+        getFocusedWindowMock.mockReturnValue(popout);
+        const focusedDestroyed = yield* electronWindow.focusedAppOrMain;
+        assert.isTrue(focusedDestroyed._tag === "Some" && focusedDestroyed.value === main);
+
+        popoutDestroyed = false;
+        yield* electronWindow.registerAppWindow(popout);
+        popoutClosed?.();
+        const focusedAfterClose = yield* electronWindow.focusedAppOrMain;
+        assert.isTrue(focusedAfterClose._tag === "Some" && focusedAfterClose.value === main);
+      }).pipe(Effect.provide(layerTest)),
+  );
 });
